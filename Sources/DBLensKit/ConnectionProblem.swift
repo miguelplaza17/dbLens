@@ -1,0 +1,87 @@
+import Foundation
+
+/// Why a connection failed, in one clear sentence, with the server's own
+/// message under it. Drivers word the same failure differently (and libpq
+/// repeats it for every address it tried); this names the cause the same
+/// way for every database: refused, unknown host, timeout, credentials,
+/// missing database, TLS.
+public enum ConnectionProblem {
+    public static func explain(_ error: Error, url text: String, viaSSH: Bool) -> DatabaseError {
+        let raw = (error as? DatabaseError)?.message ?? error.localizedDescription
+        let detail = clean(raw)
+        guard let headline = headline(for: raw, summary: Connector.summary(text), url: text, viaSSH: viaSSH) else {
+            return DatabaseError(message: detail)
+        }
+        return DatabaseError(message: headline + "\n\n" + detail)
+    }
+
+    static func headline(for raw: String, summary: Connector.Summary?, url text: String, viaSSH: Bool) -> String? {
+        let message = raw.lowercased()
+        func has(_ needles: String...) -> Bool { needles.contains { message.contains($0.lowercased()) } }
+        // Mongo's host may carry its port ("db:27017"); one host is enough for the sentence.
+        var host = summary?.host ?? "localhost"
+        if summary?.port == nil, let colon = host.lastIndex(of: ":"), !host.contains("]") {
+            host = String(host[..<colon])
+        }
+        let place = summary?.port.map { "\(host):\($0)" } ?? host
+        let user = summary?.user ?? ""
+        let database = (summary?.database ?? "").replacingOccurrences(of: "db ", with: "")
+        let tunnel = viaSSH ? String(localized: " (through the SSH tunnel)") : ""
+        let tlsURL = text.lowercased().hasPrefix("rediss://") || has("sslmode=require", "tls=true", "ssl=true")
+
+        if has("ssl", "tls"), has("not support", "não oferece suporte", "does not support", "wrong version", "handshake", "requires") {
+            return String(localized: "TLS didn't work with \(place): the server and the URL disagree on encryption. Check the URL's TLS/SSL setting.")
+        }
+        if has("refused", "(61)", "(36)") {
+            return String(localized: "Nothing answered at \(place)\(tunnel): the connection was refused. Is the server running, and is the port right?")
+        }
+        if has("invalid srv service name") {
+            return String(localized: "\"\(host)\" isn't a valid cluster name for mongodb+srv://. Check the URL's host.")
+        }
+        if has("could not translate host", "traduzir o nome", "unknown server host", "nosuchrecord", "failed to resolve",
+               "nodename nor servname", "failed to look up srv", "host not found", "name or service not known") {
+            return String(localized: "The host \"\(host)\" wasn't found. Check the name, or connect to the VPN or tailnet it lives on.")
+        }
+        if has("timeout", "tempo limite", "timed out", "(60)", "within") {
+            if tlsURL, text.lowercased().hasPrefix("rediss://") {
+                return String(localized: "\(place) didn't answer TLS. If the server doesn't use TLS, use redis:// instead of rediss://.")
+            }
+            return String(localized: "\(place)\(tunnel) didn't answer in time. A firewall may be blocking it, or it needs a VPN, tailnet, or SSH tunnel.")
+        }
+        if has("password authentication failed", "autenticação do tipo senha", "access denied for user", "wrongpass",
+               "authentication failed", "invalid username-password", "invalid password") {
+            return String(localized: "The server refused the login\(user.isEmpty ? "" : " for \"\(user)\""): wrong password, or a user that can't log in.")
+        }
+        if has("noauth") {
+            return String(localized: "The server asks for a password, and the URL has none.")
+        }
+        if has("no pg_hba.conf entry", "nenhuma entrada no pg_hba.conf") {
+            return String(localized: "The server doesn't accept connections from this machine for this user and database (pg_hba.conf).")
+        }
+        if has("role \"", "função \"", "papel \""), has("does not exist", "não existe") {
+            return String(localized: "The user \"\(user)\" doesn't exist on this server.")
+        }
+        if has("database \"", "banco de dados \"", "unknown database"), has("does not exist", "não existe", "unknown database") {
+            return String(localized: "The database \"\(database)\" doesn't exist on this server.")
+        }
+        if has("db index is out of range") {
+            return String(localized: "This Redis server has no database \(database); it has fewer numbered databases.")
+        }
+        if has("file is not a database") {
+            return String(localized: "This file isn't a SQLite database.")
+        }
+        return nil
+    }
+
+    /// The server's message on one or two lines: libpq's repeats for each
+    /// address it tried (::1, then 127.0.0.1) and its tab-indented hints go.
+    static func clean(_ raw: String) -> String {
+        var lines: [String] = []
+        for line in raw.split(separator: "\n").map({ $0.trimmingCharacters(in: .whitespaces) }) where !line.isEmpty {
+            let core = line.replacingOccurrences(of: #"\([^)]*\)"#, with: "", options: .regularExpression)
+            if lines.contains(where: { $0.replacingOccurrences(of: #"\([^)]*\)"#, with: "", options: .regularExpression) == core }) { continue }
+            lines.append(line)
+        }
+        return lines.prefix(3).joined(separator: "\n")
+    }
+}

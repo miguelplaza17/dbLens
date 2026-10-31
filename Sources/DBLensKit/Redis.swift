@@ -439,6 +439,8 @@ final class RedisLink: @unchecked Sendable {
         switch error {
         case .posix(let code):
             return String(cString: strerror(code.rawValue))
+        case .dns:
+            return String(localized: "host not found")
         case .tls(let status):
             let text = SecCopyErrorMessageString(status, nil) as String?
             return String(localized: "TLS failed: \(text ?? String(status))")

@@ -44,7 +44,17 @@ public enum Connector {
         }
     }
 
+    /// Opens a session. A failure names its cause first (`ConnectionProblem`),
+    /// then the server's own message.
     public static func connect(_ text: String, ssh: SSHTunnel.Config?) async throws -> any DatabaseSession {
+        do {
+            return try await open(text, ssh: ssh)
+        } catch {
+            throw ConnectionProblem.explain(error, url: text, viaSSH: ssh != nil)
+        }
+    }
+
+    private static func open(_ text: String, ssh: SSHTunnel.Config?) async throws -> any DatabaseSession {
         guard let engine = Engine.detect(text) else {
             throw DatabaseError(message: String(localized: "This doesn't look like a database URL."))
         }
