@@ -88,6 +88,10 @@ enum SelfTest {
             await model.goForward()
             check("Back and Forward include query results", leftQuery && model.shown == .query && model.shownResult?.rows == [["1", nil]])
             check("runs go to the history, newest first", model.sqlHistory.first?.sql.contains("select 1") == true)
+            let exported = URL(fileURLWithPath: "/tmp/dbLens-selftest-export.csv")
+            await model.export(.csv, to: exported)
+            check("Export writes the result as CSV", (try? String(contentsOf: exported, encoding: .utf8)) == "um,nada\r\n1,\r\n")
+            try? FileManager.default.removeItem(at: exported)
             await model.loadSchema()
             if let table = model.relations.first {
                 let names = model.editorNames

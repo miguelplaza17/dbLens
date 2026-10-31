@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import DBLensKit
 
@@ -109,10 +110,30 @@ struct ResultPane: View {
                     .help("Add a row (Command-Shift-N)")
             }
             CopyRowsButton(result: result, selection: selection)
+            Menu {
+                Button("CSV…") { export(.csv) }
+                Button("JSON…") { export(.json) }
+            } label: {
+                Label("Export", systemImage: "square.and.arrow.up")
+            }
+            .menuStyle(.button)
+            .fixedSize()
+            .help(model.shown == .table ? "Save every row of the table (with the search and order) as a file"
+                                        : "Save the query result as a file")
         }
         .controlSize(.small)
         .padding(.horizontal, Space.md)
         .padding(.vertical, Space.sm)
+    }
+
+    private func export(_ format: AppModel.ExportFormat) {
+        let panel = NSSavePanel()
+        let base = model.shown == .table ? (model.relation?.name ?? "table") : "result"
+        panel.nameFieldStringValue = "\(base).\(format.rawValue)"
+        panel.allowedContentTypes = [format == .csv ? .commaSeparatedText : .json]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        Task { await model.export(format, to: url) }
     }
 
     private func status(_ result: QueryResult) -> String {

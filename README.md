@@ -27,13 +27,16 @@ URL, and dbLens tells which database it is.
   (`DATABASE_URL="…"`), Prisma's `?schema=`, several hosts, Unix sockets, or libpq's
   `host=… dbname=…` form. Or fill in host, port, user, and password.
 - **Click a table, see its rows.** No tree to expand, no "View Data" menu. Pages of
-  50 to 1,000 rows, sorted by the primary key, with column types in the header. Search
-  finds text in any column across every page, on the server.
+  50 to 1,000 rows, sorted by the primary key or by any column you click, with column
+  types in the header. Search finds text in any column across every page, on the server.
+  Export the whole table, or a query result, as CSV or JSON.
 - **Edit in place.** Double-click a cell, type, press Return. Edits use the primary key
   (or `ctid`), run in a transaction, and roll back if they would touch more than one row.
   Add and delete rows, set `NULL`, copy rows or the whole grid as tab-separated text.
-- **Run SQL.** A code editor with line numbers and syntax colors in a panel you can fold
-  away (⇧⌘Y). ⌘↩ runs the selection or everything; the result shows in the same grid.
+- **Run SQL.** A code editor with line numbers, syntax colors, and suggestions for your
+  tables and columns, in a panel you can fold away (⇧⌘Y). ⌘↩ runs the selection or
+  everything; the result shows in the same grid. History keeps what you ran on each
+  connection, a double-click away from running again.
 - **Redis without a manual.** `redis://` or `rediss://`: keys grouped by prefix, each value
   shown by type (strings, hashes, lists, sets, sorted sets, streams) with its TTL, edited in
   place, and a command panel that runs one command per line.

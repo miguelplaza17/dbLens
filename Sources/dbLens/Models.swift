@@ -603,6 +603,41 @@ final class AppModel {
         }
     }
 
+    // MARK: Export
+
+    enum ExportFormat: String { case csv, json }
+
+    /// Saves what the grid shows as CSV or JSON: for a table, every page (with
+    /// the search and order applied, up to 1,000,000 rows); for a query, its result.
+    func export(_ format: ExportFormat, to url: URL) async {
+        guard let session else { return }
+        do {
+            var result: QueryResult
+            if shown == .table, let relation {
+                result = try await session.page(of: relation, limit: 1000, offset: 0, search: tableSearch, sort: tableSort)
+                while result.rows.count % 1000 == 0, !result.rows.isEmpty, result.rows.count < 1_000_000 {
+                    let next = try await session.page(of: relation, limit: 1000, offset: result.rows.count,
+                                                      search: tableSearch, sort: tableSort)
+                    result.rows += next.rows
+                    if next.rows.count < 1000 { break }
+                }
+            } else if let shownResult {
+                result = shownResult
+            } else {
+                return
+            }
+            let rows = result.rows.count
+            let output = result
+            try await Task.detached {
+                let text = format == .csv ? ResultExport.csv(output) : ResultExport.json(output)
+                try Data(text.utf8).write(to: url, options: .atomic)
+            }.value
+            addLog(sql: "", message: String(localized: "Exported \(rows.formatted()) rows to \(url.lastPathComponent)"), isError: false)
+        } catch {
+            addLog(sql: "", message: error.localizedDescription, isError: true)
+        }
+    }
+
     // MARK: History
 
     /// Puts a statement on top of the history (once: running it again moves it up).
