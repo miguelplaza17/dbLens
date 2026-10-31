@@ -81,7 +81,7 @@ Requirements: macOS 26 or later on Apple silicon.
 brew install postgresql@16 mariadb-connector-c mongo-c-driver   # client libraries, bundled into the app
 git clone https://github.com/miguelplaza17/dbLens.git
 cd dbLens
-./build.sh --open                # builds, installs ~/Applications/dbLens.app, opens it
+./build.sh --open                # builds, installs ~/Applications/dbLens Dev.app, opens it
 ```
 
 The project is a Swift package (no Xcode project). `build.sh` builds with SwiftPM, copies
@@ -110,13 +110,13 @@ connection by name; dbLens opens it with the URL it keeps encrypted, through the
 tunnel, so the agent never sees a password.
 
 ```bash
-claude mcp add dblens -- ~/Applications/dbLens.app/Contents/MacOS/dbLens --mcp
+claude mcp add dblens -- /Applications/dbLens.app/Contents/MacOS/dbLens --mcp
 ```
 
 Claude Desktop and Cursor take the same command in their MCP settings:
 
 ```json
-{ "mcpServers": { "dblens": { "command": "/Users/you/Applications/dbLens.app/Contents/MacOS/dbLens", "args": ["--mcp"] } } }
+{ "mcpServers": { "dblens": { "command": "/Applications/dbLens.app/Contents/MacOS/dbLens", "args": ["--mcp"] } } }
 ```
 
 | Tool | What it does |

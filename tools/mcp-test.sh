@@ -6,7 +6,7 @@ set -u
 setopt null_glob
 url=${APP_SEED_URL:-${DBLENS_TEST_URL:-}}
 [[ -n $url ]] || { echo "set DBLENS_TEST_URL to a throwaway Postgres"; exit 1; }
-app=~/Applications/dbLens.app/Contents/MacOS/dbLens
+app=~/Applications/"dbLens Dev.app"/Contents/MacOS/dbLens
 call() {  # call <writable 0|1> <json-rpc lines...>: prints one reply per line
   local writable=$1; shift
   rm -f /tmp/dbLens-mcp.store*  # each round starts from a fresh store

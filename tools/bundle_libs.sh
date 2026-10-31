@@ -6,7 +6,7 @@
 # Usage: tools/bundle_libs.sh path/to/dbLens.app
 set -euo pipefail
 app=${1:?usage: bundle_libs.sh path/to/App.app}
-name=${app:t:r}
+name=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$app/Contents/Info.plist")  # "dbLens Dev.app" still runs dbLens
 bin="$app/Contents/MacOS/$name"
 frameworks="$app/Contents/Frameworks"
 mkdir -p "$frameworks"

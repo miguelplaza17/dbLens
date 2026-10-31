@@ -10,7 +10,7 @@ SwiftData database and no server.
 - `Sources/dbLens/` the app. `App.swift` has the window, menus, and the database location.
 - `Sources/DBLensKit/` rules and data logic with no SwiftUI. Tests in `Tests/DBLensKitTests/`.
 - `Package.swift` a Swift package. There is no Xcode project.
-- `build.sh` builds, signs, and installs `~/Applications/dbLens.app`.
+- `build.sh` builds, signs, and installs `~/Applications/dbLens Dev.app`: its own name, bundle id (`….dev`), and settings, no updates; the released app in /Applications stays as it is. `tools/release.sh` makes the real `dbLens.app`.
 - `Icon/AppIcon.icon` the app icon, an Icon Composer file (JSON plus SVG layers). `build.sh` compiles it with `tools/make_icon.sh`; `tools/icon_review.sh` renders every look into one PNG.
 - `docs/` the brief, the screen index, and the user stories, when they exist.
 

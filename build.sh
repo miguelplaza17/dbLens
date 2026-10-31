@@ -1,5 +1,8 @@
 #!/bin/zsh
-# Builds dbLens and installs it to ~/Applications/dbLens.app.
+# Builds dbLens and installs it to ~/Applications/dbLens Dev.app: a development
+# copy with its own name, bundle id, and settings, and no updates, so it never
+# clashes with the released dbLens in /Applications (same saved connections).
+# tools/release.sh sets APP_DIR and gets the real dbLens.app.
 # Build products live in ~/Library/Developer/dbLens, outside the repo
 # (and outside Dropbox or iCloud, which would try to sync them).
 #
@@ -39,12 +42,19 @@ fi
 
 # APP_DIR puts the app somewhere else (tools/release.sh uses dist/).
 app_dir="${APP_DIR:-$HOME/Applications}"
-app="$app_dir/$name.app"
+dev=$([[ -z "${APP_DIR:-}" ]] && echo 1 || echo 0)
+shown=$([[ $dev == 1 ]] && echo "$name Dev" || echo "$name")
+app="$app_dir/$shown.app"
 mkdir -p "$app_dir"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin" "$app/Contents/MacOS/$name"
 sed -e "s/__BUILD__/$(date +%Y%m%d%H%M)/" -e "s/__VERSION__/$(cat "$here/VERSION")/" "$here/Info.plist.in" > "$app/Contents/Info.plist"
+if [[ $dev == 1 ]]; then
+  plist="$app/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist").dev" \
+    -c "Set :CFBundleName $shown" -c "Set :CFBundleDisplayName $shown" -c "Delete :SUFeedURL" "$plist"
+fi
 # libpq and its libraries go inside the app, so it runs without Homebrew.
 "$here/tools/bundle_libs.sh" "$app" >/dev/null
 # Logos for Settings > Agents.
@@ -76,7 +86,7 @@ codesign "${sign_flags[@]}" "$app" 2>&1 | grep -v "replacing existing signature"
 echo "installed $app (signed: ${identity})"
 
 if [[ " $* " == *" --open "* ]]; then
-  osascript -e "quit app \"$name\"" 2>/dev/null || true
+  osascript -e "quit app \"$shown\"" 2>/dev/null || true
   sleep 0.5
   open "$app"
 fi
