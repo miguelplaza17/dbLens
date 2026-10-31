@@ -189,6 +189,33 @@ public actor SQLiteSession: DatabaseSession {
         return Execution(results: [result], duration: clock.now - start)
     }
 
+    /// One statement in a transaction that is always rolled back.
+    public func rehearse(_ sql: String) throws -> Execution {
+        let clock = ContinuousClock()
+        let start = clock.now
+        let keyword = Self.firstKeyword(sql)
+        guard !["BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE", "VACUUM", "ATTACH", "DETACH"].contains(keyword) else {
+            throw DatabaseError(message: String(localized: "\(keyword) can't be tried and undone."))
+        }
+        guard sqlite3_exec(db, "begin", nil, nil, nil) == SQLITE_OK else { throw lastError() }
+        defer { sqlite3_exec(db, "rollback", nil, nil, nil) }
+        var statement: OpaquePointer?
+        var tail: UnsafePointer<CChar>?
+        let result: QueryResult = try sql.withCString { text in
+            guard sqlite3_prepare_v2(db, text, -1, &statement, &tail) == SQLITE_OK else { throw lastError() }
+            guard let statement else { throw DatabaseError(message: String(localized: "There is no statement to run.")) }
+            defer { sqlite3_finalize(statement) }
+            var next: OpaquePointer?
+            if let tail { sqlite3_prepare_v2(db, tail, -1, &next, nil) }
+            if let next {
+                sqlite3_finalize(next)
+                throw DatabaseError(message: String(localized: "Send one statement at a time."))
+            }
+            return try read(statement)
+        }
+        return Execution(results: [result], duration: clock.now - start)
+    }
+
     private func read(_ statement: OpaquePointer) throws -> QueryResult {
         let count = Int(sqlite3_column_count(statement))
         let columns = (0..<Int32(count)).map { index in

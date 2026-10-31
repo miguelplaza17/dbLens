@@ -20,6 +20,10 @@ public protocol DatabaseSession: AnyObject, Sendable {
     /// refuses writes where it can (a read-only transaction, SQLite's read-only
     /// check); MongoDB and Redis allow only reading methods and commands.
     func readOnly(_ text: String) async throws -> Execution
+    /// Runs one statement and rolls it back, to see what it would do (rows
+    /// affected) before running it for real. Only where every statement can be
+    /// rolled back: Postgres and SQLite.
+    func rehearse(_ text: String) async throws -> Execution
     func relations() async throws -> [Relation]
     /// One page of rows, sorted by the primary key when there is one, with
     /// column types and, when rows can be edited, their keys. A non-empty
@@ -71,6 +75,10 @@ public func likePattern(_ text: String) -> String {
 }
 
 extension DatabaseSession {
+    public func rehearse(_ text: String) async throws -> Execution {
+        throw DatabaseError(message: String(localized: "\(engine.name) can't try a statement and undo it; run it for real or not at all."))
+    }
+
     /// Engines without tables and foreign keys (Redis) have no board.
     public func schemaGraph() async throws -> SchemaGraph { SchemaGraph(tables: [], links: []) }
 

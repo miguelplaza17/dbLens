@@ -58,6 +58,11 @@ URL, and dbLens tells which database it is.
   bound to your Mac's Secure Enclave, and saved passwords never show on screen.
 - **Native and light.** SwiftUI and AppKit, about 12 MB, opens in a blink. Dark only.
 
+- **For agents, too.** `dbLens --mcp` is an MCP server: Claude Code, Claude Desktop, or
+  Cursor read your databases through the connections saved here, without ever seeing a
+  URL or password. Queries are read-only, enforced by the database. Writing is off until
+  you turn on **Let Agents Write** for a connection. [More below](#mcp-server-for-agents).
+
 <p align="center">
   <img src="docs/images/schema.png" width="49%" alt="The schema board with tables and their foreign keys">
   <img src="docs/images/sql.png" width="49%" alt="A query result in the grid, with the SQL editor and log below">
@@ -97,6 +102,33 @@ Releases: `tools/release.sh` signs with a Developer ID certificate, notarizes, s
 makes the DMG, and writes the Sparkle appcast; upload both to the GitHub release. The app
 checks that appcast once a day (and from **dbLens > Check for Updates…**) and installs an
 update only when its signature matches the key in `Info.plist.in`. The steps it needs once are at the top of the script.
+
+## MCP server (for agents)
+
+dbLens's own app is also an [MCP](https://modelcontextprotocol.io) server. Agents pick a
+connection by name; dbLens opens it with the URL it keeps encrypted, through the same SSH
+tunnel, so the agent never sees a password.
+
+```bash
+claude mcp add dblens -- ~/Applications/dbLens.app/Contents/MacOS/dbLens --mcp
+```
+
+Claude Desktop and Cursor take the same command in their MCP settings:
+
+```json
+{ "mcpServers": { "dblens": { "command": "/Users/you/Applications/dbLens.app/Contents/MacOS/dbLens", "args": ["--mcp"] } } }
+```
+
+| Tool | What it does |
+| --- | --- |
+| `list_connections` | Saved connections: name, engine, SSH, whether agents may write. Never the URL. |
+| `list_tables` | Tables and views (Redis keys, MongoDB collections) with estimated rows. |
+| `describe_table` | Columns, types, primary key, foreign keys, and the tables that reference it. |
+| `query` | One read-only statement. PostgreSQL and MySQL run it in a read-only transaction, SQLite only if it changes nothing, MongoDB and Redis only reading methods and commands. |
+| `execute` | Changes data, only where you turned on **Let Agents Write** (right-click the connection). `dry_run` runs it and rolls back, to see the rows affected first (PostgreSQL, SQLite). |
+
+Everything an agent runs shows in the connection's History in the SQL panel, marked
+"via agent". `tools/mcp-test.sh` drives every tool against a throwaway Postgres.
 
 ## Where things are kept
 

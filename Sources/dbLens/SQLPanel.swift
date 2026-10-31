@@ -198,9 +198,15 @@ private struct SQLHistoryList: View {
                             Text(verbatim: entry.sql)
                                 .font(.system(size: 12, design: .monospaced))
                                 .lineLimit(3)
-                            Text(entry.date, format: .relative(presentation: .named))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                            HStack(spacing: Space.xs) {
+                                Text(entry.date, format: .relative(presentation: .named))
+                                if entry.viaAgent == true {
+                                    Text(verbatim: "·")
+                                    Label("via agent", systemImage: "sparkles").labelStyle(.titleAndIcon)
+                                }
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                         }
                         Spacer(minLength: 0)
                     }
@@ -213,5 +219,6 @@ private struct SQLHistoryList: View {
             }
         }
         .frame(width: 480, height: 360)
+        .onAppear { model.reloadHistory() }
     }
 }

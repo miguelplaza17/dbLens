@@ -19,6 +19,9 @@ final class SavedConnection {
     var sshKey: String = ""
     /// Engine.rawValue: which kind of database, for the sidebar icon.
     var engine: String = "postgres"
+    /// Agents using dbLens's MCP server may change data here (the execute tool).
+    /// Off by default; reading is always allowed.
+    var agentsCanWrite: Bool = false
 
     init(name: String) {
         self.name = name
@@ -52,6 +55,8 @@ struct HistoryEntry: Codable, Identifiable, Hashable {
     var sql: String
     var date = Date.now
     var failed = false
+    /// Run by an agent through the MCP server. Optional, so older history still reads.
+    var viaAgent: Bool?
 }
 
 struct LogEntry: Identifiable {
@@ -642,6 +647,8 @@ final class AppModel {
 
     /// Puts a statement on top of the history (once: running it again moves it up).
     private func remember(_ text: String, failed: Bool) {
+        // An agent may have added entries since: start from what's saved.
+        if let activeID, !Store.isOverridden { sqlHistory = Self.loadHistory(for: activeID) }
         sqlHistory.removeAll { $0.sql == text }
         sqlHistory.insert(HistoryEntry(sql: text, failed: failed), at: 0)
         if sqlHistory.count > 100 { sqlHistory.removeLast(sqlHistory.count - 100) }
@@ -665,7 +672,22 @@ final class AppModel {
         UserDefaults.standard.set(data, forKey: "sqlHistory.\(activeID.uuidString)")
     }
 
-    private static func loadHistory(for id: UUID) -> [HistoryEntry] {
+    /// Reads the history again (an agent may have run something since).
+    func reloadHistory() {
+        if let activeID { sqlHistory = Self.loadHistory(for: activeID) }
+    }
+
+    /// Adds what an agent ran to a connection's saved history.
+    static func recordAgentRun(_ text: String, failed: Bool, for id: UUID) {
+        guard !Store.isOverridden else { return }
+        var entries = loadHistory(for: id)
+        entries.removeAll { $0.sql == text }
+        entries.insert(HistoryEntry(sql: text, failed: failed, viaAgent: true), at: 0)
+        if entries.count > 100 { entries.removeLast(entries.count - 100) }
+        if let data = try? JSONEncoder().encode(entries) { UserDefaults.standard.set(data, forKey: "sqlHistory.\(id.uuidString)") }
+    }
+
+    static func loadHistory(for id: UUID) -> [HistoryEntry] {
         guard !Store.isOverridden, let data = UserDefaults.standard.data(forKey: "sqlHistory.\(id.uuidString)") else { return [] }
         return (try? JSONDecoder().decode([HistoryEntry].self, from: data)) ?? []
     }

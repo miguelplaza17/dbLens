@@ -167,6 +167,13 @@ struct Sidebar: View {
             Button("Disconnect", systemImage: "bolt.horizontal.slash") { model.disconnect() }
         }
         Divider()
+        // dbLens's MCP server always lets agents read; writing is opt-in, per connection.
+        Toggle("Let Agents Write", isOn: Binding(get: { connection.agentsCanWrite }, set: { on in
+            connection.agentsCanWrite = on
+            try? model.context.save()
+        }))
+        .help("Agents using dbLens's MCP server may change data on this connection (the execute tool). Reading is always allowed.")
+        Divider()
         Button("Delete…", systemImage: "trash", role: .destructive) {
             if confirmDelete { deleting = connection } else { model.delete(connection) }
         }

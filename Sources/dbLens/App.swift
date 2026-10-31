@@ -18,6 +18,11 @@ struct DBLensApp: App {
     @State private var model = AppModel(container: Store.makeContainer())
     @State private var updater = Updater()
 
+    init() {
+        // `dbLens --mcp`: an MCP server on stdio for agents, no window.
+        if MCPServer.requested { MCPServer.run() }
+    }
+
     var body: some Scene {
         Window("dbLens", id: "main") {
             ContentView()
