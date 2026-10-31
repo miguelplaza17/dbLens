@@ -10,7 +10,7 @@ import Testing
     ("mongodb://u:p@127.0.0.1:59996/db", "No suitable servers found: [connection refused calling hello on '127.0.0.1:59996']", "refused"),
     ("postgresql://u@nohost.example:5432/db", "could not translate host name \"nohost.example\" to address: nodename nor servname provided", "wasn't found"),
     ("redis://nohost.example:6379", "Couldn't connect to nohost.example:6379: host not found", "wasn't found"),
-    ("mongodb://u:p@wikidb-hinqh3:27017/db", "No suitable servers found: [Failed to resolve 'wikidb-hinqh3']", "published port"),
+    ("mongodb://u:p@app-db-x7k2p:27017/db", "No suitable servers found: [Failed to resolve 'app-db-x7k2p']", "published port"),
     ("mongodb://u:p@203.0.113.5:27017/db", "No suitable servers found: [connection refused calling hello on '203.0.113.5:27017']", "External Port"),
     ("postgresql://u@203.0.113.5:5433/db", "connection to server at \"203.0.113.5\", port 5433 failed: Connection refused", "usual port is 5432"),
     ("mysql://u:p@203.0.113.5/db", "Can't connect to server on '203.0.113.5' (60)", "not the whole internet"),

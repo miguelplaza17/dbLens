@@ -1,6 +1,5 @@
 import Foundation
 import DBLensKit
-import Security
 
 /// Connection URLs, which hold passwords, encrypted with AES-GCM under a key
 /// bound to this Mac's Secure Enclave (SecretBox), in files only this Mac user
@@ -8,7 +7,7 @@ import Security
 ///   ~/Library/Application Support/dbLens/connections.enc   the URLs, encrypted
 ///   ~/Library/Application Support/dbLens/connections.key   the Secure Enclave key blob
 /// Not the Keychain: it asked for the Mac password after every rebuild. Older
-/// versions' Keychain items and plain connections.json move here once.
+/// versions' plain connections.json moves here once.
 /// Test runs (APP_STORE in /tmp) keep them in memory.
 enum Secrets {
     private static var cache: [UUID: String]?
@@ -66,7 +65,7 @@ enum Secrets {
             if (try? write(all)) != nil { try? FileManager.default.removeItem(at: plainURL) }
             cache = all
         } else {
-            cache = moveFromKeychain()
+            cache = [:]
         }
         return cache ?? [:]
     }
@@ -106,58 +105,6 @@ enum Secrets {
         return Dictionary(uniqueKeysWithValues: decoded.compactMap { key, url in UUID(uuidString: key).map { ($0, url) } })
     }
 
-    // MARK: Moving out of the Keychain
-
-    private static let keychainService = "com.miguelplaza.dblens"
-    private static let keychainAccount = "connections"
-    /// The first version kept one item per connection under this service.
-    private static let legacyService = "com.miguelplaza.dblens.connection"
-
-    /// Reads what earlier versions kept in the Keychain, writes it to the file,
-    /// and deletes the Keychain items. macOS may ask for the password this one time.
-    private static func moveFromKeychain() -> [UUID: String] {
-        var all: [UUID: String] = [:]
-        if let data = keychainData(service: keychainService, account: keychainAccount) {
-            all = decode(data) ?? [:]
-        }
-        for item in legacyItems() where all[item.0] == nil { all[item.0] = item.1 }
-        guard (try? write(all)) != nil else { return all }
-        SecItemDelete([kSecClass as String: kSecClassGenericPassword,
-                       kSecAttrService as String: keychainService] as CFDictionary)
-        SecItemDelete([kSecClass as String: kSecClassGenericPassword,
-                       kSecAttrService as String: legacyService] as CFDictionary)
-        return all
-    }
-
-    private static func keychainData(service: String, account: String) -> Data? {
-        var result: AnyObject?
-        let status = SecItemCopyMatching([
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ] as CFDictionary, &result)
-        return status == errSecSuccess ? result as? Data : nil
-    }
-
-    /// The first version's items: one per connection, the account is the connection id.
-    private static func legacyItems() -> [(UUID, String)] {
-        var result: AnyObject?
-        let status = SecItemCopyMatching([
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: legacyService,
-            kSecReturnAttributes as String: true,
-            kSecMatchLimit as String: kSecMatchLimitAll,
-        ] as CFDictionary, &result)
-        guard status == errSecSuccess, let items = result as? [[String: Any]] else { return [] }
-        return items.compactMap { item in
-            guard let account = item[kSecAttrAccount as String] as? String, let id = UUID(uuidString: account),
-                  let data = keychainData(service: legacyService, account: account),
-                  let url = String(data: data, encoding: .utf8) else { return nil }
-            return (id, url)
-        }
-    }
 }
 
 struct SecretsError: LocalizedError {
