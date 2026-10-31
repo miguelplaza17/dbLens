@@ -1,5 +1,7 @@
 # dbLens
 
+Personal notes for your own agent go in `CLAUDE.local.md` (git ignores it).
+
 A native macOS app in SwiftUI. It runs on this Mac only, with a local
 SwiftData database and no server.
 
@@ -46,13 +48,6 @@ SwiftData database and no server.
 - `Label` for icon and text pairs. SF Symbols for icons.
 - `ContentUnavailableView` for empty states.
 - Liquid Glass belongs to floating controls only, never to content.
-
-## Skills
-
-The bama plugin has a skill for each step: `mac-design` (design rules),
-`design-system` (accent and tokens), `layout-grid`, `ux-design`,
-`swift-swiftui`, `os-integrations`, `performance`, `build-and-verify`,
-`test-mac-app`, `app-icon`, `user-stories`, and `improve-loop`. Use them.
 
 ## Git
 
