@@ -40,13 +40,17 @@ public enum ConnectionProblem {
         }
         if has("could not translate host", "traduzir o nome", "unknown server host", "nosuchrecord", "failed to resolve",
                "nodename nor servname", "failed to look up srv", "host not found", "name or service not known") {
-            return String(localized: "The host \"\(host)\" wasn't found. Check the name, or connect to the VPN or tailnet it lives on.")
+            // A name without a dot (a Docker service, a LAN machine) only resolves inside its own network.
+            if !host.contains("."), !host.contains(":"), host != "localhost" {
+                return String(localized: "The host \"\(host)\" wasn't found. It's a short name, which only resolves inside its own network (a Docker network, for example): this Mac needs that network's DNS, or use a full name or IP address.")
+            }
+            return String(localized: "The host \"\(host)\" wasn't found. Check the name, and whether this Mac can reach that network (some need a VPN).")
         }
         if has("timeout", "tempo limite", "timed out", "(60)", "within") {
             if tlsURL, text.lowercased().hasPrefix("rediss://") {
                 return String(localized: "\(place) didn't answer TLS. If the server doesn't use TLS, use redis:// instead of rediss://.")
             }
-            return String(localized: "\(place)\(tunnel) didn't answer in time. A firewall may be blocking it, or it needs a VPN, tailnet, or SSH tunnel.")
+            return String(localized: "\(place)\(tunnel) didn't answer in time. A firewall may be blocking it, or it's only reachable through a VPN or an SSH tunnel.")
         }
         if has("password authentication failed", "autenticação do tipo senha", "access denied for user", "wrongpass",
                "authentication failed", "invalid username-password", "invalid password") {

@@ -10,6 +10,7 @@ import Testing
     ("mongodb://u:p@127.0.0.1:59996/db", "No suitable servers found: [connection refused calling hello on '127.0.0.1:59996']", "refused"),
     ("postgresql://u@nohost.example:5432/db", "could not translate host name \"nohost.example\" to address: nodename nor servname provided", "wasn't found"),
     ("redis://nohost.example:6379", "Couldn't connect to nohost.example:6379: host not found", "wasn't found"),
+    ("mongodb://u:p@wikidb-hinqh3:27017/db", "No suitable servers found: [Failed to resolve 'wikidb-hinqh3']", "short name"),
     ("mongodb://u:p@nohost.example:27017/db", "No suitable servers found: [Failed to resolve 'nohost.example']", "\"nohost.example\" wasn't found"),
     ("mysql://u:p@10.255.255.1/db", "Can't connect to server on '10.255.255.1' (60)", "didn't answer in time"),
     ("rediss://127.0.0.1:6379", "Couldn't connect to 127.0.0.1:6379 within 10 seconds.", "redis:// instead of rediss://"),
