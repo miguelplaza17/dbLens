@@ -224,6 +224,17 @@ public actor PostgresSession: DatabaseSession {
         }
     }
 
+    /// One statement (the extended protocol refuses several) inside a
+    /// read-only transaction that is always rolled back.
+    public func readOnly(_ sql: String) throws -> Execution {
+        let clock = ContinuousClock()
+        let start = clock.now
+        try run("begin transaction read only", params: [])
+        defer { _ = try? run("rollback", params: []) }
+        let result = try run(sql, params: [])
+        return Execution(results: [result], duration: clock.now - start)
+    }
+
     /// One statement with $1, $2… parameters sent as text (nil is NULL).
     @discardableResult
     public func run(_ sql: String, params: [String?]) throws -> QueryResult {

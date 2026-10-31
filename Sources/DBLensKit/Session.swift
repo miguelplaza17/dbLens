@@ -16,6 +16,10 @@ public protocol DatabaseSession: AnyObject, Sendable {
 
     /// Runs one or more statements, as typed in the SQL editor.
     func execute(_ sql: String) async throws -> Execution
+    /// Runs one statement that can only read, for agents. The database itself
+    /// refuses writes where it can (a read-only transaction, SQLite's read-only
+    /// check); MongoDB and Redis allow only reading methods and commands.
+    func readOnly(_ text: String) async throws -> Execution
     func relations() async throws -> [Relation]
     /// One page of rows, sorted by the primary key when there is one, with
     /// column types and, when rows can be edited, their keys. A non-empty

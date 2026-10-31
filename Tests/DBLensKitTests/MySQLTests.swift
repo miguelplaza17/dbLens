@@ -212,6 +212,17 @@ func mysqlPagesAndEdits(_ server: String) async throws {
     #expect(try await session.page(of: pk, limit: 1, offset: 1).rows == [["2", "b", "2"]])
     #expect(try await session.page(of: pk, limit: 10, offset: 0, search: "B").rows == [["2", "b", "2"]])
     #expect(try await session.count(of: pk, search: "B") == 1)
+    // Read-only queries: the database refuses every way to write.
+    #expect(try await session.readOnly("select count(*) from dblens_pk").main?.rows == [["2"]])
+    for attempt in ["insert into dblens_pk values (9,'x',9)", "select 1; delete from dblens_pk",
+                    "commit; delete from dblens_pk", "create table dblens_ro(a int)", "drop table dblens_pk"] {
+        await #expect(throws: (any Error).self, "\(attempt)") { try await session.readOnly(attempt) }
+    }
+    _ = try? await session.readOnly("set session transaction read write")
+    await #expect(throws: (any Error).self) { try await session.readOnly("delete from dblens_pk") }
+    #expect(try await session.count(of: pk) == 2)
+    // The session writes again afterwards (the app's own edits use it).
+    _ = try await session.execute("update dblens_pk set n = n where id = 1")
     #expect(try await session.page(of: pk, limit: 10, offset: 0, search: "%").rows.isEmpty)
     #expect(try await session.page(of: pk, limit: 10, offset: 0, sort: ColumnSort(column: "nome", ascending: false)).rows.map { $0[1] } == ["b", "a"])
 

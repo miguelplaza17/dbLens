@@ -704,6 +704,30 @@ public actor RedisSession: DatabaseSession {
         return Execution(results: results, duration: clock.now - start)
     }
 
+    /// Commands that only read, for agents. Redis has no read-only transaction,
+    /// so anything else is refused before it reaches the server.
+    static let readingCommands: Set<String> = [
+        "GET", "MGET", "GETRANGE", "STRLEN", "EXISTS", "TYPE", "TTL", "PTTL", "EXPIRETIME", "KEYS", "SCAN", "DBSIZE",
+        "HGET", "HMGET", "HGETALL", "HKEYS", "HVALS", "HLEN", "HEXISTS", "HSTRLEN", "HSCAN", "HRANDFIELD",
+        "LRANGE", "LLEN", "LINDEX", "LPOS",
+        "SMEMBERS", "SCARD", "SISMEMBER", "SMISMEMBER", "SRANDMEMBER", "SSCAN", "SINTER", "SUNION", "SDIFF", "SINTERCARD",
+        "ZRANGE", "ZRANGEBYSCORE", "ZRANGEBYLEX", "ZREVRANGE", "ZREVRANGEBYSCORE", "ZCARD", "ZSCORE", "ZMSCORE",
+        "ZRANK", "ZREVRANK", "ZCOUNT", "ZLEXCOUNT", "ZSCAN", "ZRANDMEMBER",
+        "XRANGE", "XREVRANGE", "XLEN", "XINFO", "PING", "ECHO", "TIME", "INFO",
+        "JSON.GET", "JSON.MGET", "JSON.TYPE", "JSON.STRLEN", "JSON.ARRLEN", "JSON.OBJKEYS", "JSON.OBJLEN",
+    ]
+
+    /// One command, and only one that reads.
+    public func readOnly(_ text: String) throws -> Execution {
+        let commands = try Self.commands(in: text)
+        guard commands.count == 1 else { throw DatabaseError(message: String(localized: "Send one command at a time.")) }
+        let name = Self.name(commands[0])
+        guard Self.readingCommands.contains(name) else {
+            throw DatabaseError(message: String(localized: "\(name) can change data; read-only queries can't run it."))
+        }
+        return try execute(text)
+    }
+
     /// Every command line of the text, split into arguments.
     static func commands(in text: String) throws -> [[[UInt8]]] {
         try text.split(whereSeparator: \.isNewline).compactMap { line in

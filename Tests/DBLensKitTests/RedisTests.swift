@@ -263,6 +263,12 @@ func redisPagesEveryType(_ server: String) async throws {
     let found = try await session.page(of: try await key(session, "\(p):h"), limit: 10, offset: 0, search: "C")
     #expect(found.rows == [["c", "3"]] && found.keys?.values == [["c"]])
     #expect(try await session.count(of: try await key(session, "\(p):h"), search: "C") == 1)
+    // Read-only queries: only reading commands run.
+    #expect(try await session.readOnly("HGET \(p):h a").main?.rows.first?.first == "1")
+    for attempt in ["SET \(p):h x", "DEL \(p):h", "FLUSHDB", "HGET \(p):h a\nDEL \(p):h", "EVAL \"return 1\" 0", "CONFIG SET x y"] {
+        await #expect(throws: (any Error).self, "\(attempt)") { try await session.readOnly(attempt) }
+    }
+    #expect(try await session.count(of: try await key(session, "\(p):h")) == 3)
     let sorted = try await session.page(of: try await key(session, "\(p):h"), limit: 2, offset: 0, sort: ColumnSort(column: "value", ascending: false))
     #expect(sorted.rows == [["c", "3"], ["b", "2"]] && sorted.keys?.values == [["c"], ["b"]])
     #expect(hash.note == "hash · no expiry")

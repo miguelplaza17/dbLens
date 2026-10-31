@@ -409,6 +409,17 @@ func mongoSearchMatchesFieldsAndIDs() async throws {
     #expect(ana.rows.count == 1 && ana.rows[0][1] == "Ana")
     #expect(try await session.count(of: relation, search: "ana") == 1)
     #expect(try await session.page(of: relation, limit: 10, offset: 0, search: "000003").rows.count == 1)
+    // Read-only queries: only reading methods run.
+    #expect(try await session.readOnly("db.\(name).find({name: \"Ana\"})").main?.rows.count == 1)
+    #expect(try await session.readOnly("db.\(name).countDocuments({})").main != nil)
+    let total = try await session.count(of: relation)
+    for attempt in ["db.\(name).insertOne({a: 1})", "db.\(name).deleteMany({})", "db.\(name).drop()",
+                    "db.\(name).aggregate([{$out: \"stolen\"}])", "db.\(name).aggregate([{$merge: {into: \"x\"}}])",
+                    "db.\(name).find({}); db.\(name).deleteMany({})", "db.dropDatabase()", "use admin",
+                    "db.runCommand({drop: \"\(name)\"})"] {
+        await #expect(throws: (any Error).self, "\(attempt)") { try await session.readOnly(attempt) }
+    }
+    #expect(try await session.count(of: relation) == total)
     let byAge = try await session.page(of: relation, limit: 10, offset: 0, sort: ColumnSort(column: "age", ascending: false))
     let ages = byAge.rows.compactMap { $0[2] }.compactMap(Double.init)
     #expect(ages == ages.sorted(by: >) && !ages.isEmpty)

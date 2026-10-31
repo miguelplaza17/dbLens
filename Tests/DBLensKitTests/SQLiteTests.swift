@@ -215,6 +215,15 @@ private func relation(_ session: SQLiteSession, _ name: String) async throws -> 
     let customers = try await relation(session, "customers")
     #expect(try await session.page(of: customers, limit: 10, offset: 0, search: "bia").rows == [["2", "Bia", nil]])
     #expect(try await session.count(of: customers, search: "bia") == 1)
+    // Read-only queries: SQLite refuses every way to write.
+    #expect(try await session.readOnly("select count(*) from customers").main?.rows.count == 1)
+    let before = try await session.count(of: customers)
+    for attempt in ["insert into customers(name) values ('x')", "select 1; delete from customers", "delete from customers",
+                    "pragma query_only = off", "attach database '/tmp/dblens-ro.db' as x", "begin", "vacuum"] {
+        await #expect(throws: (any Error).self, "\(attempt)") { try await session.readOnly(attempt) }
+    }
+    #expect(try await session.count(of: customers) == before)
+    _ = try await session.execute("update customers set name = name where id = 1")
     #expect(try await session.page(of: customers, limit: 10, offset: 0, search: "_").rows.isEmpty)
     let byName = try await session.page(of: customers, limit: 10, offset: 0, sort: ColumnSort(column: "name", ascending: false))
     let upward = try await session.page(of: customers, limit: 10, offset: 0, sort: ColumnSort(column: "name", ascending: true))

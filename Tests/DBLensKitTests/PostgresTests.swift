@@ -133,6 +133,17 @@ func editsRows() async throws {
     let nopk = try #require(relations.first { $0.name == "dblens_kit_nopk" })
     #expect(try await session.page(of: pk, limit: 10, offset: 0, search: "B").rows == [["2", "b", "2"]])
     #expect(try await session.count(of: pk, search: "B") == 1)
+    // Read-only queries: the database refuses every way to write.
+    #expect(try await session.readOnly("select count(*) from dblens_kit_pk").main?.rows == [["2"]])
+    for attempt in ["insert into dblens_kit_pk values (9,'x',9)", "select 1; delete from dblens_kit_pk",
+                    "commit; delete from dblens_kit_pk", "create table dblens_kit_ro(a int)", "drop table dblens_kit_pk",
+                    "with d as (delete from dblens_kit_pk returning *) select * from d"] {
+        await #expect(throws: (any Error).self, "\(attempt)") { try await session.readOnly(attempt) }
+    }
+    // Switching the transaction to read-write is rolled back with it; the next query is read-only again.
+    _ = try? await session.readOnly("set transaction read write")
+    await #expect(throws: (any Error).self) { try await session.readOnly("delete from dblens_kit_pk") }
+    #expect(try await session.count(of: pk) == 2)
     #expect(try await session.page(of: pk, limit: 10, offset: 0, search: "%").rows.isEmpty)
     #expect(try await session.page(of: pk, limit: 10, offset: 0, sort: ColumnSort(column: "nome", ascending: false)).rows.map { $0[1] } == ["b", "a"])
 

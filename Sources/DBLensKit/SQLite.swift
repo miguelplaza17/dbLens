@@ -158,6 +158,37 @@ public actor SQLiteSession: DatabaseSession {
         return Execution(results: results, duration: clock.now - start)
     }
 
+    /// One statement, run only when SQLite says it changes nothing
+    /// (sqlite3_stmt_readonly), with query_only on as a second lock.
+    public func readOnly(_ sql: String) throws -> Execution {
+        let clock = ContinuousClock()
+        let start = clock.now
+        var statement: OpaquePointer?
+        var tail: UnsafePointer<CChar>?
+        let result: QueryResult = try sql.withCString { text in
+            guard sqlite3_prepare_v2(db, text, -1, &statement, &tail) == SQLITE_OK else { throw lastError() }
+            guard let statement else { throw DatabaseError(message: String(localized: "There is no statement to run.")) }
+            defer { sqlite3_finalize(statement) }
+            // Whatever follows must prepare to nothing (spaces, semicolons, comments).
+            var next: OpaquePointer?
+            if let tail { sqlite3_prepare_v2(db, tail, -1, &next, nil) }
+            if let next {
+                sqlite3_finalize(next)
+                throw DatabaseError(message: String(localized: "Send one statement at a time."))
+            }
+            // sqlite3_stmt_readonly passes these too: they change the connection, not the file.
+            let keyword = Self.firstKeyword(sql)
+            guard !["ATTACH", "DETACH", "PRAGMA", "BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE", "VACUUM"].contains(keyword),
+                  sqlite3_stmt_readonly(statement) != 0 else {
+                throw DatabaseError(message: String(localized: "This statement would change the database; read-only queries can't."))
+            }
+            sqlite3_exec(db, "pragma query_only = on", nil, nil, nil)
+            defer { sqlite3_exec(db, "pragma query_only = off", nil, nil, nil) }
+            return try read(statement)
+        }
+        return Execution(results: [result], duration: clock.now - start)
+    }
+
     private func read(_ statement: OpaquePointer) throws -> QueryResult {
         let count = Int(sqlite3_column_count(statement))
         let columns = (0..<Int32(count)).map { index in

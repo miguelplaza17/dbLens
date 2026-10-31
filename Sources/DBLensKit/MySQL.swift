@@ -245,6 +245,23 @@ public actor MySQLSession: DatabaseSession {
         return Execution(results: results, duration: clock.now - start)
     }
 
+    /// One statement (multi-statements off for it) in a read-only session and
+    /// transaction, rolled back. DDL is refused too: it needs a read-write session.
+    public func readOnly(_ sql: String) throws -> Execution {
+        let clock = ContinuousClock()
+        let start = clock.now
+        _ = try runAll("set session transaction read only")
+        mysql_set_server_option(conn, MYSQL_OPTION_MULTI_STATEMENTS_OFF)
+        defer {
+            mysql_set_server_option(conn, MYSQL_OPTION_MULTI_STATEMENTS_ON)
+            _ = try? runAll("rollback")
+            _ = try? runAll("set session transaction read write")
+        }
+        _ = try runAll("start transaction read only")
+        let results = try runAll(sql)
+        return Execution(results: results, duration: clock.now - start)
+    }
+
     /// Stops the running query: a second, short connection sends KILL QUERY.
     /// Safe to call from any thread; it never waits for the server.
     public nonisolated func cancel() { canceller.cancel() }

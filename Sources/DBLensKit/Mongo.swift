@@ -644,6 +644,37 @@ private struct FieldStats {
 // MARK: Command panel
 
 extension MongoSession {
+    /// Methods that start a read, and the ones that may follow them in a chain.
+    static let readingMethods: Set<String> = ["find", "findOne", "aggregate", "countDocuments", "estimatedDocumentCount",
+                                             "distinct", "count"]
+    static let cursorMethods: Set<String> = ["sort", "limit", "skip", "projection", "toArray", "pretty", "count", "hint",
+                                            "maxTimeMS", "batchSize", "collation", "comment"]
+    static let readingDatabaseMethods: Set<String> = ["getCollectionNames", "getCollectionInfos", "getName", "stats"]
+
+    /// One statement that only reads: find, aggregate (without $out or $merge),
+    /// counts, distinct, and listing. MongoDB has no read-only session, so
+    /// anything else is refused before it reaches the server.
+    public func readOnly(_ text: String) throws -> Execution {
+        let statements = MongoShell.statements(text)
+        guard statements.count == 1 else { throw DatabaseError(message: String(localized: "Send one statement at a time.")) }
+        let refused = DatabaseError(message: String(localized: "This statement can change data; read-only queries only find, aggregate, count, and list."))
+        switch try MongoShell.parse(statements[0]) {
+        case .showDatabases, .showCollections:
+            break
+        case .use:
+            throw refused
+        case .database(let method, _):
+            guard Self.readingDatabaseMethods.contains(method) else { throw refused }
+        case .collection(_, let calls):
+            guard let first = calls.first, Self.readingMethods.contains(first.name),
+                  calls.dropFirst().allSatisfy({ Self.cursorMethods.contains($0.name) }) else { throw refused }
+            if first.name == "aggregate", first.arguments.contains(where: { $0.contains("$out") || $0.contains("$merge") }) {
+                throw refused
+            }
+        }
+        return try execute(text)
+    }
+
     /// Runs mongosh-style statements, one after another (see `MongoShell.statements`):
     /// find (with sort, limit, skip, projection), findOne, countDocuments,
     /// estimatedDocumentCount, distinct, aggregate, getIndexes, insertOne, insertMany,
