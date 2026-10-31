@@ -24,10 +24,16 @@ out=$(call 1 \
   "$(tool 7 query '{"connection":"test","query":"delete from dblens_mcp"}')" \
   "$(tool 8 execute '{"connection":"test","statement":"delete from dblens_mcp","dry_run":true}')" \
   "$(tool 9 query '{"connection":"test","query":"select count(*) from dblens_mcp"}')" \
-  "$(tool 13 describe_schema '{"connection":"test"}')")
+  "$(tool 13 describe_schema '{"connection":"test"}')" \
+  "$(tool 14 list_extensions '{"connection":"test"}')" \
+  "$(tool 15 install_extension '{"connection":"test","name":"pg_trgm"}')" \
+  "$(tool 16 query '{"connection":"test","query":"select similarity('"'"'dblens'"'"', '"'"'dblenz'"'"') > 0"}')" \
+  "$(tool 17 install_extension '{"connection":"test","name":"no_such_ext; drop table x"}')")
 ro=$(call 0 "$(tool 10 execute '{"connection":"test","statement":"delete from dblens_mcp"}')" \
+            "$(tool 19 install_extension '{"connection":"test","name":"unaccent"}')" \
             "$(tool 11 query '{"connection":"nope","query":"select 1"}')")
-call 1 "$(tool 12 execute '{"connection":"test","statement":"drop table dblens_mcp"}')" >/dev/null
+call 1 "$(tool 12 execute '{"connection":"test","statement":"drop table dblens_mcp"}')" \
+       "$(tool 18 execute '{"connection":"test","statement":"drop extension if exists pg_trgm"}')" >/dev/null
 rm -f /tmp/dbLens-mcp.store*
 print -r -- "$out
 $ro" | python3 -c '
@@ -46,6 +52,11 @@ checks = [
     ("nothing was deleted", "[[\"2\"]]" in text(9)),
     ("execute is refused where writing is off", err(10) and "Let Agents Write" in text(10)),
     ("an unknown connection is an error", err(11)),
+    ("list_extensions shows installed and available ones", "\"plpgsql\"" in text(14) and "\"available\"" in text(14)),
+    ("install_extension installs an available one", not err(15) and "pg_trgm" in text(15)),
+    ("its functions work right after", "[[\"t\"]]" in text(16)),
+    ("install_extension refuses names the server does not list", err(17)),
+    ("install_extension is refused where writing is off", err(19)),
     ("describe_schema lists every table with its columns", "dblens_mcp (table" in text(13) and "id integer PK" in text(13)),
 ]
 for name, ok in checks: print(("PASS " if ok else "FAIL ") + name)

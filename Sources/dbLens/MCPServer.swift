@@ -119,6 +119,13 @@ enum MCPServer {
             case "describe_schema":
                 let (_, session) = try await open(arguments)
                 return try await schemaText(arguments["schema"] as? String, in: session)
+            case "list_extensions":
+                let (_, session) = try await open(arguments)
+                return try await extensions(in: session)
+            case "install_extension":
+                let (connection, session) = try await open(arguments)
+                return try await install(try text(arguments, "name"), schema: arguments["schema"] as? String,
+                                         on: connection, session)
             case "describe_table":
                 let (_, session) = try await open(arguments)
                 return try await describe(try text(arguments, "table"), in: session)
@@ -216,6 +223,77 @@ enum MCPServer {
             }
             return lines.joined(separator: "\n")
         }
+
+        /// What the database adds to plain SQL, so queries only use functions that
+        /// exist: Postgres extensions (installed and available), MySQL plugins,
+        /// SQLite's compile options. Always with the server version.
+        private func extensions(in session: any DatabaseSession) async throws -> Any {
+            func rows(_ sql: String) async throws -> [[String?]] { try await session.readOnly(sql).main?.rows ?? [] }
+            var output: [String: Any] = ["engine": session.engine.name, "version": session.serverVersion]
+            switch session.engine {
+            case .postgres:
+                let all = try await rows("""
+                    select a.name, a.installed_version, a.default_version, n.nspname, a.comment
+                    from pg_available_extensions a
+                    left join pg_extension e on e.extname = a.name
+                    left join pg_namespace n on n.oid = e.extnamespace
+                    order by a.name
+                    """)
+                output["installed"] = all.filter { $0[1] != nil }.map {
+                    ["name": $0[0] ?? "", "version": $0[1] ?? "", "schema": $0[3] ?? "", "comment": $0[4] ?? ""]
+                }
+                output["available"] = all.filter { $0[1] == nil }.map {
+                    ["name": $0[0] ?? "", "version": $0[2] ?? "", "comment": $0[4] ?? ""]
+                }
+                output["note"] = "install_extension adds an available one (needs Let Agents Write and the right privileges)."
+            case .mysql:
+                output["plugins"] = try await rows("""
+                    select PLUGIN_NAME, PLUGIN_TYPE from information_schema.PLUGINS
+                    where PLUGIN_STATUS = 'ACTIVE' order by PLUGIN_TYPE, PLUGIN_NAME
+                    """).map { ["name": $0[0] ?? "", "type": $0[1] ?? ""] }
+            case .sqlite:
+                output["compile_options"] = try await rows("select compile_options from pragma_compile_options").compactMap { $0.first ?? nil }
+            case .redis:
+                output["modules"] = try await session.execute("MODULE LIST").main?.rows ?? []
+            case .mongodb:
+                output["note"] = "MongoDB has no extensions; features depend on the server version."
+            }
+            return output
+        }
+
+        /// CREATE EXTENSION, for Postgres, where agents may write. The name must be
+        /// one pg_available_extensions lists.
+        private func install(_ name: String, schema: String?, on connection: SavedConnection,
+                             _ session: any DatabaseSession) async throws -> Any {
+            guard session.engine == .postgres else {
+                throw DatabaseError(message: "Only PostgreSQL has extensions to install; \(session.engine.name) doesn't.")
+            }
+            guard connection.agentsCanWrite else {
+                throw DatabaseError(message: """
+                    Writing is off for "\(connection.name)", and installing an extension is a change. The user can \
+                    turn it on in dbLens: right-click the connection and choose Let Agents Write.
+                    """)
+            }
+            let available = try await session.readOnly("select name, installed_version from pg_available_extensions").main?.rows ?? []
+            guard let row = available.first(where: { $0[0] == name }) else {
+                throw DatabaseError(message: "\"\(name)\" isn't available on this server; list_extensions shows what is.")
+            }
+            if let version = row[1] { return ["name": name, "version": version, "note": "Already installed."] }
+            var statement = "create extension if not exists \(session.quote(name))"
+            if let schema, !schema.isEmpty { statement += " schema \(session.quote(schema))" }
+            do {
+                _ = try await session.execute(statement)
+                AppModel.recordAgentRun(statement, failed: false, for: connection.uuid)
+            } catch {
+                AppModel.recordAgentRun(statement, failed: true, for: connection.uuid)
+                throw error
+            }
+            let version = try await session.readOnly("select extversion from pg_extension where extname = \(Self.literal(name))")
+                .main?.rows.first?.first ?? nil
+            return ["name": name, "version": version ?? "", "statement": statement]
+        }
+
+        private static func literal(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: "''") + "'" }
 
         // MARK: Connections
 
@@ -321,6 +399,22 @@ enum MCPServer {
                     "schema": ["type": "string", "description": "Only this schema (PostgreSQL). Default: all."],
                 ], "required": ["connection"]],
                 "annotations": ["readOnlyHint": true],
+            ],
+            [
+                "name": "list_extensions",
+                "description": "What the database adds to plain SQL, to write queries only with functions that exist: PostgreSQL extensions (installed with version and schema, and available to install), MySQL active plugins, SQLite compile options (JSON1, FTS5…), Redis modules. Always with the server version.",
+                "inputSchema": ["type": "object", "properties": ["connection": connection], "required": ["connection"]],
+                "annotations": ["readOnlyHint": true],
+            ],
+            [
+                "name": "install_extension",
+                "description": "Installs an available PostgreSQL extension (CREATE EXTENSION). Only where the user turned on Let Agents Write, and the database user needs the privilege. Confirm with the user first.",
+                "inputSchema": ["type": "object", "properties": [
+                    "connection": connection,
+                    "name": ["type": "string", "description": "Extension name, from list_extensions' available list."],
+                    "schema": ["type": "string", "description": "Schema to put it in. Default: the server's choice."],
+                ], "required": ["connection", "name"]],
+                "annotations": ["readOnlyHint": false, "destructiveHint": false],
             ],
             [
                 "name": "describe_table",
