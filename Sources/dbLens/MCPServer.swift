@@ -55,6 +55,7 @@ enum MCPServer {
                 connection.agentsCanWrite = env["APP_AGENTS_WRITE"] == "1"
                 try? Secrets.setURL(url, for: connection.uuid)
                 container.mainContext.insert(connection)
+                try? container.mainContext.save()
             }
         }
 
@@ -383,8 +384,9 @@ enum MCPServer {
             connection.engine = engine.rawValue
             connection.ssh = ssh
             try Secrets.setURL(Connector.clean(url), for: connection.uuid)
-            container.mainContext.insert(connection)
-            try container.mainContext.save()
+            let context = ModelContext(container)
+            context.insert(connection)
+            try context.save()
             sessions[connection.uuid] = session
             Self.announce()
             return ["name": name, "engine": engine.name, "server_version": session.serverVersion,
@@ -401,8 +403,10 @@ enum MCPServer {
             sessions.removeValue(forKey: connection.uuid)?.tunnel?.close()
             Secrets.removeURL(for: connection.uuid)
             UserDefaults.standard.removeObject(forKey: "sqlHistory.\(connection.uuid.uuidString)")
-            container.mainContext.delete(connection)
-            try container.mainContext.save()
+            if let context = connection.modelContext {
+                context.delete(connection)
+                try context.save()
+            }
             Self.announce()
             return ["deleted": name, "note": "Removed from dbLens with its saved URL and SQL history. The database itself is untouched."]
         }
@@ -413,8 +417,10 @@ enum MCPServer {
                                                                          userInfo: nil, deliverImmediately: true)
         }
 
+        /// Read from a new context on every call: the app may have changed a
+        /// connection (Let Agents Write, a rename) since the last one.
         private func connections() throws -> [SavedConnection] {
-            try container.mainContext.fetch(FetchDescriptor<SavedConnection>(sortBy: [SortDescriptor(\.name)]))
+            try ModelContext(container).fetch(FetchDescriptor<SavedConnection>(sortBy: [SortDescriptor(\.name)]))
         }
 
         /// The named connection, opened once and kept for the next calls.

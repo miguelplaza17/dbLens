@@ -44,6 +44,17 @@ enum SelfTest {
             check("a working URL is saved and opened", saved != nil && model.session != nil && connections().count == 1)
             check("the name comes from the URL", saved?.name == Connector.summary(url)?.suggestedName)
             check("the URL is kept for the connection", saved?.url == url)
+            // Let Agents Write: what the switch saves must reach the file another process (the MCP server) reads.
+            if let saved {
+                saved.agentsCanWrite = true
+                var saveError = ""
+                do { try model.context.save() } catch { saveError = "\(error)" }
+                let fresh = try? ModelContainer(for: SavedConnection.self, configurations: ModelConfiguration(url: Store.url))
+                let stored = (try? fresh.map { try ModelContext($0).fetch(FetchDescriptor<SavedConnection>()) })??.first { $0.uuid == saved.uuid }
+                check("Let Agents Write is saved for other processes", stored?.agentsCanWrite == true, saveError)
+                saved.agentsCanWrite = false
+                try? model.context.save()
+            }
             let boxDir = FileManager.default.temporaryDirectory.appending(path: "dbLens-box-\(UUID().uuidString)")
             try? FileManager.default.createDirectory(at: boxDir, withIntermediateDirectories: true)
             let box = try? SecretBox(keyFile: boxDir.appending(path: "k"))
