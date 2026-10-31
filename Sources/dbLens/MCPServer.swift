@@ -109,6 +109,10 @@ enum MCPServer {
                     ["name": connection.name, "engine": Engine(rawValue: connection.engine)?.name ?? connection.engine,
                      "via_ssh": connection.ssh != nil, "agents_can_write": connection.agentsCanWrite] as [String: Any]
                 }
+            case "create_connection":
+                return try await createConnection(arguments)
+            case "delete_connection":
+                return try deleteConnection(arguments)
             case "list_tables":
                 let (_, session) = try await open(arguments)
                 return try await session.relations().map { relation in
@@ -343,6 +347,72 @@ enum MCPServer {
 
         // MARK: Connections
 
+        /// Settings > Agents > "Let agents add and remove connections", off by default.
+        private func requireManage() throws {
+            let allowed = Store.isOverridden ? ProcessInfo.processInfo.environment["APP_AGENTS_WRITE"] == "1"  // tests
+                                             : UserDefaults.standard.bool(forKey: "agentsManageConnections")
+            guard allowed else {
+                throw DatabaseError(message: """
+                    Adding and removing connections is off. The user can turn it on in dbLens: Settings > Agents > \
+                    Let agents add and remove connections.
+                    """)
+            }
+        }
+
+        /// Connects first (so a wrong URL fails here, with its cause), then saves
+        /// the URL encrypted, like the app's New Connection. Writing stays off.
+        private func createConnection(_ arguments: [String: Any]) async throws -> Any {
+            try requireManage()
+            let url = try text(arguments, "url")
+            guard let engine = Engine.detect(url) else {
+                throw DatabaseError(message: "This doesn't look like a database URL (postgres://, mysql://, sqlite:///path, redis://, mongodb://).")
+            }
+            var ssh: SSHTunnel.Config?
+            if let host = arguments["ssh_host"] as? String, !host.isEmpty {
+                ssh = SSHTunnel.Config(host: host, port: arguments["ssh_port"] as? Int,
+                                       user: arguments["ssh_user"] as? String ?? "", keyPath: arguments["ssh_key"] as? String ?? "")
+            }
+            let session = try await Connector.connect(url, ssh: ssh)
+            let given = (arguments["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let name = given.isEmpty ? (Connector.summary(url)?.suggestedName ?? engine.name) : given
+            guard try !connections().contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) else {
+                session.tunnel?.close()
+                throw DatabaseError(message: "A connection named \"\(name)\" already exists; pass another name.")
+            }
+            let connection = SavedConnection(name: name)
+            connection.engine = engine.rawValue
+            connection.ssh = ssh
+            try Secrets.setURL(Connector.clean(url), for: connection.uuid)
+            container.mainContext.insert(connection)
+            try container.mainContext.save()
+            sessions[connection.uuid] = session
+            Self.announce()
+            return ["name": name, "engine": engine.name, "server_version": session.serverVersion,
+                    "note": "Saved in dbLens, URL encrypted. Agents can read it now; writing stays off until the user turns it on."]
+        }
+
+        private func deleteConnection(_ arguments: [String: Any]) throws -> Any {
+            try requireManage()
+            let name = try text(arguments, "connection")
+            let matches = try connections().filter { $0.name.caseInsensitiveCompare(name) == .orderedSame || $0.uuid.uuidString == name }
+            guard matches.count == 1, let connection = matches.first else {
+                throw DatabaseError(message: matches.isEmpty ? "No connection \"\(name)\"." : "Several connections are named \"\(name)\"; rename one in dbLens.")
+            }
+            sessions.removeValue(forKey: connection.uuid)?.tunnel?.close()
+            Secrets.removeURL(for: connection.uuid)
+            UserDefaults.standard.removeObject(forKey: "sqlHistory.\(connection.uuid.uuidString)")
+            container.mainContext.delete(connection)
+            try container.mainContext.save()
+            Self.announce()
+            return ["deleted": name, "note": "Removed from dbLens with its saved URL and SQL history. The database itself is untouched."]
+        }
+
+        /// Tells a running dbLens to read its connections again.
+        private static func announce() {
+            DistributedNotificationCenter.default().postNotificationName(AppModel.connectionsChanged, object: nil,
+                                                                         userInfo: nil, deliverImmediately: true)
+        }
+
         private func connections() throws -> [SavedConnection] {
             try container.mainContext.fetch(FetchDescriptor<SavedConnection>(sortBy: [SortDescriptor(\.name)]))
         }
@@ -430,6 +500,25 @@ enum MCPServer {
                 "description": "The database connections saved in dbLens: name, engine (PostgreSQL, MySQL, SQLite, Redis, MongoDB), whether it goes through SSH, and whether agents may write. URLs and passwords are never shown. Databases: all (PostgreSQL, MySQL/MariaDB, SQLite, Redis/Valkey, MongoDB).",
                 "inputSchema": ["type": "object", "properties": [:]],
                 "annotations": ["readOnlyHint": true],
+            ],
+            [
+                "name": "create_connection",
+                "description": "Saves a new connection in dbLens from its URL, after connecting to check it (a failure says why: refused, unknown host, wrong password…). The URL is stored encrypted; afterwards only the name is used. Optionally through SSH. Writing stays off on it until the user allows it. Needs the user's Settings > Agents > Let agents add and remove connections. Databases: all.",
+                "inputSchema": ["type": "object", "properties": [
+                    "url": ["type": "string", "description": "Full connection URL: postgres://, mysql://, mariadb://, sqlite:///path, redis://, rediss://, mongodb://, mongodb+srv://."],
+                    "name": ["type": "string", "description": "Name to show. Default: from the URL (user @ host)."],
+                    "ssh_host": ["type": "string", "description": "Connect through this SSH host (a ~/.ssh/config alias works)."],
+                    "ssh_user": ["type": "string"],
+                    "ssh_port": ["type": "integer"],
+                    "ssh_key": ["type": "string", "description": "Path to a private key; default: ssh-agent and ~/.ssh/config."],
+                ], "required": ["url"]],
+                "annotations": ["readOnlyHint": false, "destructiveHint": false],
+            ],
+            [
+                "name": "delete_connection",
+                "description": "Removes a saved connection from dbLens, with its encrypted URL and SQL history. The database itself is not touched. Confirm with the user first. Needs the user's Settings > Agents > Let agents add and remove connections. Databases: all.",
+                "inputSchema": ["type": "object", "properties": ["connection": connection], "required": ["connection"]],
+                "annotations": ["readOnlyHint": false, "destructiveHint": true],
             ],
             [
                 "name": "list_tables",

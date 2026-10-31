@@ -23,13 +23,21 @@ enum Secrets {
 
     static func url(for id: UUID) -> String? { load()[id] }
 
+    /// Reads the file again on the next use: another process (the MCP server)
+    /// may have added or removed a connection.
+    static func reload() {
+        if !Store.isOverridden { cache = nil }
+    }
+
     static func setURL(_ url: String, for id: UUID) throws {
+        reload()  // never write back a stale copy over another process's change
         var all = load()
         all[id] = url
         try write(all)
     }
 
     static func removeURL(for id: UUID) {
+        reload()
         var all = load()
         all[id] = nil
         try? write(all)

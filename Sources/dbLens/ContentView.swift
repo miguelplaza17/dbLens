@@ -13,6 +13,8 @@ struct ContentView: View {
         @Bindable var model = model
         NavigationSplitView {
             Sidebar()
+                // An agent added or removed a connection: fetch the list again.
+                .id(model.connectionsVersion)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 360)
         } detail: {
             BottomPanelLayout(showPanel: model.showSQLPanel) {

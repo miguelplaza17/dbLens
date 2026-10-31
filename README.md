@@ -122,6 +122,8 @@ Claude Desktop and Cursor take the same command in their MCP settings:
 | Tool | What it does |
 | --- | --- |
 | `list_connections` | Saved connections: name, engine, SSH, whether agents may write. Never the URL. |
+| `create_connection` | Saves a new connection from its URL after checking it (optionally through SSH), encrypted like the app's. Starts read-only. Only with Settings > Agents > **Let agents add and remove connections**. |
+| `delete_connection` | Removes a saved connection and its history; the database itself is untouched. Same setting. |
 | `list_tables` | Tables and views (Redis keys, MongoDB collections) with estimated rows. |
 | `describe_schema` | The whole structure at once: every table with its columns, keys, and foreign keys. |
 | `describe_table` | Columns, types, primary key, foreign keys, and the tables that reference it. |

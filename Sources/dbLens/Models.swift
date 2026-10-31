@@ -145,8 +145,26 @@ final class AppModel {
         didSet { if !Store.isOverridden { UserDefaults.standard.set(settingsTab.rawValue, forKey: "settings.tab") } }
     }
 
+    /// Grows when an agent added or removed a connection through the MCP
+    /// server, so the sidebar fetches the list again.
+    private(set) var connectionsVersion = 0
+    /// Posted by `dbLens --mcp` after it changes the saved connections.
+    static let connectionsChanged = Notification.Name("io.github.miguelplaza17.dblens.connectionsChanged")
+    @ObservationIgnored private var watcher: ConnectionsWatcher?
+
     init(container: ModelContainer) {
         self.container = container
+        if !MCPServer.requested {
+            watcher = ConnectionsWatcher { [weak self] in self?.connectionsChangedElsewhere() }
+        }
+    }
+
+    /// Another process changed the saved connections: read the URLs and the list
+    /// again, and close the open connection if it was removed.
+    func connectionsChangedElsewhere() {
+        Secrets.reload()
+        connectionsVersion += 1
+        if activeID != nil, activeConnection == nil { disconnect() }
     }
 
     var context: ModelContext { container.mainContext }
@@ -888,4 +906,21 @@ final class AppModel {
         parts.append(ms < 1000 ? "\(Int(ms.rounded())) ms" : String(format: "%.2f s", ms / 1000))
         return parts.joined(separator: " · ")
     }
+}
+
+/// Listens for the MCP server's "connections changed" notice (another process).
+final class ConnectionsWatcher: NSObject {
+    private let changed: @MainActor () -> Void
+
+    init(_ changed: @escaping @MainActor () -> Void) {
+        self.changed = changed
+        super.init()
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(notice), name: AppModel.connectionsChanged, object: nil)
+    }
+
+    @objc private func notice() {
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.changed() } }
+    }
+
+    deinit { DistributedNotificationCenter.default().removeObserver(self) }
 }

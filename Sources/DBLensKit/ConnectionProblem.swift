@@ -50,7 +50,9 @@ public enum ConnectionProblem {
         }
         if has("password authentication failed", "autenticação do tipo senha", "access denied for user", "wrongpass",
                "authentication failed", "invalid username-password", "invalid password") {
-            return String(localized: "The server refused the login\(user.isEmpty ? "" : " for \"\(user)\""): wrong password, or a user that can't log in.")
+            return user.isEmpty
+                ? String(localized: "The server refused the login: wrong password, or a user that can't log in.")
+                : String(localized: "The server refused the login for \"\(user)\": wrong password, or a user that can't log in.")
         }
         if has("noauth") {
             return String(localized: "The server asks for a password, and the URL has none.")

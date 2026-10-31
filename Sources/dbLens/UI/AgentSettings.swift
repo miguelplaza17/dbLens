@@ -10,6 +10,7 @@ struct AgentSettings: View {
     @State private var installed: Set<AgentClient> = []
     @State private var working: AgentClient?
     @State private var problem: String?
+    @AppStorage("agentsManageConnections") private var manageConnections = false
 
     var body: some View {
         Section {
@@ -86,6 +87,15 @@ struct AgentSettings: View {
         } footer: {
             Text("Tools that write work only on connections allowed below.")
                 .foregroundStyle(.secondary)
+        }
+
+        Section {
+            Toggle(isOn: $manageConnections) {
+                Text("Let agents add and remove connections")
+                Text("create_connection and delete_connection. New connections start read-only.")
+            }
+        } header: {
+            Text("Connections")
         }
 
         Section {

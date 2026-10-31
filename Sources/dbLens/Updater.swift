@@ -9,7 +9,8 @@ final class Updater {
     @ObservationIgnored private let controller: SPUStandardUpdaterController?
 
     init() {
-        let enabled = !Store.isOverridden && Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil
+        // Not in tests, snapshots, or `dbLens --mcp` (an agent's process, with no window).
+        let enabled = !Store.isOverridden && !MCPServer.requested && Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil
         controller = enabled ? SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil) : nil
         automaticallyChecks = controller?.updater.automaticallyChecksForUpdates ?? false
         lastCheck = controller?.updater.lastUpdateCheckDate

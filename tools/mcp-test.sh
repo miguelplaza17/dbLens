@@ -9,6 +9,7 @@ url=${APP_SEED_URL:-${DBLENS_TEST_URL:-}}
 app=~/Applications/dbLens.app/Contents/MacOS/dbLens
 call() {  # call <writable 0|1> <json-rpc lines...>: prints one reply per line
   local writable=$1; shift
+  rm -f /tmp/dbLens-mcp.store*  # each round starts from a fresh store
   printf '%s\n' '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' "$@" |
     APP_STORE=/tmp/dbLens-mcp.store APP_SEED_URL=$url APP_AGENTS_WRITE=$writable $app --mcp
 }
@@ -34,10 +35,16 @@ out=$(call 1 \
   "$(tool 22 execute '{"connection":"test","statements":"alter table dblens_mcp add column extra2 int; insert into dblens_no_such_table values (1)"}')" \
   "$(tool 23 describe_table '{"connection":"test","table":"dblens_mcp"}')" \
   "$(tool 24 execute '{"connection":"test","statements":"alter table dblens_mcp add column note text; update dblens_mcp set note = '"'"'a;b'"'"'"}')" \
-  "$(tool 25 query '{"connection":"test","query":"select note from dblens_mcp order by id"}')")
+  "$(tool 25 query '{"connection":"test","query":"select note from dblens_mcp order by id"}')" \
+  "$(tool 27 create_connection "{\"url\":\"$url\",\"name\":\"created\"}")" \
+  "$(tool 28 query '{"connection":"created","query":"select 1"}')" \
+  "$(tool 29 create_connection '{"url":"postgresql://nobody@127.0.0.1:59999/x"}')" \
+  "$(tool 30 delete_connection '{"connection":"created"}')" \
+  "$(tool 31 list_connections '{}')")
 ro=$(call 0 "$(tool 10 execute '{"connection":"test","statements":"delete from dblens_mcp"}')" \
             "$(tool 19 install_extension '{"connection":"test","name":"unaccent"}')" \
             "$(tool 26 test_changes '{"connection":"test","statements":"delete from dblens_mcp"}')" \
+            "$(tool 32 create_connection "{\"url\":\"$url\"}")" \
             "$(tool 11 query '{"connection":"nope","query":"select 1"}')")
 call 1 "$(tool 12 execute '{"connection":"test","statements":"drop table dblens_mcp"}')" \
        "$(tool 18 execute '{"connection":"test","statements":"drop extension if exists pg_trgm"}')" >/dev/null
@@ -69,6 +76,10 @@ checks = [
     ("a failing migration is rolled back as a whole", err(22) and "Statement 2 of 2" in text(22) and "extra2" not in text(23)),
     ("a migration that works is applied as a whole, semicolons in strings kept", not err(24) and "[[\"a;b\"],[\"a;b\"]]" in text(25)),
     ("test_changes is refused where writing is off", err(26)),
+    ("create_connection checks and saves a connection", not err(27) and "\"created\"" in text(27) and not err(28)),
+    ("create_connection says why a URL fails", err(29) and "refused" in text(29)),
+    ("delete_connection removes it", not err(30) and "\"created\"" not in text(31)),
+    ("create_connection is refused unless the user allows it", err(32) and "Settings > Agents" in text(32)),
     ("describe_schema lists every table with its columns", "dblens_mcp (table" in text(13) and "id integer PK" in text(13)),
 ]
 for name, ok in checks: print(("PASS " if ok else "FAIL ") + name)
