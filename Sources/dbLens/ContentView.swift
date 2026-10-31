@@ -60,6 +60,8 @@ struct Sidebar: View {
     @Query(sort: \SavedConnection.name) private var connections: [SavedConnection]
     @AppStorage("confirmDelete") private var confirmDelete = true
     @State private var filter = ""
+    /// Folded groups (schemas, Redis prefixes) of the open connection, remembered per connection.
+    @State private var folded: Set<String> = []
     @State private var deleting: SavedConnection?
     @State private var deletingKey: Relation?
 
@@ -76,6 +78,20 @@ struct Sidebar: View {
             case nil: break
             }
         }
+    }
+
+    private func expanded(_ group: String) -> Binding<Bool> {
+        Binding {
+            !filter.isEmpty || !folded.contains(group)
+        } set: { open in
+            guard filter.isEmpty else { return }
+            if open { folded.remove(group) } else { folded.insert(group) }
+            if let id = model.activeID { UserDefaults.standard.set(Array(folded), forKey: "sidebar.folded.\(id.uuidString)") }
+        }
+    }
+
+    private func loadFolded() {
+        folded = model.activeID.flatMap { UserDefaults.standard.stringArray(forKey: "sidebar.folded.\($0.uuidString)") }.map(Set.init) ?? []
     }
 
     private var schemas: [(String, [Relation])] {
@@ -108,12 +124,15 @@ struct Sidebar: View {
             if model.session != nil {
                 ForEach(schemas, id: \.0) { schema, relations in
                     // Redis keys group by prefix; keys without one go under "keys".
-                    Section(schema.isEmpty ? String(localized: "keys") : schema) {
+                    // Each group folds with its disclosure arrow; a filter shows every match.
+                    Section(isExpanded: expanded(schema)) {
                         ForEach(relations) { relation in
                             Label(relation.name, systemImage: relation.symbol)
                                 .tag(Row.relation(relation.id))
                                 .contextMenu { relationMenu(relation) }
                         }
+                    } header: {
+                        Text(schema.isEmpty ? String(localized: "keys") : schema)
                     }
                 }
                 if model.usesCommands, model.relations.count >= 5_000 {
@@ -124,6 +143,8 @@ struct Sidebar: View {
             }
         }
         .searchable(text: $filter, placement: .sidebar, prompt: model.usesCommands ? Text("Filter Keys") : model.usesQueries ? Text("Filter Collections") : Text("Filter Tables"))
+        .onAppear(perform: loadFolded)
+        .onChange(of: model.activeID) { loadFolded() }
         .confirmationDialog("Delete the key “\(deletingKey?.name ?? "")”?", isPresented: .init(
             get: { deletingKey != nil }, set: { if !$0 { deletingKey = nil } }
         )) {

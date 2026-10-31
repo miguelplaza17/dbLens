@@ -32,8 +32,22 @@ public enum ConnectionProblem {
         if has("ssl", "tls"), has("not support", "não oferece suporte", "does not support", "wrong version", "handshake", "requires") {
             return String(localized: "TLS didn't work with \(place): the server and the URL disagree on encryption. Check the URL's TLS/SSL setting.")
         }
+        let local = ["localhost", "127.0.0.1", "::1"].contains(host)
+        let defaultPort = summary.map { Self.defaultPort($0.engine) } ?? 0
+        let docker = String(localized: "If the database runs in Docker, publish its port on the server (ports: in Docker Compose, or the External Port field in panels like Dokploy) and put that port in the URL.")
+        let sshHost = String(localized: "Through SSH, the URL's host and port are seen from the SSH server: use the address the database has there (127.0.0.1 and a published port, or the container's IP), not this Mac's.")
         if has("refused", "(61)", "(36)") {
-            return String(localized: "Nothing answered at \(place)\(tunnel): the connection was refused. Is the server running, and is the port right?")
+            var hints: [String] = []
+            if local, !viaSSH {
+                hints.append(String(localized: "Is the database running on this Mac?"))
+            } else if !viaSSH {
+                hints.append(docker)
+            }
+            if viaSSH { hints.append(sshHost) }
+            if let port = summary?.port, defaultPort > 0, port != defaultPort {
+                hints.append(String(localized: "The URL uses port \(String(port)); this database's usual port is \(String(defaultPort))."))
+            }
+            return Self.compose(String(localized: "Nothing answered at \(place)\(tunnel): the connection was refused."), hints)
         }
         if has("invalid srv service name") {
             return String(localized: "\"\(host)\" isn't a valid cluster name for mongodb+srv://. Check the URL's host.")
@@ -42,15 +56,22 @@ public enum ConnectionProblem {
                "nodename nor servname", "failed to look up srv", "host not found", "name or service not known") {
             // A name without a dot (a Docker service, a LAN machine) only resolves inside its own network.
             if !host.contains("."), !host.contains(":"), host != "localhost" {
-                return String(localized: "The host \"\(host)\" wasn't found. It's a short name, which only resolves inside its own network (a Docker network, for example): this Mac needs that network's DNS, or use a full name or IP address.")
+                let hint = viaSSH
+                    ? String(localized: "Through SSH the name must resolve on the SSH server, and container names usually don't resolve on the server itself: use the container's IP, or 127.0.0.1 and a published port.")
+                    : String(localized: "From this Mac, use the server's IP or name instead, with the database's published port (ports: in Docker Compose, or the External Port field in panels like Dokploy), or connect through SSH to that server.")
+                return Self.compose(String(localized: "The host \"\(host)\" wasn't found. It looks like a container or service name, which only resolves inside its own Docker network."), [hint])
             }
-            return String(localized: "The host \"\(host)\" wasn't found. Check the name, and whether this Mac can reach that network (some need a VPN).")
+            return Self.compose(String(localized: "The host \"\(host)\" wasn't found."),
+                                [String(localized: "Check the name, and whether this Mac can reach that network (some need a VPN).")])
         }
         if has("timeout", "tempo limite", "timed out", "(60)", "within") {
             if tlsURL, text.lowercased().hasPrefix("rediss://") {
                 return String(localized: "\(place) didn't answer TLS. If the server doesn't use TLS, use redis:// instead of rediss://.")
             }
-            return String(localized: "\(place)\(tunnel) didn't answer in time. A firewall may be blocking it, or it's only reachable through a VPN or an SSH tunnel.")
+            var hints = [String(localized: "A firewall may be blocking port \(String(summary?.port ?? defaultPort)). If you open it, allow only your private network or VPN, not the whole internet.")]
+            if !viaSSH { hints.append(String(localized: "Or connect through SSH (Edit Connection > SSH) via a machine that reaches the database.")) }
+            if viaSSH { hints.append(sshHost) }
+            return Self.compose(String(localized: "\(place)\(tunnel) didn't answer in time."), hints)
         }
         if has("password authentication failed", "autenticação do tipo senha", "access denied for user", "wrongpass",
                "authentication failed", "invalid username-password", "invalid password") {
@@ -77,6 +98,21 @@ public enum ConnectionProblem {
             return String(localized: "This file isn't a SQLite database.")
         }
         return nil
+    }
+
+    static func defaultPort(_ engine: Engine) -> Int {
+        switch engine {
+        case .postgres: 5432
+        case .mysql: 3306
+        case .redis: 6379
+        case .mongodb: 27017
+        case .sqlite: 0
+        }
+    }
+
+    /// The cause, then what to try, one per line.
+    private static func compose(_ headline: String, _ hints: [String]) -> String {
+        ([headline] + hints.map { "• " + $0 }).joined(separator: "\n")
     }
 
     /// The server's message on one or two lines: libpq's repeats for each
