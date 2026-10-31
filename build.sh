@@ -47,6 +47,8 @@ cp "$bin" "$app/Contents/MacOS/$name"
 sed -e "s/__BUILD__/$(date +%Y%m%d%H%M)/" -e "s/__VERSION__/$(cat "$here/VERSION")/" "$here/Info.plist.in" > "$app/Contents/Info.plist"
 # libpq and its libraries go inside the app, so it runs without Homebrew.
 "$here/tools/bundle_libs.sh" "$app" >/dev/null
+# Logos for Settings > Agents.
+ditto "$here/Resources/AgentLogos" "$app/Contents/Resources/AgentLogos"
 # Sparkle, for updates. The app isn't sandboxed, so its XPC services aren't needed.
 sparkle="$app/Contents/Frameworks/Sparkle.framework"
 ditto "$scratch/$config/Sparkle.framework" "$sparkle"

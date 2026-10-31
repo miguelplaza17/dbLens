@@ -149,15 +149,19 @@ struct AgentSettings: View {
     }
 }
 
-/// The app's own icon when it is installed, or a symbol for command-line tools.
+/// The app's logo (Resources/AgentLogos) on a dark tile; a symbol for "Other apps".
 private struct AgentIcon: View {
     let client: AgentClient?
 
     var body: some View {
-        if let path = client?.appPath {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+        if let client, let logo = client.logo {
+            Image(nsImage: logo)
                 .resizable()
+                .scaledToFit()
+                .foregroundStyle(.white)
+                .padding(Space.xs)
                 .frame(width: 24, height: 24)
+                .background(Color(white: 0.16), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok icon tile
         } else {
             Image(systemName: client == nil ? "ellipsis" : "terminal.fill")
                 .font(.system(size: 11, weight: .semibold))
@@ -171,7 +175,7 @@ private struct AgentIcon: View {
 
 /// An app that runs MCP servers, and how dbLens goes into its settings.
 enum AgentClient: String, CaseIterable, Identifiable {
-    case claudeCode, claudeDesktop, codex, chatGPT, cursor, devin, vsCode, geminiCLI, grokCLI, zed
+    case claudeCode, claudeDesktop, chatGPT, cursor, devin, vsCode, geminiCLI, grokCLI, zed
 
     var id: String { rawValue }
 
@@ -190,12 +194,11 @@ enum AgentClient: String, CaseIterable, Identifiable {
     var name: String {
         switch self {
         case .claudeCode: "Claude Code"
-        case .claudeDesktop: "Claude Desktop"
-        case .codex: "Codex (OpenAI)"
-        case .chatGPT: "ChatGPT"
+        case .claudeDesktop: String(localized: "Claude (chat)")
+        case .chatGPT: "ChatGPT (Codex)"
         case .cursor: "Cursor"
         case .devin: "Devin Desktop (Windsurf)"
-        case .vsCode: "VS Code"
+        case .vsCode: "VS Code (Copilot)"
         case .geminiCLI: "Gemini CLI"
         case .grokCLI: "Grok CLI"
         case .zed: "Zed"
@@ -204,8 +207,9 @@ enum AgentClient: String, CaseIterable, Identifiable {
 
     var note: String {
         switch self {
-        case .claudeCode: String(localized: "For every project (claude mcp add --scope user).")
-        case .codex: String(localized: "The Codex app and CLI (~/.codex/config.toml).")
+        case .claudeCode: String(localized: "The claude command and the Claude app's Code tab, every project.")
+        case .claudeDesktop: String(localized: "Chats in the Claude app. Restart it afterwards.")
+        case .chatGPT: String(localized: "The app and the codex command (~/.codex/config.toml).")
         case .geminiCLI, .grokCLI: String(localized: "For every project.")
         default: String(localized: "Restart \(name) afterwards.")
         }
@@ -213,14 +217,34 @@ enum AgentClient: String, CaseIterable, Identifiable {
 
     var missing: String {
         switch self {
-        case .claudeCode, .codex, .geminiCLI, .grokCLI: String(localized: "Not installed (command not found).")
+        case .claudeCode: String(localized: "Neither the Claude app nor the claude command was found.")
+        case .geminiCLI, .grokCLI: String(localized: "Not installed (command not found).")
         default: String(localized: "\(name) isn't installed.")
         }
     }
 
-    /// ChatGPT's own app takes remote MCP servers only, not local ones like dbLens.
-    var isSupported: Bool { self != .chatGPT }
-    var unsupported: String { String(localized: "Its app only connects to remote MCP servers. Use Codex, from OpenAI.") }
+    /// Every listed app runs local MCP servers.
+    var isSupported: Bool { true }
+    var unsupported: String { "" }
+
+    /// The logo bundled in Resources/AgentLogos; monochrome ones take the tile's color.
+    var logo: NSImage? {
+        let file: String = switch self {
+        case .claudeCode: "claudecode"
+        case .claudeDesktop: "claude"
+        case .chatGPT: "chatgpt"
+        case .cursor: "cursor"
+        case .devin: "devin"
+        case .vsCode: "vscode"
+        case .geminiCLI: "geminicli"
+        case .grokCLI: "grok"
+        case .zed: "zed"
+        }
+        guard let url = Bundle.main.url(forResource: file, withExtension: "svg", subdirectory: "AgentLogos"),
+              let image = NSImage(contentsOf: url) else { return nil }
+        image.isTemplate = [.cursor, .grokCLI, .zed].contains(self)
+        return image
+    }
 
     private static let home = FileManager.default.homeDirectoryForCurrentUser
     private static let files = FileManager.default
@@ -229,8 +253,7 @@ enum AgentClient: String, CaseIterable, Identifiable {
     var appPath: String? {
         let names: [String] = switch self {
         case .claudeCode, .claudeDesktop: ["Claude"]
-        case .codex: ["Codex"]
-        case .chatGPT: ["ChatGPT"]
+        case .chatGPT: ["ChatGPT", "Codex"]
         case .cursor: ["Cursor"]
         case .devin: ["Devin", "Windsurf"]
         case .vsCode: ["Visual Studio Code"]
@@ -244,7 +267,7 @@ enum AgentClient: String, CaseIterable, Identifiable {
     private var binary: String? {
         let name: String? = switch self {
         case .claudeCode: "claude"
-        case .codex: "codex"
+        case .chatGPT: "codex"
         case .geminiCLI: "gemini"
         case .grokCLI: "grok"
         default: nil
@@ -257,8 +280,8 @@ enum AgentClient: String, CaseIterable, Identifiable {
 
     var isAvailable: Bool {
         switch self {
-        case .claudeCode, .geminiCLI, .grokCLI: binary != nil
-        case .codex: binary != nil || appPath != nil
+        case .claudeCode, .chatGPT: binary != nil || appPath != nil
+        case .geminiCLI, .grokCLI: binary != nil
         default: appPath != nil
         }
     }
@@ -271,7 +294,7 @@ enum AgentClient: String, CaseIterable, Identifiable {
         switch self {
         case .claudeCode: Self.home.appending(path: ".claude.json")
         case .claudeDesktop: Self.home.appending(path: "Library/Application Support/Claude/claude_desktop_config.json")
-        case .codex, .chatGPT: Self.home.appending(path: ".codex/config.toml")
+        case .chatGPT: Self.home.appending(path: ".codex/config.toml")
         case .cursor: Self.home.appending(path: ".cursor/mcp.json")
         case .devin: Self.home.appending(path: ".codeium/windsurf/mcp_config.json")
         case .vsCode: Self.home.appending(path: "Library/Application Support/Code/User/mcp.json")
@@ -283,7 +306,7 @@ enum AgentClient: String, CaseIterable, Identifiable {
 
     private var format: Format {
         switch self {
-        case .codex, .chatGPT, .grokCLI: .toml
+        case .chatGPT, .grokCLI: .toml
         case .vsCode: .json(key: "servers")
         case .zed: .json(key: "context_servers")
         default: .json(key: "mcpServers")
@@ -309,11 +332,11 @@ enum AgentClient: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Claude Code through its own command (its settings file holds much more);
-    /// the others by adding or removing "dblens" in their config, keeping the rest.
+    /// Claude Code through its own command (its settings file holds much more),
+    /// or like the others when only the app is there: adding or removing
+    /// "dblens" in the app's config, keeping the rest.
     func set(installed: Bool) async throws {
-        if self == .claudeCode {
-            guard let claude = binary else { throw AgentSetupError(missing) }
+        if self == .claudeCode, let claude = binary {
             if installed {
                 _ = try? await Self.run(claude, ["mcp", "remove", "--scope", "user", "dblens"])  // replaces an older entry
                 try await Self.run(claude, ["mcp", "add", "--scope", "user", "dblens", "--", Self.executable, "--mcp"])
