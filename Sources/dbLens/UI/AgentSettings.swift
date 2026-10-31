@@ -1,8 +1,9 @@
+import AppKit
 import SwiftData
 import SwiftUI
 
-/// Settings > Agents: dbLens's MCP server, installed into the agent apps with
-/// one click, and which connections agents may write to.
+/// Settings > Agents: dbLens's MCP server, installed into agent apps with one
+/// click, the tools they get, and which connections they may write to.
 struct AgentSettings: View {
     @Query(sort: \SavedConnection.name) private var connections: [SavedConnection]
     @Environment(\.modelContext) private var context
@@ -12,7 +13,7 @@ struct AgentSettings: View {
 
     var body: some View {
         Section {
-            Text("Agents like Claude Code read your databases through the connections saved here. They see names, never URLs or passwords, and queries are read-only, enforced by the database.")
+            Text("Agents read your databases through the connections saved here. They see names, never URLs or passwords, and queries are read-only, enforced by the database.")
                 .foregroundStyle(.secondary)
             LabeledContent("Command") {
                 HStack(spacing: Space.sm) {
@@ -34,28 +35,25 @@ struct AgentSettings: View {
         Section {
             ForEach(AgentClient.allCases) { client in
                 LabeledContent {
-                    if working == client {
-                        ProgressView().controlSize(.small)
-                    } else if installed.contains(client) {
-                        HStack(spacing: Space.sm) {
-                            Label("Installed", systemImage: "checkmark.circle.fill")
-                                .foregroundStyle(.green)
-                            Button("Remove") { run(client, install: false) }
-                        }
-                    } else {
-                        Button("Install") { run(client, install: true) }
-                            .disabled(!client.isAvailable)
-                    }
+                    action(client)
                 } label: {
-                    Text(client.name)
-                    Text(client.isAvailable ? client.note : client.missing)
+                    Label {
+                        Text(client.name)
+                        Text(client.isSupported ? (client.isAvailable ? client.note : client.missing) : client.unsupported)
+                    } icon: {
+                        AgentIcon(client: client)
+                    }
                 }
             }
             LabeledContent {
                 Button("Copy JSON") { copy(AgentClient.json) }
             } label: {
-                Text("Other apps")
-                Text("Paste into the app's MCP settings.")
+                Label {
+                    Text("Other apps")
+                    Text("Most take this in their MCP settings.")
+                } icon: {
+                    AgentIcon(client: nil)
+                }
             }
             if let problem {
                 Text(verbatim: problem)
@@ -65,6 +63,29 @@ struct AgentSettings: View {
             }
         } header: {
             Text("Install")
+        }
+
+        Section {
+            ForEach(MCPServer.Server.tools.indices, id: \.self) { index in
+                let tool = MCPServer.Server.tools[index]
+                let writes = (tool["annotations"] as? [String: Bool])?["readOnlyHint"] == false
+                LabeledContent {
+                    Text(writes ? "Writes" : "Reads")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(writes ? .orange : .green)
+                        .padding(.horizontal, Space.sm)
+                        .padding(.vertical, 2)  // grid: ok badge
+                        .background((writes ? Color.orange : Color.green).opacity(0.15), in: Capsule())
+                } label: {
+                    Text(verbatim: tool["name"] as? String ?? "").font(.system(.body, design: .monospaced))
+                    Text(verbatim: Self.firstSentence(tool["description"] as? String ?? ""))
+                }
+            }
+        } header: {
+            Text("Tools")
+        } footer: {
+            Text("Tools that write work only on connections allowed below.")
+                .foregroundStyle(.secondary)
         }
 
         Section {
@@ -88,6 +109,27 @@ struct AgentSettings: View {
         .onAppear(perform: refresh)
     }
 
+    @ViewBuilder
+    private func action(_ client: AgentClient) -> some View {
+        if !client.isSupported {
+            EmptyView()
+        } else if working == client {
+            ProgressView().controlSize(.small)
+        } else if installed.contains(client) {
+            HStack(spacing: Space.sm) {
+                Label("Installed", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                Button("Remove") { run(client, install: false) }
+            }
+        } else {
+            Button("Install") { run(client, install: true) }
+                .disabled(!client.isAvailable)
+        }
+    }
+
+    private static func firstSentence(_ text: String) -> String {
+        text.range(of: ". ").map { String(text[..<$0.lowerBound]) + "." } ?? text
+    }
+
     private func refresh() {
         installed = Set(AgentClient.allCases.filter(\.isInstalled))
     }
@@ -99,7 +141,7 @@ struct AgentSettings: View {
             do {
                 try await client.set(installed: install)
             } catch {
-                problem = error.localizedDescription
+                problem = "\(client.name): \(error.localizedDescription)"
             }
             working = nil
             refresh()
@@ -107,9 +149,29 @@ struct AgentSettings: View {
     }
 }
 
+/// The app's own icon when it is installed, or a symbol for command-line tools.
+private struct AgentIcon: View {
+    let client: AgentClient?
+
+    var body: some View {
+        if let path = client?.appPath {
+            Image(nsImage: NSWorkspace.shared.icon(forFile: path))
+                .resizable()
+                .frame(width: 24, height: 24)
+        } else {
+            Image(systemName: client == nil ? "ellipsis" : "terminal.fill")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 20, height: 20)
+                .background(Color.gray.gradient, in: RoundedRectangle(cornerRadius: 5, style: .continuous))  // grid: ok icon tile
+                .frame(width: 24, height: 24)
+        }
+    }
+}
+
 /// An app that runs MCP servers, and how dbLens goes into its settings.
 enum AgentClient: String, CaseIterable, Identifiable {
-    case claudeCode, claudeDesktop, cursor
+    case claudeCode, claudeDesktop, codex, chatGPT, cursor, devin, vsCode, geminiCLI, grokCLI, zed
 
     var id: String { rawValue }
 
@@ -129,85 +191,173 @@ enum AgentClient: String, CaseIterable, Identifiable {
         switch self {
         case .claudeCode: "Claude Code"
         case .claudeDesktop: "Claude Desktop"
+        case .codex: "Codex (OpenAI)"
+        case .chatGPT: "ChatGPT"
         case .cursor: "Cursor"
+        case .devin: "Devin Desktop (Windsurf)"
+        case .vsCode: "VS Code"
+        case .geminiCLI: "Gemini CLI"
+        case .grokCLI: "Grok CLI"
+        case .zed: "Zed"
         }
     }
 
     var note: String {
         switch self {
         case .claudeCode: String(localized: "For every project (claude mcp add --scope user).")
-        case .claudeDesktop: String(localized: "Restart Claude Desktop afterwards.")
-        case .cursor: String(localized: "Restart Cursor afterwards.")
+        case .codex: String(localized: "The Codex app and CLI (~/.codex/config.toml).")
+        case .geminiCLI, .grokCLI: String(localized: "For every project.")
+        default: String(localized: "Restart \(name) afterwards.")
         }
     }
 
     var missing: String {
         switch self {
-        case .claudeCode: String(localized: "The claude command wasn't found.")
-        case .claudeDesktop: String(localized: "Claude Desktop isn't installed.")
-        case .cursor: String(localized: "Cursor isn't installed.")
+        case .claudeCode, .codex, .geminiCLI, .grokCLI: String(localized: "Not installed (command not found).")
+        default: String(localized: "\(name) isn't installed.")
         }
     }
+
+    /// ChatGPT's own app takes remote MCP servers only, not local ones like dbLens.
+    var isSupported: Bool { self != .chatGPT }
+    var unsupported: String { String(localized: "Its app only connects to remote MCP servers. Use Codex, from OpenAI.") }
 
     private static let home = FileManager.default.homeDirectoryForCurrentUser
+    private static let files = FileManager.default
 
-    /// The JSON file the app reads its MCP servers from.
-    private var configFile: URL {
-        switch self {
-        case .claudeCode: Self.home.appending(path: ".claude.json")
-        case .claudeDesktop: Self.home.appending(path: "Library/Application Support/Claude/claude_desktop_config.json")
-        case .cursor: Self.home.appending(path: ".cursor/mcp.json")
+    /// The app bundle, for its icon and to know it is installed.
+    var appPath: String? {
+        let names: [String] = switch self {
+        case .claudeCode, .claudeDesktop: ["Claude"]
+        case .codex: ["Codex"]
+        case .chatGPT: ["ChatGPT"]
+        case .cursor: ["Cursor"]
+        case .devin: ["Devin", "Windsurf"]
+        case .vsCode: ["Visual Studio Code"]
+        case .zed: ["Zed"]
+        case .geminiCLI, .grokCLI: []
         }
+        return names.flatMap { ["/Applications/\($0).app", Self.home.appending(path: "Applications/\($0).app").path] }
+            .first { Self.files.fileExists(atPath: $0) }
     }
 
-    private static var claudeBinary: String? {
-        ["~/.local/bin/claude", "~/.claude/local/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
-            .map { NSString(string: $0).expandingTildeInPath }
-            .first { FileManager.default.isExecutableFile(atPath: $0) }
+    private var binary: String? {
+        let name: String? = switch self {
+        case .claudeCode: "claude"
+        case .codex: "codex"
+        case .geminiCLI: "gemini"
+        case .grokCLI: "grok"
+        default: nil
+        }
+        guard let name else { return nil }
+        return ["~/.local/bin", "~/.claude/local", "/opt/homebrew/bin", "/usr/local/bin", "~/.npm-global/bin", "~/.bun/bin"]
+            .map { NSString(string: "\($0)/\(name)").expandingTildeInPath }
+            .first { Self.files.isExecutableFile(atPath: $0) }
     }
 
     var isAvailable: Bool {
         switch self {
-        case .claudeCode: Self.claudeBinary != nil
-        case .claudeDesktop: FileManager.default.fileExists(atPath: "/Applications/Claude.app")
-        case .cursor: FileManager.default.fileExists(atPath: "/Applications/Cursor.app")
-                      || FileManager.default.fileExists(atPath: Self.home.appending(path: ".cursor").path)
+        case .claudeCode, .geminiCLI, .grokCLI: binary != nil
+        case .codex: binary != nil || appPath != nil
+        default: appPath != nil
+        }
+    }
+
+    // MARK: Config files
+
+    private enum Format { case json(key: String), toml }
+
+    private var configFile: URL {
+        switch self {
+        case .claudeCode: Self.home.appending(path: ".claude.json")
+        case .claudeDesktop: Self.home.appending(path: "Library/Application Support/Claude/claude_desktop_config.json")
+        case .codex, .chatGPT: Self.home.appending(path: ".codex/config.toml")
+        case .cursor: Self.home.appending(path: ".cursor/mcp.json")
+        case .devin: Self.home.appending(path: ".codeium/windsurf/mcp_config.json")
+        case .vsCode: Self.home.appending(path: "Library/Application Support/Code/User/mcp.json")
+        case .geminiCLI: Self.home.appending(path: ".gemini/settings.json")
+        case .grokCLI: Self.home.appending(path: ".grok/config.toml")
+        case .zed: Self.home.appending(path: ".config/zed/settings.json")
+        }
+    }
+
+    private var format: Format {
+        switch self {
+        case .codex, .chatGPT, .grokCLI: .toml
+        case .vsCode: .json(key: "servers")
+        case .zed: .json(key: "context_servers")
+        default: .json(key: "mcpServers")
+        }
+    }
+
+    /// dbLens's entry in this app's format.
+    private var entry: [String: Any] {
+        switch self {
+        case .vsCode: ["type": "stdio", "command": Self.executable, "args": ["--mcp"]]
+        default: ["command": Self.executable, "args": ["--mcp"]]
         }
     }
 
     var isInstalled: Bool {
-        guard let data = try? Data(contentsOf: configFile),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let servers = root["mcpServers"] as? [String: Any] else { return false }
-        return servers["dblens"] != nil
+        guard isSupported, let text = try? String(contentsOf: configFile, encoding: .utf8) else { return false }
+        switch format {
+        case .toml:
+            return text.contains("[mcp_servers.dblens]")
+        case .json(let key):
+            guard let root = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else { return false }
+            return (root[key] as? [String: Any])?["dblens"] != nil
+        }
     }
 
     /// Claude Code through its own command (its settings file holds much more);
-    /// the others by adding or removing "dblens" in their JSON, keeping the rest.
+    /// the others by adding or removing "dblens" in their config, keeping the rest.
     func set(installed: Bool) async throws {
         if self == .claudeCode {
-            guard let claude = Self.claudeBinary else { throw DatabaseErrorText(String(localized: "The claude command wasn't found.")) }
-            var arguments = ["mcp", "remove", "--scope", "user", "dblens"]
+            guard let claude = binary else { throw AgentSetupError(missing) }
             if installed {
-                _ = try? await Self.run(claude, arguments)  // replaces an older entry
-                arguments = ["mcp", "add", "--scope", "user", "dblens", "--", Self.executable, "--mcp"]
+                _ = try? await Self.run(claude, ["mcp", "remove", "--scope", "user", "dblens"])  // replaces an older entry
+                try await Self.run(claude, ["mcp", "add", "--scope", "user", "dblens", "--", Self.executable, "--mcp"])
+            } else {
+                try await Self.run(claude, ["mcp", "remove", "--scope", "user", "dblens"])
             }
-            try await Self.run(claude, arguments)
             return
         }
-        var root: [String: Any] = [:]
-        if let data = try? Data(contentsOf: configFile) {
-            guard let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                throw DatabaseErrorText(String(localized: "\(configFile.lastPathComponent) isn't valid JSON; fix it or edit it by hand."))
+        try Self.files.createDirectory(at: configFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let current = (try? String(contentsOf: configFile, encoding: .utf8)) ?? ""
+        switch format {
+        case .toml:
+            var text = Self.removingTOMLTable("mcp_servers.dblens", from: current)
+            if installed {
+                if !text.isEmpty, !text.hasSuffix("\n") { text += "\n" }
+                text += "\n[mcp_servers.dblens]\ncommand = \"\(Self.executable)\"\nargs = [\"--mcp\"]\n"
             }
-            root = parsed
+            try text.write(to: configFile, atomically: true, encoding: .utf8)
+        case .json(let key):
+            var root: [String: Any] = [:]
+            if !current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                guard let parsed = try? JSONSerialization.jsonObject(with: Data(current.utf8)) as? [String: Any] else {
+                    throw AgentSetupError(String(localized: "\(configFile.lastPathComponent) has comments or isn't plain JSON; add dbLens by hand with Copy JSON."))
+                }
+                root = parsed
+            }
+            var servers = root[key] as? [String: Any] ?? [:]
+            servers["dblens"] = installed ? entry : nil
+            root[key] = servers
+            let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            try data.write(to: configFile, options: .atomic)
         }
-        var servers = root["mcpServers"] as? [String: Any] ?? [:]
-        servers["dblens"] = installed ? ["command": Self.executable, "args": ["--mcp"]] : nil
-        root["mcpServers"] = servers
-        try FileManager.default.createDirectory(at: configFile.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let data = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
-        try data.write(to: configFile, options: .atomic)
+    }
+
+    /// The text without one [table] and its keys (up to the next table).
+    private static func removingTOMLTable(_ name: String, from text: String) -> String {
+        var lines: [Substring] = []
+        var skipping = false
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") { skipping = trimmed == "[\(name)]" }
+            if !skipping { lines.append(line) }
+        }
+        return lines.joined(separator: "\n").replacingOccurrences(of: "\n\n\n", with: "\n\n")
     }
 
     @discardableResult
@@ -222,14 +372,14 @@ enum AgentClient: String, CaseIterable, Identifiable {
             try process.run()
             process.waitUntilExit()
             let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            guard process.terminationStatus == 0 else { throw DatabaseErrorText(text.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            guard process.terminationStatus == 0 else { throw AgentSetupError(text.trimmingCharacters(in: .whitespacesAndNewlines)) }
             return text
         }.value
     }
 }
 
-/// An error that is just its message.
-struct DatabaseErrorText: LocalizedError {
+/// An install step that failed, with what to tell the user.
+struct AgentSetupError: LocalizedError {
     let errorDescription: String?
     init(_ message: String) { errorDescription = message }
 }
