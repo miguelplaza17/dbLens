@@ -1,0 +1,6 @@
+module CMongoC [system] {
+    header "shim.h"
+    link "mongoc2"
+    link "bson2"
+    export *
+}

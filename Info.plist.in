@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>io.github.miguelplaza17.dblens</string>
+<key>CFBundleName</key><string>dbLens</string>
+<key>CFBundleDisplayName</key><string>dbLens</string>
+<key>CFBundleExecutable</key><string>dbLens</string>
+<key>CFBundleIconFile</key><string>AppIcon</string>
+<key>CFBundleIconName</key><string>AppIcon</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>__VERSION__</string>
+<key>CFBundleVersion</key><string>__BUILD__</string>
+<key>LSMinimumSystemVersion</key><string>26.0</string>
+<key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+<key>CFBundleDevelopmentRegion</key><string>en</string>
+<key>CFBundleLocalizations</key><array><string>en</string><string>pt-BR</string></array>
+<key>NSHumanReadableCopyright</key><string>© 2026 Miguel Plaza. MIT License.</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSPrincipalClass</key><string>NSApplication</string>
+<key>SUFeedURL</key><string>https://github.com/miguelplaza17/dbLens/releases/latest/download/appcast.xml</string>
+<key>SUPublicEDKey</key><string>1vn/xNYmHbUltw9YwUtt1aGiMTCzsnH9r7G+8fHes0c=</string>
+<key>SUEnableAutomaticChecks</key><true/>
+</dict></plist>

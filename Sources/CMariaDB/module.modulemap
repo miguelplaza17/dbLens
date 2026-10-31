@@ -1,0 +1,5 @@
+module CMariaDB [system] {
+    header "shim.h"
+    link "mariadb"
+    export *
+}
