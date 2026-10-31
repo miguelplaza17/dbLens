@@ -115,10 +115,12 @@ public actor PostgresSession: DatabaseSession {
     /// One page of a table's rows, with the column types and, for tables, the
     /// row keys. Sorted by the primary key when there is one, so pages and
     /// edited rows stay in place.
-    public func page(of relation: Relation, limit: Int, offset: Int, search: String = "") throws -> QueryResult {
+    public func page(of relation: Relation, limit: Int, offset: Int, search: String = "", sort: ColumnSort? = nil) throws -> QueryResult {
         let primaryKey = try primaryKey(of: relation)
         let usesCtid = primaryKey.isEmpty && relation.kind == .table
-        let order = primaryKey.isEmpty ? "" : " order by " + primaryKey.map(quoteIdent).joined(separator: ", ")
+        let keys = primaryKey.isEmpty ? (usesCtid ? ["t.ctid"] : []) : primaryKey.map(quoteIdent)
+        let terms = (sort.map { ["\(quoteIdent($0.column)) \($0.direction) nulls last"] } ?? []) + keys
+        let order = terms.isEmpty ? "" : " order by " + terms.joined(separator: ", ")
         // Without a primary key, a row is found by ctid, checked with xmin: if another
         // session changed or vacuumed it since, the ctid may point to another row.
         var result = try single("select \(usesCtid ? "ctid::text, xmin::text, " : "")* from \(relation.qualified) as t\(filter(search))\(order) limit \(limit) offset \(offset)")

@@ -261,13 +261,13 @@ public actor SQLiteSession: DatabaseSession {
 
     /// One page of a table's rows. Sorted by the primary key, or by rowid when there is none
     /// (a WITHOUT ROWID table always has a primary key, so it never needs the rowid).
-    public func page(of relation: Relation, limit: Int, offset: Int, search: String = "") throws -> QueryResult {
+    public func page(of relation: Relation, limit: Int, offset: Int, search: String = "", sort: ColumnSort? = nil) throws -> QueryResult {
         let info = try tableInfo(relation)
         let isTable = relation.kind == .table
         let useRowid = isTable && info.primaryKey.isEmpty
-        let order = info.primaryKey.isEmpty
-            ? (useRowid ? " order by rowid" : "")
-            : " order by " + info.primaryKey.map(quote).joined(separator: ", ")
+        let keys = info.primaryKey.isEmpty ? (useRowid ? ["rowid"] : []) : info.primaryKey.map(quote)
+        let terms = (sort.map { ["\(quote($0.column)) \($0.direction) nulls last"] } ?? []) + keys
+        let order = terms.isEmpty ? "" : " order by " + terms.joined(separator: ", ")
         var result = try single("select \(useRowid ? "rowid, " : "")* from \(qualified(relation))\(filter(search, columns: info.columns))\(order) limit \(limit) offset \(offset)")
         if useRowid {
             let keys = result.rows.map { [$0[0]] }

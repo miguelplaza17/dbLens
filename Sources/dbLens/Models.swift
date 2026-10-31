@@ -76,6 +76,10 @@ final class AppModel {
     }
     /// Text the table grid is filtered by, on the server, across every page.
     private(set) var tableSearch = ""
+    /// The column the table is ordered by (on the server), from a header click.
+    private(set) var tableSort: ColumnSort?
+    /// The column the query result is ordered by, on screen.
+    private(set) var querySort: ColumnSort?
     @ObservationIgnored private var searchTask: Task<Void, Never>?
 
     let container: ModelContainer
@@ -141,7 +145,30 @@ final class AppModel {
 
     /// The grid on screen: the table page or the last query result.
     var shownResult: QueryResult? {
-        shown == .table ? tableResult : execution?.main
+        shown == .table ? tableResult : sortedQueryResult
+    }
+
+    /// The query result in the order its header asks for. Query results hold
+    /// what the statement returned, so they're sorted here, not on the server.
+    private var sortedQueryResult: QueryResult? {
+        guard var result = execution?.main, let sort = querySort,
+              let column = result.columns.firstIndex(where: { $0.name == sort.column }) else { return execution?.main }
+        result.rows.sort { ColumnSort.precedes($0[column], $1[column], ascending: sort.ascending) }
+        return result
+    }
+
+    /// The order the grid's header shows.
+    var shownSort: ColumnSort? { shown == .table ? tableSort : querySort }
+
+    /// A header click: the table again from its first page, or the query result reordered.
+    func sort(by sort: ColumnSort) async {
+        if shown == .table {
+            tableSort = sort
+            offset = 0
+            await loadTable()
+        } else {
+            querySort = sort
+        }
     }
 
     /// Rows of this table page can be edited: a table with a primary key or a ctid.
@@ -391,13 +418,14 @@ final class AppModel {
         let offset = offset
         do {
             let search = tableSearch
-            let result = try await session.page(of: relation, limit: pageSize, offset: offset, search: search)
+            let sort = tableSort
+            let result = try await session.page(of: relation, limit: pageSize, offset: offset, search: search, sort: sort)
             // Ignore an answer for a table or page that is no longer shown.
-            guard relation.id == selectedRelation, offset == self.offset, search == tableSearch else { return }
+            guard relation.id == selectedRelation, offset == self.offset, search == tableSearch, sort == tableSort else { return }
             if offset == 0 { tableCount = try? await session.count(of: relation, search: search) }
             // Rebuild the grid (and scroll to the top) only for another table,
             // page, or set of columns; an edit keeps the place.
-            let shape = "\(relation.id)|\(offset)|\(search)|\(result.columns.map(\.name))"
+            let shape = "\(relation.id)|\(offset)|\(search)|\(String(describing: sort))|\(result.columns.map(\.name))"
             if shape != tableShape || tableResult == nil { tableVersion += 1 }
             tableShape = shape
             tableResult = result
@@ -425,9 +453,11 @@ final class AppModel {
         await loadTable()
     }
 
+    /// Another table starts unfiltered, in key order.
     private func clearSearch() {
         searchTask?.cancel()
         tableSearch = ""
+        tableSort = nil
     }
 
     /// Filters the table as you type, a moment after the last key.
@@ -534,6 +564,7 @@ final class AppModel {
         do {
             let execution = try await session.execute(text)
             self.execution = execution
+            querySort = nil
             runVersion += 1
             shown = .query
             addLog(sql: text, message: Self.summary(execution), isError: false)

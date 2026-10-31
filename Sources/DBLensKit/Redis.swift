@@ -916,7 +916,7 @@ public actor RedisSession: DatabaseSession {
     }
 
     /// One page of what a key holds, by type, with a note on its TTL.
-    public func page(of relation: Relation, limit: Int, offset: Int, search: String = "") throws -> QueryResult {
+    public func page(of relation: Relation, limit: Int, offset: Int, search: String = "", sort: ColumnSort? = nil) throws -> QueryResult {
         try guarded {
             let key = relation.name
             let head = try pipeline([Self.args(["TYPE", key]), Self.args(["TTL", key])])
@@ -924,9 +924,10 @@ public actor RedisSession: DatabaseSession {
             let type = head[0].text ?? "none"
             guard type != "none" else { throw Self.gone }
             let ttl = head[1].integer ?? -1
-            let page = search.isEmpty
+            // Searching or sorting needs the whole key, then one page of it.
+            let page = search.isEmpty && sort == nil
                 ? try read(key, type: type, limit: max(limit, 0), offset: max(offset, 0))
-                : Self.filtered(try read(key, type: type, limit: QueryResult.rowLimit, offset: 0), search,
+                : Self.filtered(try read(key, type: type, limit: QueryResult.rowLimit, offset: 0), search, sort: sort,
                                 limit: max(limit, 0), offset: max(offset, 0))
             shown[relation.id] = ShownPage(keys: page.keys?.values ?? [], values: page.rows.map { $0.last ?? nil },
                                            binary: page.binary)
@@ -938,8 +939,12 @@ public actor RedisSession: DatabaseSession {
     }
 
     /// The rows of a whole key that contain `search` (case-insensitive), then one page of them.
-    private static func filtered(_ page: Page, _ search: String, limit: Int, offset: Int) -> Page {
-        let hits = page.rows.indices.filter { page.rows[$0].contains { $0?.localizedCaseInsensitiveContains(search) == true } }
+    private static func filtered(_ page: Page, _ search: String, sort: ColumnSort? = nil, limit: Int, offset: Int) -> Page {
+        var hits = search.isEmpty ? Array(page.rows.indices)
+            : page.rows.indices.filter { page.rows[$0].contains { $0?.localizedCaseInsensitiveContains(search) == true } }
+        if let sort, let column = page.columns.firstIndex(where: { $0.name == sort.column }) {
+            hits.sort { ColumnSort.precedes(page.rows[$0][column], page.rows[$1][column], ascending: sort.ascending) }
+        }
         let slice = Array(hits.dropFirst(offset).prefix(limit))
         var result = page
         result.rows = slice.map { page.rows[$0] }

@@ -49,7 +49,9 @@ struct ResultPane: View {
                        startIndex: model.shown == .table ? model.offset : 0,
                        onEditCell: model.canEditRows ? { try await model.updateCell(row: $0, column: $1, value: $2) } : nil,
                        onOpenRow: model.canEditRows ? { model.rowEdit = RowEditTarget(row: $0) } : nil,
-                       onSelectionChange: { [selection] in selection.rows = $0 })
+                       onSelectionChange: { [selection] in selection.rows = $0 },
+                       sort: model.shownSort,
+                       onSort: { sort in Task { await model.sort(by: sort) } })
             Divider()
             footer(result)
         }

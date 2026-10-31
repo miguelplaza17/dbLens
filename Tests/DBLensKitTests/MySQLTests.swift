@@ -213,6 +213,7 @@ func mysqlPagesAndEdits(_ server: String) async throws {
     #expect(try await session.page(of: pk, limit: 10, offset: 0, search: "B").rows == [["2", "b", "2"]])
     #expect(try await session.count(of: pk, search: "B") == 1)
     #expect(try await session.page(of: pk, limit: 10, offset: 0, search: "%").rows.isEmpty)
+    #expect(try await session.page(of: pk, limit: 10, offset: 0, sort: ColumnSort(column: "nome", ascending: false)).rows.map { $0[1] } == ["b", "a"])
 
     let updated = try await session.update(pk, keys: keys, row: 1, changes: [("nome", "bê 'quoted' \\ 🚀"), ("n", nil)])
     #expect(updated.command == "UPDATE 1" && updated.affected == 1)

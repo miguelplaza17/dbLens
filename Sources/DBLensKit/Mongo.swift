@@ -311,11 +311,12 @@ public actor MongoSession: DatabaseSession {
 
     /// One page of a collection, sorted by _id, as a table (see the type's notes).
     /// Rows are found again by their _id, in canonical extended JSON.
-    public func page(of relation: Relation, limit: Int, offset: Int, search: String = "") throws -> QueryResult {
+    public func page(of relation: Relation, limit: Int, offset: Int, search: String = "", sort: ColumnSort? = nil) throws -> QueryResult {
         // The search needs the field names, which come from a page without it.
         if !search.isEmpty, columnTypes[relation.id] == nil { _ = try page(of: relation, limit: 1, offset: 0) }
         return try cancelable { tag in
-            var options = [#""sort":{"_id":1}"#, #""skip":\#(max(0, offset))"#, #""batchSize":\#(Self.batchSize)"#,
+            let order = sort.map { #"\#(MongoShell.jsonString($0.column)):\#($0.ascending ? 1 : -1),"# } ?? ""
+            var options = [#""sort":{\#(order)"_id":1}"#, #""skip":\#(max(0, offset))"#, #""batchSize":\#(Self.batchSize)"#,
                            #""comment":\#(MongoShell.jsonString(tag))"#]
             if limit > 0 { options.append(#""limit":\#(limit)"#) }
             let opts = try BSONDocument(json: "{" + options.joined(separator: ",") + "}")

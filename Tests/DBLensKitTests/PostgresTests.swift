@@ -134,6 +134,7 @@ func editsRows() async throws {
     #expect(try await session.page(of: pk, limit: 10, offset: 0, search: "B").rows == [["2", "b", "2"]])
     #expect(try await session.count(of: pk, search: "B") == 1)
     #expect(try await session.page(of: pk, limit: 10, offset: 0, search: "%").rows.isEmpty)
+    #expect(try await session.page(of: pk, limit: 10, offset: 0, sort: ColumnSort(column: "nome", ascending: false)).rows.map { $0[1] } == ["b", "a"])
 
     var page = try await session.page(of: pk, limit: 10, offset: 0)
     let keys = try #require(page.keys)

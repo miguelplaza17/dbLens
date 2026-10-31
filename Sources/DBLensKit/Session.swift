@@ -20,7 +20,8 @@ public protocol DatabaseSession: AnyObject, Sendable {
     /// One page of rows, sorted by the primary key when there is one, with
     /// column types and, when rows can be edited, their keys. A non-empty
     /// `search` keeps only rows with that text in any column (case-insensitive).
-    func page(of relation: Relation, limit: Int, offset: Int, search: String) async throws -> QueryResult
+    /// `sort` orders by one column first (then by the key, so pages stay stable).
+    func page(of relation: Relation, limit: Int, offset: Int, search: String, sort: ColumnSort?) async throws -> QueryResult
     /// Exact row count (of the rows matching `search`), or nil when counting would be slow.
     func count(of relation: Relation, search: String) async throws -> Int?
     /// Edits exactly one row (rolled back if it would touch more or none).
@@ -29,6 +30,33 @@ public protocol DatabaseSession: AnyObject, Sendable {
     func delete(_ relation: Relation, keys: RowKeys, row: Int) async throws -> EditOutcome
     /// Tables, their columns, and the foreign keys between them, for the schema board.
     func schemaGraph() async throws -> SchemaGraph
+}
+
+/// One column to order a table by, chosen by clicking its header.
+public struct ColumnSort: Sendable, Hashable {
+    public var column: String
+    public var ascending: Bool
+
+    public init(column: String, ascending: Bool) {
+        self.column = column
+        self.ascending = ascending
+    }
+
+    /// "asc" or "desc", for SQL.
+    public var direction: String { ascending ? "asc" : "desc" }
+
+    /// Text values compared the way people read them: numbers by value, NULL last.
+    public static func precedes(_ a: String?, _ b: String?, ascending: Bool) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return false
+        case (nil, _): return false
+        case (_, nil): return true
+        case let (a?, b?):
+            if let x = Double(a), let y = Double(b), x != y { return ascending ? x < y : x > y }
+            let order = a.localizedStandardCompare(b)
+            return ascending ? order == .orderedAscending : order == .orderedDescending
+        }
+    }
 }
 
 /// `%text%` for LIKE, with LIKE's own wildcards and the escape character escaped by a backslash.

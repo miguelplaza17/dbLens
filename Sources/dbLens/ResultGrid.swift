@@ -18,6 +18,9 @@ struct ResultGrid: NSViewRepresentable {
     var onOpenRow: ((Int) -> Void)?
     /// The selected rows (indexes into the result), whenever they change.
     var onSelectionChange: ((Set<Int>) -> Void)?
+    /// The order the header shows, and what a header click asks for.
+    var sort: ColumnSort?
+    var onSort: ((ColumnSort) -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -61,6 +64,7 @@ struct ResultGrid: NSViewRepresentable {
             // Same table and page: new values in place, scroll and selection kept.
             table.reloadData()
         }
+        coordinator.showSort()
     }
 
     // MARK: Coordinator
@@ -99,8 +103,25 @@ struct ResultGrid: NSViewRepresentable {
                 tableColumn.minWidth = 60
                 tableColumn.maxWidth = 600
                 tableColumn.width = idealWidth(index, title: tableColumn.title)
+                tableColumn.sortDescriptorPrototype = NSSortDescriptor(key: column.name, ascending: true)
                 table.addTableColumn(tableColumn)
             }
+        }
+
+        /// Puts the arrow on the sorted column's header, without asking for a new sort.
+        private var showingSort = false
+        func showSort() {
+            guard let table else { return }
+            let wanted = parent.sort.map { [NSSortDescriptor(key: $0.column, ascending: $0.ascending)] } ?? []
+            guard table.sortDescriptors != wanted else { return }
+            showingSort = true
+            table.sortDescriptors = wanted
+            showingSort = false
+        }
+
+        func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+            guard !showingSort, let first = tableView.sortDescriptors.first, let key = first.key else { return }
+            parent.onSort?(ColumnSort(column: key, ascending: first.ascending))
         }
 
         /// Wide enough for the header and a typical value, read from the first rows.

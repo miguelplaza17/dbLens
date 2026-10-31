@@ -469,9 +469,11 @@ public actor MySQLSession: DatabaseSession {
     /// One page of a table's rows, with the column types and, for tables with a
     /// primary key, the row keys. Sorted by the primary key, so pages and edited
     /// rows stay in place. Tables without one are read-only.
-    public func page(of relation: Relation, limit: Int, offset: Int, search: String = "") throws -> QueryResult {
+    public func page(of relation: Relation, limit: Int, offset: Int, search: String = "", sort: ColumnSort? = nil) throws -> QueryResult {
         let primaryKey = try primaryKey(of: relation)
-        let order = primaryKey.isEmpty ? "" : " order by " + primaryKey.map(quote).joined(separator: ", ")
+        // MySQL sorts NULL first going up; "x is null" puts it last either way.
+        let terms = (sort.map { ["\(quote($0.column)) is null", "\(quote($0.column)) \($0.direction)"] } ?? []) + primaryKey.map(quote)
+        let order = terms.isEmpty ? "" : " order by " + terms.joined(separator: ", ")
         let types = try columnTypes(of: relation)
         var result = try single("select * from \(qualified(relation))\(filter(search, columns: types.map { $0[0] ?? "" }))\(order) limit \(max(limit, 0)) offset \(max(offset, 0))")
         let indexes = primaryKey.compactMap { name in result.columns.firstIndex { $0.name == name } }

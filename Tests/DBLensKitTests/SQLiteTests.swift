@@ -216,6 +216,10 @@ private func relation(_ session: SQLiteSession, _ name: String) async throws -> 
     #expect(try await session.page(of: customers, limit: 10, offset: 0, search: "bia").rows == [["2", "Bia", nil]])
     #expect(try await session.count(of: customers, search: "bia") == 1)
     #expect(try await session.page(of: customers, limit: 10, offset: 0, search: "_").rows.isEmpty)
+    let byName = try await session.page(of: customers, limit: 10, offset: 0, sort: ColumnSort(column: "name", ascending: false))
+    let upward = try await session.page(of: customers, limit: 10, offset: 0, sort: ColumnSort(column: "name", ascending: true))
+    #expect(byName.rows.map { $0[1] } == Array(upward.rows.map { $0[1] }.reversed()) && byName.rows.count > 1)
+    #expect(byName.keys?.values.count == byName.rows.count)
 }
 
 @Test func pageOfRowidTable() async throws {
