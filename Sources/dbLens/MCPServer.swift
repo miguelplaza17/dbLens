@@ -72,8 +72,8 @@ enum MCPServer {
                     "serverInfo": ["name": "dblens",
                                    "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"],
                     "instructions": """
-                        Databases saved in dbLens. Start with list_connections, then list_tables and \
-                        describe_table before writing queries. query is always read-only. execute changes \
+                        Databases saved in dbLens. Start with list_connections, then describe_schema (or \
+                        list_tables and describe_table on big databases) before writing queries. query is always read-only. execute changes \
                         data only on connections where the user turned on "Let Agents Write"; try it with \
                         dry_run first where supported, and tell the user what it will change.
                         """,
@@ -87,7 +87,8 @@ enum MCPServer {
                 let arguments = params["arguments"] as? [String: Any] ?? [:]
                 do {
                     let output = try await call(name, arguments)
-                    reply(id, ["content": [["type": "text", "text": Self.json(output)]], "isError": false])
+                    let text = output as? String ?? Self.json(output)
+                    reply(id, ["content": [["type": "text", "text": text]], "isError": false])
                 } catch {
                     let text = (error as? DatabaseError)?.message ?? error.localizedDescription
                     reply(id, ["content": [["type": "text", "text": text]], "isError": true])
@@ -115,6 +116,9 @@ enum MCPServer {
                     if !relation.subtype.isEmpty { item["type"] = relation.subtype }
                     return item
                 }
+            case "describe_schema":
+                let (_, session) = try await open(arguments)
+                return try await schemaText(arguments["schema"] as? String, in: session)
             case "describe_table":
                 let (_, session) = try await open(arguments)
                 return try await describe(try text(arguments, "table"), in: session)
@@ -185,6 +189,32 @@ enum MCPServer {
                 "columns": sample.columns.map { ["name": $0.name, "type": $0.type] },
                 "sample": Self.rows(sample, maxRows: 5),
             ] as [String: Any]
+        }
+
+        /// Every table at once, compact enough to read in one go: columns with
+        /// type, PK and NOT NULL, then foreign keys.
+        private func schemaText(_ schema: String?, in session: any DatabaseSession) async throws -> String {
+            let graph = try await session.schemaGraph()
+            guard !graph.tables.isEmpty else {
+                throw DatabaseError(message: "\(session.engine.name) has no tables and foreign keys to describe; use list_tables.")
+            }
+            let estimates = Dictionary((try? await session.relations())?.map { ($0.id, $0.estimate) } ?? [], uniquingKeysWith: { a, _ in a })
+            let tables = graph.tables.filter { schema == nil || schema!.isEmpty || $0.schema == schema }
+            guard !tables.isEmpty else { throw DatabaseError(message: "No tables in schema \"\(schema ?? "")\". Schemas: \(graph.schemas.joined(separator: ", ")).") }
+            var lines: [String] = []
+            for table in tables {
+                var head = "\(table.id) (\(table.isView ? "view" : "table")"
+                if let rows = estimates[table.id], rows >= 0 { head += ", ~\(Int(rows)) rows" }
+                lines.append(head + ")")
+                for column in table.columns {
+                    lines.append("  \(column.name) \(column.type)\(column.isPrimaryKey ? " PK" : "")\(column.isNullable || column.isPrimaryKey ? "" : " NOT NULL")")
+                }
+                for link in graph.links where link.from == table.id {
+                    lines.append("  FK (\(link.fromColumns.joined(separator: ", "))) -> \(link.to)(\(link.toColumns.joined(separator: ", ")))")
+                }
+                lines.append("")
+            }
+            return lines.joined(separator: "\n")
         }
 
         // MARK: Connections
@@ -281,6 +311,15 @@ enum MCPServer {
                 "name": "list_tables",
                 "description": "Tables and views of a connection (Redis: keys; MongoDB: collections), with their schema and estimated row count.",
                 "inputSchema": ["type": "object", "properties": ["connection": connection], "required": ["connection"]],
+                "annotations": ["readOnlyHint": true],
+            ],
+            [
+                "name": "describe_schema",
+                "description": "The whole relational structure in one call: every table and view with its columns (type, PK, NOT NULL), estimated rows, and foreign keys. Start here to understand a database. PostgreSQL, MySQL, SQLite, and MongoDB (fields sampled, references guessed).",
+                "inputSchema": ["type": "object", "properties": [
+                    "connection": connection,
+                    "schema": ["type": "string", "description": "Only this schema (PostgreSQL). Default: all."],
+                ], "required": ["connection"]],
                 "annotations": ["readOnlyHint": true],
             ],
             [

@@ -123,6 +123,7 @@ Claude Desktop and Cursor take the same command in their MCP settings:
 | --- | --- |
 | `list_connections` | Saved connections: name, engine, SSH, whether agents may write. Never the URL. |
 | `list_tables` | Tables and views (Redis keys, MongoDB collections) with estimated rows. |
+| `describe_schema` | The whole structure at once: every table with its columns, keys, and foreign keys. |
 | `describe_table` | Columns, types, primary key, foreign keys, and the tables that reference it. |
 | `query` | One read-only statement. PostgreSQL and MySQL run it in a read-only transaction, SQLite only if it changes nothing, MongoDB and Redis only reading methods and commands. |
 | `execute` | Changes data, only where you turned on **Let Agents Write** (right-click the connection). `dry_run` runs it and rolls back, to see the rows affected first (PostgreSQL, SQLite). |
