@@ -125,6 +125,13 @@ struct AgentSettings: View {
             EmptyView()
         } else if working == client {
             ProgressView().controlSize(.small)
+        } else if installed.contains(client), !client.isCurrent {
+            // Installed from a dbLens that has moved or is gone: point it at this one.
+            HStack(spacing: Space.sm) {
+                Label("Old path", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    .help(Text(verbatim: client.installedCommand ?? ""))
+                Button("Update") { run(client, install: true) }
+            }
         } else if installed.contains(client) {
             HStack(spacing: Space.sm) {
                 Label("Installed", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
@@ -331,14 +338,28 @@ enum AgentClient: String, CaseIterable, Identifiable {
         }
     }
 
-    var isInstalled: Bool {
-        guard isSupported, let text = try? String(contentsOf: configFile, encoding: .utf8) else { return false }
+    var isInstalled: Bool { installedCommand != nil }
+
+    /// The installed entry points at this copy of dbLens (not one moved or deleted since).
+    var isCurrent: Bool { installedCommand == Self.executable }
+
+    /// The command the app's "dblens" entry runs, or nil when there is none.
+    var installedCommand: String? {
+        guard isSupported, let text = try? String(contentsOf: configFile, encoding: .utf8) else { return nil }
         switch format {
         case .toml:
-            return text.contains("[mcp_servers.dblens]")
+            var inTable = false
+            for line in text.split(separator: "\n").map({ $0.trimmingCharacters(in: .whitespaces) }) {
+                if line.hasPrefix("[") { inTable = line == "[mcp_servers.dblens]"; continue }
+                if inTable, line.hasPrefix("command"), let start = line.firstIndex(of: "\""), let end = line.lastIndex(of: "\""), start < end {
+                    return String(line[line.index(after: start)..<end])
+                }
+            }
+            return text.contains("[mcp_servers.dblens]") ? "" : nil
         case .json(let key):
-            guard let root = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any] else { return false }
-            return (root[key] as? [String: Any])?["dblens"] != nil
+            guard let root = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
+                  let entry = (root[key] as? [String: Any])?["dblens"] as? [String: Any] else { return nil }
+            return entry["command"] as? String ?? ""
         }
     }
 
