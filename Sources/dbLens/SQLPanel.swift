@@ -40,6 +40,8 @@ struct SQLPanel: View {
         }
     }
 
+    @State private var showingHistory = false
+
     private var header: some View {
         HStack(spacing: Space.sm) {
             // The panel's own toggle sits here while it's open, like the sidebar's;
@@ -60,6 +62,16 @@ struct SQLPanel: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            Button("History", systemImage: "clock.arrow.circlepath") { showingHistory.toggle() }
+                .buttonStyle(.bordered)
+                .help("Statements run on this connection: click to put one in the editor, double-click to run it")
+                .disabled(model.session == nil)
+                .popover(isPresented: $showingHistory, arrowEdge: .top) {
+                    SQLHistoryList { entry, run in
+                        showingHistory = false
+                        Task { await model.useHistory(entry, run: run) }
+                    }
+                }
             Button("Terminal", systemImage: "apple.terminal") { model.openInTerminal() }
                 .buttonStyle(.bordered)
                 .help("Open the database's own client (psql, mysql, sqlite3, redis-cli, mongosh), connected (Command-Shift-T)")
@@ -147,5 +159,54 @@ private struct LogRow: View {
         }
         .font(.system(.caption, design: .monospaced))
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// The statements run on the open connection, newest first, with a filter.
+private struct SQLHistoryList: View {
+    @Environment(AppModel.self) private var model
+    @State private var filter = ""
+    let pick: (HistoryEntry, _ run: Bool) -> Void
+
+    var body: some View {
+        let entries = filter.isEmpty ? model.sqlHistory
+            : model.sqlHistory.filter { $0.sql.localizedCaseInsensitiveContains(filter) }
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: Space.sm) {
+                TextField("Filter History", text: $filter)
+                    .textFieldStyle(.roundedBorder)
+                Button("Clear") { model.clearHistory() }
+                    .disabled(model.sqlHistory.isEmpty)
+            }
+            .padding(Space.md)
+            Divider()
+            if entries.isEmpty {
+                Text(model.sqlHistory.isEmpty ? "Nothing run on this connection yet." : "No statement matches.")
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: Space.section * 3)
+            } else {
+                List(entries) { entry in
+                    HStack(alignment: .top, spacing: Space.sm) {
+                        Image(systemName: entry.failed ? "xmark.circle.fill" : "checkmark.circle.fill")
+                            .foregroundStyle(entry.failed ? .red : .green)
+                        VStack(alignment: .leading, spacing: Space.xs) {
+                            Text(verbatim: entry.sql)
+                                .font(.system(size: 12, design: .monospaced))
+                                .lineLimit(3)
+                            Text(entry.date, format: .relative(presentation: .named))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) { pick(entry, true) }
+                    .onTapGesture { pick(entry, false) }
+                    .help("Click to put it in the editor, double-click to run it")
+                }
+                .listStyle(.plain)
+            }
+        }
+        .frame(width: 480, height: 360)
     }
 }

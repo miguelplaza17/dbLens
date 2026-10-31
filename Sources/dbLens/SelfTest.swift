@@ -87,6 +87,7 @@ enum SelfTest {
             let leftQuery = model.shown == .table
             await model.goForward()
             check("Back and Forward include query results", leftQuery && model.shown == .query && model.shownResult?.rows == [["1", nil]])
+            check("runs go to the history, newest first", model.sqlHistory.first?.sql.contains("select 1") == true)
 
             model.sql = "select * from tabela_que_nao_existe"
             await model.run()

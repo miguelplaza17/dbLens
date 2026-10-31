@@ -46,6 +46,14 @@ enum Shown: String, CaseIterable {
 }
 
 /// One line of the SQL log: a run, an edit, or an error.
+/// A statement run in the SQL panel, kept per connection for the History list.
+struct HistoryEntry: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var sql: String
+    var date = Date.now
+    var failed = false
+}
+
 struct LogEntry: Identifiable {
     let id = UUID()
     let date = Date.now
@@ -124,6 +132,8 @@ final class AppModel {
     private(set) var runVersion = 0 { didSet { noteMove() } }
     /// The last run, edit, or connection; each new one replaces it.
     private(set) var lastLog: LogEntry?
+    /// What was run on the open connection, newest first (at most 100, saved between launches).
+    private(set) var sqlHistory: [HistoryEntry] = []
 
     /// Settings reopens on the last tab. Test and snapshot runs leave it alone.
     var settingsTab: SettingsTab = SettingsTab(rawValue: UserDefaults.standard.string(forKey: "settings.tab") ?? "") ?? .general {
@@ -305,6 +315,7 @@ final class AppModel {
         disconnect()
         self.session = session
         activeID = connection.uuid
+        sqlHistory = Self.loadHistory(for: connection.uuid)
         if sql.isEmpty || Engine.allCases.map(Self.starter(for:)).contains(sql) { sql = Self.starter(for: session.engine) }
         connection.lastUsed = .now
         try? context.save()
@@ -369,6 +380,7 @@ final class AppModel {
         activeID = nil
         connectError = nil
         relations = []
+        sqlHistory = []
         selectedRelation = nil
         tableResult = nil
         tableCount = nil
@@ -380,6 +392,7 @@ final class AppModel {
     func delete(_ connection: SavedConnection) {
         if connection.uuid == activeID { disconnect() }
         Secrets.removeURL(for: connection.uuid)
+        UserDefaults.standard.removeObject(forKey: "sqlHistory.\(connection.uuid.uuidString)")
         context.delete(connection)
         try? context.save()
     }
@@ -565,6 +578,7 @@ final class AppModel {
             let execution = try await session.execute(text)
             self.execution = execution
             querySort = nil
+            remember(text, failed: false)
             runVersion += 1
             shown = .query
             addLog(sql: text, message: Self.summary(execution), isError: false)
@@ -575,8 +589,41 @@ final class AppModel {
             }
             if execution.results.contains(where: { !$0.hasRows }) { await loadTable() }
         } catch {
+            remember(text, failed: true)
             addLog(sql: text, message: error.localizedDescription, isError: true)
         }
+    }
+
+    // MARK: History
+
+    /// Puts a statement on top of the history (once: running it again moves it up).
+    private func remember(_ text: String, failed: Bool) {
+        sqlHistory.removeAll { $0.sql == text }
+        sqlHistory.insert(HistoryEntry(sql: text, failed: failed), at: 0)
+        if sqlHistory.count > 100 { sqlHistory.removeLast(sqlHistory.count - 100) }
+        saveHistory()
+    }
+
+    func clearHistory() {
+        sqlHistory = []
+        saveHistory()
+    }
+
+    /// From the History list: into the editor, and run it when asked.
+    func useHistory(_ entry: HistoryEntry, run: Bool) async {
+        sql = entry.sql
+        sqlSelection = ""
+        if run { await self.run() }
+    }
+
+    private func saveHistory() {
+        guard let activeID, !Store.isOverridden, let data = try? JSONEncoder().encode(sqlHistory) else { return }
+        UserDefaults.standard.set(data, forKey: "sqlHistory.\(activeID.uuidString)")
+    }
+
+    private static func loadHistory(for id: UUID) -> [HistoryEntry] {
+        guard !Store.isOverridden, let data = UserDefaults.standard.data(forKey: "sqlHistory.\(id.uuidString)") else { return [] }
+        return (try? JSONDecoder().decode([HistoryEntry].self, from: data)) ?? []
     }
 
     func cancel() {
