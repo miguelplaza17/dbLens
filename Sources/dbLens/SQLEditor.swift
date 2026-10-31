@@ -8,6 +8,8 @@ struct SQLEditor: NSViewRepresentable {
     @Binding var selection: String
     /// SQL, Redis commands, or mongosh queries: decides the colors.
     var language = EditorLanguage.sql
+    /// Tables and columns the editor suggests while you type.
+    var names = EditorNames()
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = ThinScrollView()
@@ -68,13 +70,46 @@ struct SQLEditor: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: SQLEditor
+        /// The last edit was one typed letter (or a dot): offer completions after it.
+        private var typed = false
         init(_ parent: SQLEditor) { self.parent = parent }
+
+        func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString text: String?) -> Bool {
+            typed = text.map { $0.count == 1 && ($0 == "." || $0 == "_" || $0.first!.isLetter) } ?? false
+            return true
+        }
 
         func textDidChange(_ notification: Notification) {
             guard let view = notification.object as? NSTextView else { return }
             SQLHighlighter.apply(to: view, language: parent.language)
             view.enclosingScrollView?.verticalRulerView?.needsDisplay = true
             parent.text = view.string
+            if typed, parent.language != .redis {
+                typed = false
+                // Only when there is something to offer: an empty popup beeps.
+                let range = view.rangeForUserCompletion
+                guard range.location != NSNotFound, !suggestions(in: view, for: range).isEmpty else { return }
+                DispatchQueue.main.async { view.complete(nil) }
+            }
+        }
+
+        func textView(_ textView: NSTextView, completions words: [String], forPartialWordRange range: NSRange,
+                      indexOfSelectedItem index: UnsafeMutablePointer<Int>?) -> [String] {
+            index?.pointee = -1  // nothing inserted until a suggestion is picked
+            return suggestions(in: textView, for: range)
+        }
+
+        /// Tables, columns, and keywords that start with the word being typed;
+        /// after "table." only that table's columns, after "db." the collections.
+        private func suggestions(in textView: NSTextView, for range: NSRange) -> [String] {
+            let text = textView.string as NSString
+            let partial = text.substring(with: range)
+            var owner: String?
+            if range.location > 0, text.substring(with: NSRange(location: range.location - 1, length: 1)) == "." {
+                let before = text.substring(to: range.location - 1)
+                owner = before.split(whereSeparator: { !($0.isLetter || $0.isNumber || $0 == "_") }).last.map(String.init)
+            }
+            return parent.names.suggestions(for: partial, after: owner, language: parent.language)
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
@@ -110,6 +145,9 @@ enum CodeTheme {
 /// "quoted identifiers", $1 parameters, and comments. Rerun on every edit;
 /// editor text is short, so a full pass is cheap.
 enum SQLHighlighter {
+    /// The keywords, for completion.
+    static var keywordList: [String] { keywords.split(separator: "|").map(String.init) }
+
     private static let keywords = """
         select from where and or not in is null as on join left right inner outer full cross natural using \
         group by order having limit offset distinct union all intersect except insert into values update set \
@@ -258,6 +296,31 @@ final class LineNumberRuler: NSRulerView {
 }
 
 /// What the bottom panel's editor holds.
+/// What the editor can suggest: the open database's tables and their columns.
+struct EditorNames: Equatable {
+    var tables: [String] = []
+    /// Columns by table name, lowercased.
+    var columns: [String: [String]] = [:]
+
+    func suggestions(for partial: String, after owner: String?, language: EditorLanguage) -> [String] {
+        let pool: [String]
+        if let owner {
+            let key = owner.lowercased()
+            if language == .mongo, key == "db" { pool = tables }
+            else { pool = columns[key] ?? (language == .sql ? Array(Set(columns.values.joined())).sorted() : []) }
+        } else {
+            guard partial.count >= 2 else { return [] }
+            let keywords = language == .sql ? SQLHighlighter.keywordList.map { partial.first!.isUppercase ? $0.uppercased() : $0 } : []
+            pool = tables + Array(Set(columns.values.joined())).sorted() + keywords
+        }
+        var seen = Set<String>()
+        return pool.filter { name in
+            name.count > partial.count && name.lowercased().hasPrefix(partial.lowercased()) && seen.insert(name).inserted
+        }
+        .prefix(50).map { $0 }
+    }
+}
+
 enum EditorLanguage: Equatable {
     case sql, redis, mongo
 

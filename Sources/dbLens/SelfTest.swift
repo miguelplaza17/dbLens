@@ -88,6 +88,13 @@ enum SelfTest {
             await model.goForward()
             check("Back and Forward include query results", leftQuery && model.shown == .query && model.shownResult?.rows == [["1", nil]])
             check("runs go to the history, newest first", model.sqlHistory.first?.sql.contains("select 1") == true)
+            await model.loadSchema()
+            if let table = model.relations.first {
+                let names = model.editorNames
+                check("the editor suggests table names", names.suggestions(for: String(table.name.prefix(2)), after: nil, language: .sql).contains(table.name))
+                let column = names.columns[table.name.lowercased()]?.first ?? ""
+                check("after table. the editor suggests its columns", names.suggestions(for: "", after: table.name, language: .sql).contains(column))
+            }
 
             model.sql = "select * from tabela_que_nao_existe"
             await model.run()

@@ -167,6 +167,15 @@ final class AppModel {
         return result
     }
 
+    /// Names the SQL editor suggests: tables (with their schema when there are
+    /// several) and the columns the schema board read.
+    var editorNames: EditorNames {
+        let tables = relations.map(\.name)
+        let columns = Dictionary((schemaGraph?.tables ?? []).map { ($0.name.lowercased(), $0.columns.map(\.name)) },
+                                 uniquingKeysWith: { a, b in a + b })
+        return EditorNames(tables: tables, columns: columns)
+    }
+
     /// The order the grid's header shows.
     var shownSort: ColumnSort? { shown == .table ? tableSort : querySort }
 

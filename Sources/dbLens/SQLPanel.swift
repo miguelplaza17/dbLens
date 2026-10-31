@@ -19,7 +19,12 @@ struct SQLPanel: View {
                 VStack(spacing: 0) {
                     header
                     Divider()
-                    SQLEditor(text: $model.sql, selection: $model.sqlSelection, language: model.editorLanguage)
+                    SQLEditor(text: $model.sql, selection: $model.sqlSelection, language: model.editorLanguage,
+                              names: model.editorNames)
+                        // Columns come from the schema; read it once per connection.
+                        .task(id: model.activeID) {
+                            if model.hasSchemaBoard, model.schemaGraph == nil { await model.loadSchema() }
+                        }
                 }
                 .card()
                 Color.clear
