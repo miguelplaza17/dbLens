@@ -427,19 +427,19 @@ enum MCPServer {
         static let tools: [[String: Any]] = [
             [
                 "name": "list_connections",
-                "description": "The database connections saved in dbLens: name, engine (PostgreSQL, MySQL, SQLite, Redis, MongoDB), whether it goes through SSH, and whether agents may write. URLs and passwords are never shown.",
+                "description": "The database connections saved in dbLens: name, engine (PostgreSQL, MySQL, SQLite, Redis, MongoDB), whether it goes through SSH, and whether agents may write. URLs and passwords are never shown. Databases: all (PostgreSQL, MySQL/MariaDB, SQLite, Redis/Valkey, MongoDB).",
                 "inputSchema": ["type": "object", "properties": [:]],
                 "annotations": ["readOnlyHint": true],
             ],
             [
                 "name": "list_tables",
-                "description": "Tables and views of a connection (Redis: keys; MongoDB: collections), with their schema and estimated row count.",
+                "description": "Tables and views of a connection (Redis: keys; MongoDB: collections), with their schema and estimated row count. Databases: all.",
                 "inputSchema": ["type": "object", "properties": ["connection": connection], "required": ["connection"]],
                 "annotations": ["readOnlyHint": true],
             ],
             [
                 "name": "describe_schema",
-                "description": "The whole relational structure in one call: every table and view with its columns (type, PK, NOT NULL), estimated rows, and foreign keys. Start here to understand a database. PostgreSQL, MySQL, SQLite, and MongoDB (fields sampled, references guessed).",
+                "description": "The whole relational structure in one call: every table and view with its columns (type, PK, NOT NULL), estimated rows, and foreign keys. Start here to understand a database. Databases: PostgreSQL, MySQL/MariaDB, SQLite, MongoDB (fields sampled, references guessed). Not Redis: use list_tables.",
                 "inputSchema": ["type": "object", "properties": [
                     "connection": connection,
                     "schema": ["type": "string", "description": "Only this schema (PostgreSQL). Default: all."],
@@ -448,13 +448,13 @@ enum MCPServer {
             ],
             [
                 "name": "list_extensions",
-                "description": "What the database adds to plain SQL, to write queries only with functions that exist: PostgreSQL extensions (installed with version and schema, and available to install), MySQL active plugins, SQLite compile options (JSON1, FTS5…), Redis modules. Always with the server version.",
+                "description": "What the database adds to plain SQL, to write queries only with functions that exist: PostgreSQL extensions (installed with version and schema, and available to install), MySQL active plugins, SQLite compile options (JSON1, FTS5…), Redis modules. Always with the server version. Databases: all; MongoDB only reports its version.",
                 "inputSchema": ["type": "object", "properties": ["connection": connection], "required": ["connection"]],
                 "annotations": ["readOnlyHint": true],
             ],
             [
                 "name": "install_extension",
-                "description": "Installs an available PostgreSQL extension (CREATE EXTENSION). Only where the user turned on Let Agents Write, and the database user needs the privilege. Confirm with the user first.",
+                "description": "Installs an available PostgreSQL extension (CREATE EXTENSION). Only where the user turned on Let Agents Write, and the database user needs the privilege. Confirm with the user first. Databases: PostgreSQL only.",
                 "inputSchema": ["type": "object", "properties": [
                     "connection": connection,
                     "name": ["type": "string", "description": "Extension name, from list_extensions' available list."],
@@ -464,7 +464,7 @@ enum MCPServer {
             ],
             [
                 "name": "describe_table",
-                "description": "A table's columns with types and nullability, its primary key, its foreign keys, and the tables that reference it. Use before writing queries.",
+                "description": "A table's columns with types and nullability, its primary key, its foreign keys, and the tables that reference it. Use before writing queries. Databases: all. Redis and MongoDB: the fields of the first entries, with types.",
                 "inputSchema": ["type": "object", "properties": [
                     "connection": connection,
                     "table": ["type": "string", "description": "Table name, or schema.name when several schemas have it."],
@@ -473,7 +473,7 @@ enum MCPServer {
             ],
             [
                 "name": "query",
-                "description": "Runs one read-only statement and returns its rows. SQL for PostgreSQL, MySQL and SQLite (inside a read-only transaction: writes fail); mongosh syntax for MongoDB (db.users.find({...}), aggregate without $out/$merge, countDocuments, distinct); one reading command for Redis (GET, HGETALL, LRANGE, SCAN…).",
+                "description": "Runs one read-only statement and returns its rows. SQL for PostgreSQL and MySQL (inside a read-only transaction: writes fail) and SQLite (only statements SQLite itself says change nothing); mongosh syntax for MongoDB (db.users.find({...}), aggregate without $out/$merge, countDocuments, distinct); one reading command for Redis (GET, HGETALL, LRANGE, SCAN…). Databases: all.",
                 "inputSchema": ["type": "object", "properties": [
                     "connection": connection,
                     "query": ["type": "string", "description": "One statement."],
@@ -483,7 +483,7 @@ enum MCPServer {
             ],
             [
                 "name": "test_changes",
-                "description": "Tries a change or a whole migration without keeping it: runs every statement inside a transaction that is always rolled back, and reports what each did (rows affected) or which one failed and why. PostgreSQL and SQLite: data and schema (DDL). MySQL: data changes only, since its DDL commits by itself. MongoDB and Redis can't undo, so they refuse. Use before execute. Leave out BEGIN/COMMIT: dbLens owns the transaction. Needs Let Agents Write, since the statements really run (and lock) before the rollback.",
+                "description": "Tries a change or a whole migration without keeping it: runs every statement inside a transaction that is always rolled back, and reports what each did (rows affected) or which one failed and why. PostgreSQL and SQLite: data and schema (DDL). MySQL: data changes only, since its DDL commits by itself. MongoDB and Redis can't undo, so they refuse. Use before execute. Leave out BEGIN/COMMIT: dbLens owns the transaction. Needs Let Agents Write, since the statements really run (and lock) before the rollback. Databases: PostgreSQL and SQLite (everything), MySQL/MariaDB (data changes only). Not MongoDB or Redis.",
                 "inputSchema": ["type": "object", "properties": [
                     "connection": connection,
                     "statements": ["type": "string", "description": "One statement or a script, separated by semicolons."],
@@ -492,7 +492,7 @@ enum MCPServer {
             ],
             [
                 "name": "execute",
-                "description": "Changes data or schema, for real: INSERT, UPDATE, DELETE, migrations (DDL), MongoDB writes, Redis commands. Only on connections where the user turned on Let Agents Write in dbLens. Scripts run all or nothing where the database allows (PostgreSQL, SQLite, MySQL without DDL); otherwise the result says so. Run test_changes first and confirm with the user. If the project has a migration tool (Prisma, Rails, Flyway…), use the tool instead, so it records the migration.",
+                "description": "Changes data or schema, for real: INSERT, UPDATE, DELETE, migrations (DDL), MongoDB writes, Redis commands. Only on connections where the user turned on Let Agents Write in dbLens. Scripts run all or nothing where the database allows (PostgreSQL, SQLite, MySQL without DDL); otherwise the result says so. Run test_changes first and confirm with the user. If the project has a migration tool (Prisma, Rails, Flyway…), use the tool instead, so it records the migration. Databases: all. All or nothing on PostgreSQL, SQLite, and MySQL/MariaDB without DDL.",
                 "inputSchema": ["type": "object", "properties": [
                     "connection": connection,
                     "statements": ["type": "string", "description": "One statement or a script, separated by semicolons. Leave out BEGIN/COMMIT."],
