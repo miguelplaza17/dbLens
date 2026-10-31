@@ -15,25 +15,32 @@ call() {  # call <writable 0|1> <json-rpc lines...>: prints one reply per line
 tool() { print -r -- "{\"jsonrpc\":\"2.0\",\"id\":$1,\"method\":\"tools/call\",\"params\":{\"name\":\"$2\",\"arguments\":$3}}" }
 rm -f /tmp/dbLens-mcp.store*
 out=$(call 1 \
-  "$(tool 1 execute '{"connection":"test","statement":"create table if not exists dblens_mcp(id int primary key, nome text)"}')" \
-  "$(tool 2 execute '{"connection":"test","statement":"insert into dblens_mcp values (1,'"'"'a'"'"'),(2,'"'"'b'"'"') on conflict do nothing"}')" \
+  "$(tool 1 execute '{"connection":"test","statements":"create table if not exists dblens_mcp(id int primary key, nome text)"}')" \
+  "$(tool 2 execute '{"connection":"test","statements":"insert into dblens_mcp values (1,'"'"'a'"'"'),(2,'"'"'b'"'"') on conflict do nothing"}')" \
   "$(tool 3 list_connections '{}')" \
   "$(tool 4 list_tables '{"connection":"test"}')" \
   "$(tool 5 describe_table '{"connection":"test","table":"dblens_mcp"}')" \
   "$(tool 6 query '{"connection":"test","query":"select * from dblens_mcp order by id","max_rows":1}')" \
   "$(tool 7 query '{"connection":"test","query":"delete from dblens_mcp"}')" \
-  "$(tool 8 execute '{"connection":"test","statement":"delete from dblens_mcp","dry_run":true}')" \
+  "$(tool 8 test_changes '{"connection":"test","statements":"delete from dblens_mcp"}')" \
   "$(tool 9 query '{"connection":"test","query":"select count(*) from dblens_mcp"}')" \
   "$(tool 13 describe_schema '{"connection":"test"}')" \
   "$(tool 14 list_extensions '{"connection":"test"}')" \
   "$(tool 15 install_extension '{"connection":"test","name":"pg_trgm"}')" \
   "$(tool 16 query '{"connection":"test","query":"select similarity('"'"'dblens'"'"', '"'"'dblenz'"'"') > 0"}')" \
-  "$(tool 17 install_extension '{"connection":"test","name":"no_such_ext; drop table x"}')")
-ro=$(call 0 "$(tool 10 execute '{"connection":"test","statement":"delete from dblens_mcp"}')" \
+  "$(tool 17 install_extension '{"connection":"test","name":"no_such_ext; drop table x"}')" \
+  "$(tool 20 test_changes '{"connection":"test","statements":"alter table dblens_mcp add column extra int; update dblens_mcp set extra = id; create index dblens_mcp_extra on dblens_mcp(extra)"}')" \
+  "$(tool 21 test_changes '{"connection":"test","statements":"delete from dblens_mcp; commit; drop table dblens_mcp"}')" \
+  "$(tool 22 execute '{"connection":"test","statements":"alter table dblens_mcp add column extra2 int; insert into dblens_no_such_table values (1)"}')" \
+  "$(tool 23 describe_table '{"connection":"test","table":"dblens_mcp"}')" \
+  "$(tool 24 execute '{"connection":"test","statements":"alter table dblens_mcp add column note text; update dblens_mcp set note = '"'"'a;b'"'"'"}')" \
+  "$(tool 25 query '{"connection":"test","query":"select note from dblens_mcp order by id"}')")
+ro=$(call 0 "$(tool 10 execute '{"connection":"test","statements":"delete from dblens_mcp"}')" \
             "$(tool 19 install_extension '{"connection":"test","name":"unaccent"}')" \
+            "$(tool 26 test_changes '{"connection":"test","statements":"delete from dblens_mcp"}')" \
             "$(tool 11 query '{"connection":"nope","query":"select 1"}')")
-call 1 "$(tool 12 execute '{"connection":"test","statement":"drop table dblens_mcp"}')" \
-       "$(tool 18 execute '{"connection":"test","statement":"drop extension if exists pg_trgm"}')" >/dev/null
+call 1 "$(tool 12 execute '{"connection":"test","statements":"drop table dblens_mcp"}')" \
+       "$(tool 18 execute '{"connection":"test","statements":"drop extension if exists pg_trgm"}')" >/dev/null
 rm -f /tmp/dbLens-mcp.store*
 print -r -- "$out
 $ro" | python3 -c '
@@ -48,7 +55,7 @@ checks = [
     ("describe_table gives columns and the primary key", "\"primary_key\":[\"id\"]" in text(5)),
     ("query returns rows and says when it cut them", "\"rows\":[[\"1\",\"a\"]]" in text(6) and "truncated" in text(6)),
     ("query refuses a write", err(7)),
-    ("execute dry_run reports and rolls back", "DELETE 2" in text(8) and not err(8)),
+    ("test_changes reports and rolls back", "DELETE 2" in text(8) and not err(8)),
     ("nothing was deleted", "[[\"2\"]]" in text(9)),
     ("execute is refused where writing is off", err(10) and "Let Agents Write" in text(10)),
     ("an unknown connection is an error", err(11)),
@@ -57,6 +64,11 @@ checks = [
     ("its functions work right after", "[[\"t\"]]" in text(16)),
     ("install_extension refuses names the server does not list", err(17)),
     ("install_extension is refused where writing is off", err(19)),
+    ("test_changes tries a whole migration and keeps nothing", not err(20) and "rolled_back" in text(20) and "\"extra\"" not in text(23)),
+    ("test_changes refuses a COMMIT inside the script", err(21) and "COMMIT" in text(21)),
+    ("a failing migration is rolled back as a whole", err(22) and "Statement 2 of 2" in text(22) and "extra2" not in text(23)),
+    ("a migration that works is applied as a whole, semicolons in strings kept", not err(24) and "[[\"a;b\"],[\"a;b\"]]" in text(25)),
+    ("test_changes is refused where writing is off", err(26)),
     ("describe_schema lists every table with its columns", "dblens_mcp (table" in text(13) and "id integer PK" in text(13)),
 ]
 for name, ok in checks: print(("PASS " if ok else "FAIL ") + name)

@@ -20,10 +20,15 @@ public protocol DatabaseSession: AnyObject, Sendable {
     /// refuses writes where it can (a read-only transaction, SQLite's read-only
     /// check); MongoDB and Redis allow only reading methods and commands.
     func readOnly(_ text: String) async throws -> Execution
-    /// Runs one statement and rolls it back, to see what it would do (rows
-    /// affected) before running it for real. Only where every statement can be
-    /// rolled back: Postgres and SQLite.
+    /// Runs a script statement by statement in a transaction that is always
+    /// rolled back, to see what each would do before running it for real.
+    /// Postgres and SQLite take DDL too; MySQL only statements that don't commit
+    /// by themselves; MongoDB and Redis can't undo, so they refuse.
     func rehearse(_ text: String) async throws -> Execution
+    /// Runs a script all or nothing: one transaction, rolled back if a
+    /// statement fails. Throws `NotAtomic` where the database can't (MySQL DDL,
+    /// MongoDB, Redis), so the caller can run it plainly instead.
+    func executeAtomically(_ text: String) async throws -> Execution
     func relations() async throws -> [Relation]
     /// One page of rows, sorted by the primary key when there is one, with
     /// column types and, when rows can be edited, their keys. A non-empty
@@ -77,6 +82,10 @@ public func likePattern(_ text: String) -> String {
 extension DatabaseSession {
     public func rehearse(_ text: String) async throws -> Execution {
         throw DatabaseError(message: String(localized: "\(engine.name) can't try a statement and undo it; run it for real or not at all."))
+    }
+
+    public func executeAtomically(_ text: String) async throws -> Execution {
+        throw NotAtomic(String(localized: "\(engine.name) has no transaction dbLens can roll back."))
     }
 
     /// Engines without tables and foreign keys (Redis) have no board.

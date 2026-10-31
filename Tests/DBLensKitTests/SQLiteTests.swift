@@ -224,6 +224,15 @@ private func relation(_ session: SQLiteSession, _ name: String) async throws -> 
     }
     #expect(try await session.count(of: customers) == before)
     _ = try await session.execute("update customers set name = name where id = 1")
+    // Migrations: tried and undone, or applied all or nothing.
+    let tried = try await session.rehearse("alter table customers add column extra int; update customers set extra = 1")
+    #expect(tried.results.count == 2)
+    await #expect(throws: DatabaseError.self) {
+        try await session.executeAtomically("alter table customers add column extra int; insert into no_such values (1)")
+    }
+    #expect(try await session.page(of: customers, limit: 1, offset: 0).columns.count == 3)
+    _ = try await session.executeAtomically("alter table customers add column extra int; update customers set extra = 1")
+    #expect(try await session.page(of: customers, limit: 1, offset: 0).columns.count == 4)
     #expect(try await session.page(of: customers, limit: 10, offset: 0, search: "_").rows.isEmpty)
     let byName = try await session.page(of: customers, limit: 10, offset: 0, sort: ColumnSort(column: "name", ascending: false))
     let upward = try await session.page(of: customers, limit: 10, offset: 0, sort: ColumnSort(column: "name", ascending: true))

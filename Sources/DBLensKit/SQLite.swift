@@ -189,31 +189,37 @@ public actor SQLiteSession: DatabaseSession {
         return Execution(results: [result], duration: clock.now - start)
     }
 
-    /// One statement in a transaction that is always rolled back.
-    public func rehearse(_ sql: String) throws -> Execution {
+    /// The script, statement by statement, in a transaction that is always rolled back.
+    public func rehearse(_ sql: String) async throws -> Execution {
+        try inTransaction(sql, commit: false)
+    }
+
+    /// The script in one transaction: committed when every statement works, rolled back otherwise.
+    public func executeAtomically(_ sql: String) async throws -> Execution {
+        try inTransaction(sql, commit: true)
+    }
+
+    private func inTransaction(_ sql: String, commit: Bool) throws -> Execution {
+        let statements = try SQLScript.checked(sql, dialect: .sqlite)
+        for statement in statements where ["VACUUM", "ATTACH", "DETACH"].contains(SQLScript.verb(statement)) {
+            throw DatabaseError(message: String(localized: "\(SQLScript.verb(statement)) can't run inside a transaction."))
+        }
         let clock = ContinuousClock()
         let start = clock.now
-        let keyword = Self.firstKeyword(sql)
-        guard !["BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE", "VACUUM", "ATTACH", "DETACH"].contains(keyword) else {
-            throw DatabaseError(message: String(localized: "\(keyword) can't be tried and undone."))
-        }
         guard sqlite3_exec(db, "begin", nil, nil, nil) == SQLITE_OK else { throw lastError() }
-        defer { sqlite3_exec(db, "rollback", nil, nil, nil) }
-        var statement: OpaquePointer?
-        var tail: UnsafePointer<CChar>?
-        let result: QueryResult = try sql.withCString { text in
-            guard sqlite3_prepare_v2(db, text, -1, &statement, &tail) == SQLITE_OK else { throw lastError() }
-            guard let statement else { throw DatabaseError(message: String(localized: "There is no statement to run.")) }
-            defer { sqlite3_finalize(statement) }
-            var next: OpaquePointer?
-            if let tail { sqlite3_prepare_v2(db, tail, -1, &next, nil) }
-            if let next {
-                sqlite3_finalize(next)
-                throw DatabaseError(message: String(localized: "Send one statement at a time."))
+        do {
+            let results = try SQLScript.run(statements) { statement in
+                var prepared: OpaquePointer?
+                guard sqlite3_prepare_v2(db, statement, -1, &prepared, nil) == SQLITE_OK, let prepared else { throw lastError() }
+                defer { sqlite3_finalize(prepared) }
+                return try read(prepared)
             }
-            return try read(statement)
+            sqlite3_exec(db, commit ? "commit" : "rollback", nil, nil, nil)
+            return Execution(results: results, duration: clock.now - start)
+        } catch {
+            sqlite3_exec(db, "rollback", nil, nil, nil)
+            throw error
         }
-        return Execution(results: [result], duration: clock.now - start)
     }
 
     private func read(_ statement: OpaquePointer) throws -> QueryResult {

@@ -128,7 +128,8 @@ Claude Desktop and Cursor take the same command in their MCP settings:
 | `list_extensions` | What the database adds to plain SQL: PostgreSQL extensions (installed and available), MySQL plugins, SQLite compile options, Redis modules, with the server version. |
 | `install_extension` | Installs an available PostgreSQL extension, only where agents may write. |
 | `query` | One read-only statement. PostgreSQL and MySQL run it in a read-only transaction, SQLite only if it changes nothing, MongoDB and Redis only reading methods and commands. |
-| `execute` | Changes data, only where you turned on **Let Agents Write** (right-click the connection). `dry_run` runs it and rolls back, to see the rows affected first (PostgreSQL, SQLite). |
+| `test_changes` | Tries a change or a whole migration in a transaction that is always rolled back, and reports what each statement did or which one failed. PostgreSQL and SQLite: data and DDL; MySQL: data only (its DDL commits by itself). |
+| `execute` | Changes data or schema for real, only where you turned on **Let Agents Write** (right-click the connection, or Settings > Agents). Scripts run all or nothing where the database allows; otherwise the result says what that means. |
 
 Everything an agent runs shows in the connection's History in the SQL panel, marked
 "via agent". `tools/mcp-test.sh` drives every tool against a throwaway Postgres.

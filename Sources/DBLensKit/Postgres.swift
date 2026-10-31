@@ -235,14 +235,31 @@ public actor PostgresSession: DatabaseSession {
         return Execution(results: [result], duration: clock.now - start)
     }
 
-    /// One statement in a transaction that is always rolled back.
-    public func rehearse(_ sql: String) throws -> Execution {
+    /// The script, statement by statement, in a transaction that is always rolled back.
+    public func rehearse(_ sql: String) async throws -> Execution {
+        let statements = try SQLScript.checked(sql, dialect: .postgres)
         let clock = ContinuousClock()
         let start = clock.now
         try run("begin", params: [])
         defer { _ = try? run("rollback", params: []) }
-        let result = try run(sql, params: [])
-        return Execution(results: [result], duration: clock.now - start)
+        let results = try SQLScript.run(statements) { try run($0, params: []) }
+        return Execution(results: results, duration: clock.now - start)
+    }
+
+    /// The script in one transaction: committed when every statement works, rolled back otherwise.
+    public func executeAtomically(_ sql: String) async throws -> Execution {
+        let statements = try SQLScript.checked(sql, dialect: .postgres)
+        let clock = ContinuousClock()
+        let start = clock.now
+        try run("begin", params: [])
+        do {
+            let results = try SQLScript.run(statements) { try run($0, params: []) }
+            try run("commit", params: [])
+            return Execution(results: results, duration: clock.now - start)
+        } catch {
+            _ = try? run("rollback", params: [])
+            throw error
+        }
     }
 
     /// One statement with $1, $2… parameters sent as text (nil is NULL).

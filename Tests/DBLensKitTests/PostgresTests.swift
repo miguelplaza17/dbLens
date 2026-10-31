@@ -144,6 +144,13 @@ func editsRows() async throws {
     _ = try? await session.readOnly("set transaction read write")
     await #expect(throws: (any Error).self) { try await session.readOnly("delete from dblens_kit_pk") }
     #expect(try await session.count(of: pk) == 2)
+    // Migrations: tried and undone, or applied all or nothing.
+    let tried = try await session.rehearse("alter table dblens_kit_pk add column extra int; update dblens_kit_pk set extra = id")
+    #expect(tried.results.map(\.command) == ["ALTER TABLE", "UPDATE 2"])
+    await #expect(throws: DatabaseError.self) {
+        try await session.executeAtomically("alter table dblens_kit_pk add column extra int; select * from dblens_kit_no_such")
+    }
+    #expect(try await session.page(of: pk, limit: 1, offset: 0).columns.map(\.name) == ["id", "nome", "n"])
     #expect(try await session.page(of: pk, limit: 10, offset: 0, search: "%").rows.isEmpty)
     #expect(try await session.page(of: pk, limit: 10, offset: 0, sort: ColumnSort(column: "nome", ascending: false)).rows.map { $0[1] } == ["b", "a"])
 

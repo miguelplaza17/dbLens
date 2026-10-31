@@ -262,6 +262,51 @@ public actor MySQLSession: DatabaseSession {
         return Execution(results: results, duration: clock.now - start)
     }
 
+    /// Statements MySQL commits by itself (implicit commit): a transaction can't undo them.
+    static func commitsByItself(_ statement: String) -> Bool {
+        let verb = SQLScript.verb(statement)
+        if verb == "CREATE", SQLScript.verb(statement, words: 2) == "CREATE TEMPORARY" { return false }
+        return ["CREATE", "ALTER", "DROP", "RENAME", "TRUNCATE", "GRANT", "REVOKE", "LOCK", "UNLOCK", "INSTALL",
+                "UNINSTALL", "ANALYZE", "OPTIMIZE", "REPAIR", "CHECK", "FLUSH", "RESET", "CALL", "LOAD"].contains(verb)
+    }
+
+    /// The script in a transaction that is always rolled back. Only data
+    /// changes: DDL commits by itself in MySQL and would stay.
+    public func rehearse(_ sql: String) async throws -> Execution {
+        try inTransaction(sql, commit: false)
+    }
+
+    /// The script in one transaction, or `NotAtomic` when it has DDL.
+    public func executeAtomically(_ sql: String) async throws -> Execution {
+        try inTransaction(sql, commit: true)
+    }
+
+    private func inTransaction(_ sql: String, commit: Bool) throws -> Execution {
+        let statements = try SQLScript.checked(sql, dialect: .mysql)
+        if let index = statements.firstIndex(where: Self.commitsByItself) {
+            let verb = SQLScript.verb(statements[index])
+            let message = commit
+                ? String(localized: "Statement \(index + 1) (\(verb)) commits by itself in MySQL, so the script can't run all or nothing.")
+                : String(localized: "Statement \(index + 1) (\(verb)) commits by itself in MySQL, so it can't be tried and undone. Test data changes only, or try the DDL on a copy.")
+            if commit { throw NotAtomic(message) }
+            throw DatabaseError(message: message)
+        }
+        let clock = ContinuousClock()
+        let start = clock.now
+        _ = try runAll("start transaction")
+        do {
+            let results = try SQLScript.run(statements) { statement in
+                guard let result = try runAll(statement).last else { throw DatabaseError(message: String(localized: "No result.")) }
+                return result
+            }
+            _ = try runAll(commit ? "commit" : "rollback")
+            return Execution(results: results, duration: clock.now - start)
+        } catch {
+            _ = try? runAll("rollback")
+            throw error
+        }
+    }
+
     /// Stops the running query: a second, short connection sends KILL QUERY.
     /// Safe to call from any thread; it never waits for the server.
     public nonisolated func cancel() { canceller.cancel() }

@@ -221,6 +221,16 @@ func mysqlPagesAndEdits(_ server: String) async throws {
     _ = try? await session.readOnly("set session transaction read write")
     await #expect(throws: (any Error).self) { try await session.readOnly("delete from dblens_pk") }
     #expect(try await session.count(of: pk) == 2)
+    // Migrations: data changes tried and undone, all or nothing; DDL can't be either.
+    let tried = try await session.rehearse("delete from dblens_pk where id = 1; update dblens_pk set n = 9")
+    #expect(tried.results.count == 2)
+    #expect(try await session.count(of: pk) == 2)
+    await #expect(throws: DatabaseError.self) { try await session.rehearse("alter table dblens_pk add column extra int") }
+    await #expect(throws: NotAtomic.self) { try await session.executeAtomically("alter table dblens_pk add column extra int") }
+    await #expect(throws: DatabaseError.self) {
+        try await session.executeAtomically("delete from dblens_pk where id = 1; insert into dblens_no_such values (1)")
+    }
+    #expect(try await session.count(of: pk) == 2)
     // The session writes again afterwards (the app's own edits use it).
     _ = try await session.execute("update dblens_pk set n = n where id = 1")
     #expect(try await session.page(of: pk, limit: 10, offset: 0, search: "%").rows.isEmpty)

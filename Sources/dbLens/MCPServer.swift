@@ -17,6 +17,8 @@ enum MCPServer {
 
     /// Serves until stdin closes, then quits. Never returns.
     static func run() -> Never {
+        // Agents get English, whatever the Mac's language: set before any text is looked up.
+        UserDefaults.standard.setVolatileDomain(["AppleLanguages": ["en"]], forName: UserDefaults.argumentDomain)
         let (lines, input) = AsyncStream.makeStream(of: String.self)
         Thread.detachNewThread {
             while let line = readLine(strippingNewline: true) { input.yield(line) }
@@ -74,8 +76,8 @@ enum MCPServer {
                     "instructions": """
                         Databases saved in dbLens. Start with list_connections, then describe_schema (or \
                         list_tables and describe_table on big databases) before writing queries. query is always read-only. execute changes \
-                        data only on connections where the user turned on "Let Agents Write"; try it with \
-                        dry_run first where supported, and tell the user what it will change.
+                        data only on connections where the user turned on "Let Agents Write"; try changes and \
+                        migrations with test_changes first, and tell the user what they will change.
                         """,
                 ])
             case "ping":
@@ -141,30 +143,74 @@ enum MCPServer {
                     AppModel.recordAgentRun(statement, failed: true, for: connection.uuid)
                     throw error
                 }
+            case "test_changes":
+                let (connection, session) = try await open(arguments)
+                let script = try text(arguments, "statements")
+                try requireWrite(connection, "Testing runs the statements (and locks what they touch) before undoing them")
+                do {
+                    var output = Self.output(try await session.rehearse(script), maxRows: 20)
+                    output["rolled_back"] = "Every statement ran and was undone: nothing changed."
+                    AppModel.recordAgentRun("-- test\n" + script, failed: false, for: connection.uuid)
+                    return output
+                } catch {
+                    AppModel.recordAgentRun("-- test\n" + script, failed: true, for: connection.uuid)
+                    throw DatabaseError(message: ((error as? DatabaseError)?.message ?? error.localizedDescription)
+                                        + " (Rolled back: nothing changed.)")
+                }
             case "execute":
                 let (connection, session) = try await open(arguments)
-                let statement = try text(arguments, "statement")
-                if arguments["dry_run"] as? Bool == true {
-                    var output = Self.output(try await session.rehearse(statement), maxRows: 20)
-                    output["dry_run"] = "Run and rolled back: nothing changed."
-                    return output
-                }
-                guard connection.agentsCanWrite else {
-                    throw DatabaseError(message: """
-                        Writing is off for "\(connection.name)". The user can turn it on in dbLens: right-click \
-                        the connection and choose Let Agents Write. Reading with query works.
-                        """)
-                }
+                let script = try text(arguments, "statements")
+                try requireWrite(connection, "Writing")
+                let atomic = arguments["atomic"] as? Bool
                 do {
-                    let execution = try await session.execute(statement)
-                    AppModel.recordAgentRun(statement, failed: false, for: connection.uuid)
-                    return Self.output(execution, maxRows: 100)
+                    var output: [String: Any]
+                    if atomic == false {
+                        output = Self.output(try await session.execute(script), maxRows: 100)
+                        output["atomic"] = false
+                    } else {
+                        do {
+                            output = Self.output(try await session.executeAtomically(script), maxRows: 100)
+                            output["atomic"] = "All statements committed together."
+                        } catch let refused as NotAtomic {
+                            // Asked for explicitly: say why not. Otherwise run plainly and say what that means.
+                            if atomic == true { throw refused }
+                            output = Self.output(try await session.execute(script), maxRows: 100)
+                            output["atomic"] = false
+                            output["note"] = refused.message + " " + Self.nonAtomicNote(session.engine)
+                        }
+                    }
+                    AppModel.recordAgentRun(script, failed: false, for: connection.uuid)
+                    return output
+                } catch let refused as NotAtomic {
+                    throw DatabaseError(message: refused.message + " Nothing ran; pass atomic: false to run it anyway.")
                 } catch {
-                    AppModel.recordAgentRun(statement, failed: true, for: connection.uuid)
-                    throw error
+                    AppModel.recordAgentRun(script, failed: true, for: connection.uuid)
+                    let message = (error as? DatabaseError)?.message ?? error.localizedDescription
+                    if atomic != false, [.postgres, .sqlite].contains(session.engine) {
+                        throw DatabaseError(message: message + " (Rolled back: nothing changed.)")
+                    }
+                    throw DatabaseError(message: message + " " + Self.nonAtomicNote(session.engine))
                 }
             default:
                 throw DatabaseError(message: "Unknown tool: \(name)")
+            }
+        }
+
+        private func requireWrite(_ connection: SavedConnection, _ what: String) throws {
+            guard connection.agentsCanWrite else {
+                throw DatabaseError(message: """
+                    \(what) is off for "\(connection.name)". The user can turn it on in dbLens: right-click the \
+                    connection (or Settings > Agents) and choose Let Agents Write. Reading with query works.
+                    """)
+            }
+        }
+
+        private static func nonAtomicNote(_ engine: Engine) -> String {
+            switch engine {
+            case .mysql: "MySQL commits DDL as it runs: statements before a failing one stay applied. Check with describe_schema."
+            case .mongodb: "MongoDB ran each statement on its own: the ones before a failure stay applied."
+            case .redis: "Redis ran each command on its own: the ones before a failure stay applied."
+            default: "Statements before a failure stay applied."
             }
         }
 
@@ -436,13 +482,22 @@ enum MCPServer {
                 "annotations": ["readOnlyHint": true],
             ],
             [
-                "name": "execute",
-                "description": "Changes data or schema: INSERT, UPDATE, DELETE, DDL, MongoDB writes, Redis commands. Only on connections where the user turned on Let Agents Write in dbLens. With dry_run (PostgreSQL and SQLite) the statement runs in a transaction that is rolled back, to show what it would affect first. Confirm with the user before running for real.",
+                "name": "test_changes",
+                "description": "Tries a change or a whole migration without keeping it: runs every statement inside a transaction that is always rolled back, and reports what each did (rows affected) or which one failed and why. PostgreSQL and SQLite: data and schema (DDL). MySQL: data changes only, since its DDL commits by itself. MongoDB and Redis can't undo, so they refuse. Use before execute. Leave out BEGIN/COMMIT: dbLens owns the transaction. Needs Let Agents Write, since the statements really run (and lock) before the rollback.",
                 "inputSchema": ["type": "object", "properties": [
                     "connection": connection,
-                    "statement": ["type": "string", "description": "What to run."],
-                    "dry_run": ["type": "boolean", "description": "Run, report rows affected, and roll back. PostgreSQL and SQLite, one statement."],
-                ], "required": ["connection", "statement"]],
+                    "statements": ["type": "string", "description": "One statement or a script, separated by semicolons."],
+                ], "required": ["connection", "statements"]],
+                "annotations": ["readOnlyHint": false, "destructiveHint": false, "idempotentHint": true],
+            ],
+            [
+                "name": "execute",
+                "description": "Changes data or schema, for real: INSERT, UPDATE, DELETE, migrations (DDL), MongoDB writes, Redis commands. Only on connections where the user turned on Let Agents Write in dbLens. Scripts run all or nothing where the database allows (PostgreSQL, SQLite, MySQL without DDL); otherwise the result says so. Run test_changes first and confirm with the user. If the project has a migration tool (Prisma, Rails, Flyway…), use the tool instead, so it records the migration.",
+                "inputSchema": ["type": "object", "properties": [
+                    "connection": connection,
+                    "statements": ["type": "string", "description": "One statement or a script, separated by semicolons. Leave out BEGIN/COMMIT."],
+                    "atomic": ["type": "boolean", "description": "true: all or nothing, or refuse when the database can't. false: plain, each statement on its own. Default: all or nothing where possible."],
+                ], "required": ["connection", "statements"]],
                 "annotations": ["readOnlyHint": false, "destructiveHint": true],
             ],
         ]
