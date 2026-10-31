@@ -8,6 +8,7 @@ import DBLensKit
 struct ContentView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openSettings) private var openSettings
+    @Environment(Updater.self) private var updater
 
     var body: some View {
         @Bindable var model = model
@@ -37,7 +38,7 @@ struct ContentView: View {
         .task {
             await SeedData.insertIfRequested(into: model)
             SelfTest.runIfRequested(model: model)
-            Snapshot.runIfRequested(model: model, openSettings: openSettings)
+            Snapshot.runIfRequested(model: model, updater: updater, openSettings: openSettings)
         }
     }
 }

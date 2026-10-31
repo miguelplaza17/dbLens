@@ -10,7 +10,7 @@ import SwiftUI
 /// APP_SNAPSHOT_PAGES=table,query,row,connection limits the pages. Add "settings" to include Settings.
 /// Add APP_ACCENT=<id> to see the pages in another accent.
 enum Snapshot {
-    static func runIfRequested(model: AppModel, openSettings: OpenSettingsAction) {
+    static func runIfRequested(model: AppModel, updater: Updater, openSettings: OpenSettingsAction) {
         let env = ProcessInfo.processInfo.environment
         guard let dir = env["APP_SNAPSHOT"], !dir.isEmpty else { return }
         // Snapshots never run against the real database.
@@ -51,6 +51,13 @@ enum Snapshot {
                 capture(to: "\(dir)/row-\(mode).png")
                 model.rowEdit = nil
                 try? await Task.sleep(for: .seconds(0.5))
+            }
+            if only == nil || only?.contains("update") == true {
+                model.shown = .table
+                updater.showForSnapshot(.ready("1.0.2"))
+                try? await Task.sleep(for: .seconds(0.8))
+                capture(to: "\(dir)/update-\(mode).png")
+                updater.dismissNotice()
             }
             if only == nil || only?.contains("connection") == true {
                 model.connectionDraft = "mongodb+srv://app:•••@cluster0.example.mongodb.net/shop"

@@ -26,7 +26,9 @@ struct DBLensApp: App {
     var body: some Scene {
         Window("dbLens", id: "main") {
             ContentView()
+                .overlay(alignment: .top) { UpdateNotice().animation(.snappy, value: updater.notice) }
                 .environment(model)
+                .environment(updater)
                 .themed()
                 .overlay { if GridOverlay.enabled { GridOverlay() } }
                 .frame(minWidth: 1000, minHeight: 560)

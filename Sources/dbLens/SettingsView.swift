@@ -170,6 +170,11 @@ struct UpdateSettings: View {
             }
             Toggle("Check for updates automatically", isOn: $updater.automaticallyChecks)
                 .disabled(!updater.isEnabled)
+            Toggle(isOn: $updater.automaticallyUpdates) {
+                Text("Update automatically")
+                Text("Downloads in the background and installs when you quit; a notice in the window lets you restart now.")
+            }
+            .disabled(!updater.isEnabled || !updater.automaticallyChecks)
             LabeledContent {
                 Button("Check Now") { updater.checkForUpdates() }
                     .disabled(!updater.isEnabled)

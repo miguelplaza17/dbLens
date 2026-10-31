@@ -69,7 +69,6 @@ cat > "$dist/appcast.xml" <<XML
       <sparkle:version>$build</sparkle:version>
       <sparkle:shortVersionString>$version</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>$minimum</sparkle:minimumSystemVersion>
-      <sparkle:releaseNotesLink>https://github.com/miguelplaza17/dbLens/releases/tag/v$version</sparkle:releaseNotesLink>
       <enclosure url="https://github.com/miguelplaza17/dbLens/releases/download/v$version/$name-$version.dmg"
                  length="$length" type="application/octet-stream" sparkle:edSignature="$signature"/>
     </item>
