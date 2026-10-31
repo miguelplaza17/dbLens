@@ -116,6 +116,8 @@ struct DBLensApp: App {
             SettingsView()
                 .environment(model)
                 .themed()
+                .modelContainer(model.container)
+                .environment(updater)
         }
         .windowResizability(.contentSize)
     }

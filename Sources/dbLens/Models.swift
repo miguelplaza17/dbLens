@@ -660,6 +660,12 @@ final class AppModel {
         saveHistory()
     }
 
+    /// Settings: one connection's history, open or not.
+    func clearHistory(for id: UUID) {
+        UserDefaults.standard.removeObject(forKey: "sqlHistory.\(id.uuidString)")
+        if id == activeID { sqlHistory = [] }
+    }
+
     /// From the History list: into the editor, and run it when asked.
     func useHistory(_ entry: HistoryEntry, run: Bool) async {
         sql = entry.sql
