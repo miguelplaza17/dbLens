@@ -66,8 +66,10 @@ struct Sidebar: View {
     @State private var deleting: SavedConnection?
     @State private var deletingKey: Relation?
     /// The folder whose name is being typed (new or renamed).
-    @State private var naming: ConnectionFolder?
+    /// The folder whose name is being typed in place (new or renamed).
+    @State private var editingFolder: UUID?
     @State private var folderName = ""
+    @FocusState private var folderFieldFocused: Bool
     /// Where a dragged connection would land right now: a row, a folder, or the title.
     @State private var dropTarget: DropTarget?
 
@@ -139,7 +141,17 @@ struct Sidebar: View {
                         let lit = dropTarget == .folder(folder.id)
                         HStack(spacing: Space.sm) {
                             Image(systemName: lit ? "folder.fill" : "folder")
-                            Text(verbatim: folder.name).lineLimit(1)
+                            if editingFolder == folder.id {
+                                // The name, typed in place: Return or a click elsewhere keeps it, Escape leaves it.
+                                TextField("Folder Name", text: $folderName)
+                                    .textFieldStyle(.plain)
+                                    .focused($folderFieldFocused)
+                                    .onSubmit(commitFolderName)
+                                    .onExitCommand { editingFolder = nil }
+                                    .onAppear { folderFieldFocused = true }
+                            } else {
+                                Text(verbatim: folder.name).lineLimit(1)
+                            }
                             Spacer(minLength: 0)
                             if lit {
                                 Text("drop to move").font(.caption)
@@ -151,7 +163,10 @@ struct Sidebar: View {
                         .background(Palette.accent.opacity(lit ? 1 : 0), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop highlight
                         .contentShape(Rectangle())
                         // A click on the folder opens or closes it, like its arrow.
-                        .onTapGesture { withAnimation(.snappy) { model.setFolderExpanded(folder.id, !folder.expanded) } }
+                        .onTapGesture {
+                            guard editingFolder != folder.id else { return }
+                            withAnimation(.snappy) { model.setFolderExpanded(folder.id, !folder.expanded) }
+                        }
                         .dropDestination(for: String.self, action: { items, _ in drop(items, before: nil, into: folder.id.uuidString) },
                                          isTargeted: targeting(.folder(folder.id)))
                         .contextMenu { folderMenu(folder) }
@@ -212,15 +227,10 @@ struct Sidebar: View {
             }
         }
         .searchable(text: $filter, placement: .sidebar, prompt: model.usesCommands ? Text("Filter Keys") : model.usesQueries ? Text("Filter Collections") : Text("Filter Tables"))
-        .alert("Folder Name", isPresented: Binding(get: { naming != nil }, set: { if !$0 { naming = nil } })) {
-            TextField("Name", text: $folderName)
-            Button("Save") {
-                if let naming { model.renameFolder(naming.id, to: folderName) }
-                naming = nil
-            }
-            Button("Cancel", role: .cancel) { naming = nil }
-        }
         .contextMenu { Button("New Folder", systemImage: "folder.badge.plus") { newFolder() } }
+        .onChange(of: folderFieldFocused) { _, focused in
+            if !focused, editingFolder != nil { commitFolderName() }
+        }
         .onAppear(perform: loadFolded)
         .onChange(of: model.activeID) { loadFolded() }
         .confirmationDialog("Delete the key “\(deletingKey?.name ?? "")”?", isPresented: .init(
@@ -296,17 +306,27 @@ struct Sidebar: View {
         return true
     }
 
+    /// Puts the folder's name in an editable field, selected, right in the list.
+    private func startNaming(_ folder: ConnectionFolder) {
+        folderName = folder.name
+        model.setFolderExpanded(folder.id, true)
+        editingFolder = folder.id
+    }
+
+    private func commitFolderName() {
+        if let id = editingFolder { model.renameFolder(id, to: folderName) }
+        editingFolder = nil
+    }
+
     private func newFolder() {
         let folder = model.addFolder(named: String(localized: "New Folder"))
-        folderName = folder.name
-        naming = folder
+        startNaming(folder)
     }
 
     @ViewBuilder
     private func folderMenu(_ folder: ConnectionFolder) -> some View {
         Button("Rename…", systemImage: "pencil") {
-            folderName = folder.name
-            naming = folder
+            startNaming(folder)
         }
         Button("New Folder", systemImage: "folder.badge.plus") { newFolder() }
         Divider()
@@ -338,8 +358,7 @@ struct Sidebar: View {
             Button("New Folder", systemImage: "folder.badge.plus") {
                 let folder = model.addFolder(named: String(localized: "New Folder"))
                 model.move(connection, before: nil, into: folder.id.uuidString, all: connections)
-                folderName = folder.name
-                naming = folder
+                startNaming(folder)
             }
         }
         Divider()
