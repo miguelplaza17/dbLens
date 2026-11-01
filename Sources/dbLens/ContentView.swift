@@ -68,6 +68,18 @@ struct Sidebar: View {
     /// The folder whose name is being typed (new or renamed).
     @State private var naming: ConnectionFolder?
     @State private var folderName = ""
+    /// Where a dragged connection would land right now: a row, a folder, or the title.
+    @State private var dropTarget: DropTarget?
+
+    private enum DropTarget: Hashable { case row(UUID), folder(UUID), top }
+
+    private func targeting(_ target: DropTarget) -> (Bool) -> Void {
+        { inside in
+            withAnimation(.snappy(duration: 0.18)) {
+                if inside { dropTarget = target } else if dropTarget == target { dropTarget = nil }
+            }
+        }
+    }
 
     private enum Row: Hashable { case connection(UUID), relation(String) }
 
@@ -122,14 +134,23 @@ struct Sidebar: View {
                             connectionRow(connection)
                         }
                     } label: {
-                        Label(folder.name, systemImage: "folder")
-                            .dropDestination(for: String.self) { items, _ in drop(items, before: nil, into: folder.id.uuidString) }
+                        let lit = dropTarget == .folder(folder.id)
+                        Label(folder.name, systemImage: lit ? "folder.fill" : "folder")
+                            .foregroundStyle(lit ? Palette.accentText : .primary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .background(Palette.accent.opacity(lit ? 0.18 : 0), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop highlight
+                            .dropDestination(for: String.self, action: { items, _ in drop(items, before: nil, into: folder.id.uuidString) },
+                                             isTargeted: targeting(.folder(folder.id)))
                             .contextMenu { folderMenu(folder) }
                     }
                 }
                 ForEach(AppModel.ordered(connections, in: "")) { connection in
                     connectionRow(connection)
                 }
+                Button("New Folder", systemImage: "folder.badge.plus") { newFolder() }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
                 Button("New Connection…", systemImage: "plus") { model.showingNewConnection = true }
                     .buttonStyle(.borderless)
                     .foregroundStyle(.secondary)
@@ -137,8 +158,10 @@ struct Sidebar: View {
                     .background(ThinScrollBars().frame(width: 0, height: 0))
             } header: {
                 // Drop here to take a connection out of its folder.
-                Text("Connections")
-                    .dropDestination(for: String.self) { items, _ in drop(items, before: nil, into: "") }
+                Text(dropTarget == .top ? String(localized: "Connections · drop to take it out of the folder") : String(localized: "Connections"))
+                    .foregroundStyle(dropTarget == .top ? Palette.accentText : .secondary)
+                    .dropDestination(for: String.self, action: { items, _ in drop(items, before: nil, into: "") },
+                                     isTargeted: targeting(.top))
                     .contextMenu { Button("New Folder", systemImage: "folder.badge.plus") { newFolder() } }
             }
             if model.session != nil {
@@ -206,17 +229,32 @@ struct Sidebar: View {
     }
 
     /// A connection in the list: drag it onto another to put it there, onto a folder to file it.
+    /// While a connection is dragged over this row, the row steps down and leaves
+    /// an outlined slot above it: where the connection will land.
     private func connectionRow(_ connection: SavedConnection) -> some View {
-        ConnectionRow(connection: connection)
+        let open = dropTarget == .row(connection.uuid)
+        return ConnectionRow(connection: connection)
+            .padding(.top, open ? Space.xxl + Space.xs : 0)
+            .overlay(alignment: .top) {
+                if open {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)  // grid: ok drop slot
+                        .strokeBorder(Palette.accent, style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))  // grid: ok dashed outline
+                        .background(Palette.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop slot
+                        .frame(height: Space.xxl)
+                        .transition(.opacity)
+                }
+            }
             .tag(Row.connection(connection.uuid))
-            .draggable(connection.uuid.uuidString)
-            .dropDestination(for: String.self) { items, _ in drop(items, before: connection, into: connection.folderID) }
+            .draggable(connection.uuid.uuidString) { ConnectionDragCard(connection: connection) }
+            .dropDestination(for: String.self, action: { items, _ in drop(items, before: connection, into: connection.folderID) },
+                             isTargeted: targeting(.row(connection.uuid)))
             .contextMenu { menu(for: connection) }
     }
 
     /// A dragged connection id lands before `target`, or last in the folder.
     @discardableResult
     private func drop(_ items: [String], before target: SavedConnection?, into folderID: String) -> Bool {
+        dropTarget = nil
         guard let id = items.first.flatMap(UUID.init(uuidString:)),
               let dragged = connections.first(where: { $0.uuid == id }) else { return false }
         withAnimation(.snappy) { model.move(dragged, before: target, into: folderID, all: connections) }
@@ -280,6 +318,26 @@ struct Sidebar: View {
         Button("Delete…", systemImage: "trash", role: .destructive) {
             if confirmDelete { deleting = connection } else { model.delete(connection) }
         }
+    }
+}
+
+/// What follows the pointer while a connection is dragged: a small card of the row.
+private struct ConnectionDragCard: View {
+    let connection: SavedConnection
+
+    var body: some View {
+        let engine = Engine(rawValue: connection.engine) ?? .postgres
+        Label {
+            Text(verbatim: connection.name).lineLimit(1)
+        } icon: {
+            Image(systemName: engine.symbol).foregroundStyle(engine.color)
+        }
+        .padding(.horizontal, Space.md)
+        .padding(.vertical, Space.sm)
+        .frame(width: 220, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Palette.accent.opacity(0.6)))
+        .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
     }
 }
 
