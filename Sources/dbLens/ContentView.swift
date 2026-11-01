@@ -181,6 +181,8 @@ struct Sidebar: View {
                 }
                 .labelStyle(.iconOnly)
                 .buttonStyle(.borderless)
+                // Clear of the list's scroll bar.
+                .padding(.trailing, Space.sm)
                 .contentShape(Rectangle())
                 // The header is always there, so it carries the thin scroll bars for the list.
                 .background(ThinScrollBars().frame(width: 0, height: 0))

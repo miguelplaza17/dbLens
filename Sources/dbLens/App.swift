@@ -126,6 +126,11 @@ struct DBLensApp: App {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Tooltips after a quarter second, not the system's second: most buttons here are icons.
+        UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 250])
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Read the saved URLs now, so an older plain or Keychain copy is encrypted at once.
         if !Store.isOverridden { _ = Secrets.url(for: UUID()) }
