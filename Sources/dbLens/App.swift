@@ -157,11 +157,26 @@ enum Store {
         if let path = ProcessInfo.processInfo.environment["APP_STORE"], !path.isEmpty {
             return URL(fileURLWithPath: path)
         }
-        let dir = URL.applicationSupportDirectory.appending(path: "dbLens", directoryHint: .isDirectory)
-        moveFromFirstName(to: dir)
+        let released = URL.applicationSupportDirectory.appending(path: "dbLens", directoryHint: .isDirectory)
+        moveFromFirstName(to: released)
+        // The development build (build.sh, bundle id ….dev) keeps its own copy: a newer
+        // model must never change the store the released app opens.
+        let dir = isDevelopmentBuild ? URL.applicationSupportDirectory.appending(path: "dbLens Dev", directoryHint: .isDirectory) : released
+        if isDevelopmentBuild { copyOnce(from: released, to: dir) }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
                                                  attributes: [.posixPermissions: 0o700])
         return dir.appending(path: "dbLens.store")
+    }
+
+    static var isDevelopmentBuild: Bool { Bundle.main.bundleIdentifier?.hasSuffix(".dev") == true }
+
+    /// The first time the development build runs, it starts from the released app's
+    /// connections (store, encrypted URLs, and key), copied.
+    private static func copyOnce(from source: URL, to dir: URL) {
+        let files = FileManager.default
+        guard !files.fileExists(atPath: dir.path), files.fileExists(atPath: source.path) else { return }
+        try? files.copyItem(at: source, to: dir)
+        try? files.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
     }
 
     /// The app was first called PgLens: its folder and store move here once.

@@ -22,6 +22,10 @@ final class SavedConnection {
     /// Agents using dbLens's MCP server may change data here (the execute tool).
     /// Off by default; reading is always allowed.
     var agentsCanWrite: Bool = false
+    /// Place in the sidebar, within its folder (or the top level).
+    var sortIndex: Int = 0
+    /// The sidebar folder it sits in (`ConnectionFolder.id`), or "" at the top level.
+    var folderID: String = ""
 
     init(name: String) {
         self.name = name
@@ -49,6 +53,14 @@ enum Shown: String, CaseIterable {
 }
 
 /// One line of the SQL log: a run, an edit, or an error.
+/// A folder in the sidebar's Connections list. Folders live in the settings;
+/// each connection keeps its folder's id.
+struct ConnectionFolder: Codable, Identifiable, Hashable {
+    var id = UUID()
+    var name: String
+    var expanded = true
+}
+
 /// A statement run in the SQL panel, kept per connection for the History list.
 struct HistoryEntry: Codable, Identifiable, Hashable {
     var id = UUID()
@@ -143,6 +155,60 @@ final class AppModel {
     /// Settings reopens on the last tab. Test and snapshot runs leave it alone.
     var settingsTab: SettingsTab = SettingsTab(rawValue: UserDefaults.standard.string(forKey: "settings.tab") ?? "") ?? .general {
         didSet { if !Store.isOverridden { UserDefaults.standard.set(settingsTab.rawValue, forKey: "settings.tab") } }
+    }
+
+    /// The sidebar's connection folders, in order.
+    var folders: [ConnectionFolder] = (UserDefaults.standard.data(forKey: "connectionFolders"))
+        .flatMap { try? JSONDecoder().decode([ConnectionFolder].self, from: $0) } ?? [] {
+        didSet {
+            if !Store.isOverridden, let data = try? JSONEncoder().encode(folders) {
+                UserDefaults.standard.set(data, forKey: "connectionFolders")
+            }
+        }
+    }
+
+    @discardableResult
+    func addFolder(named name: String) -> ConnectionFolder {
+        let folder = ConnectionFolder(name: name)
+        folders.append(folder)
+        return folder
+    }
+
+    func renameFolder(_ id: UUID, to name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let index = folders.firstIndex(where: { $0.id == id }) else { return }
+        folders[index].name = trimmed
+    }
+
+    /// The folder goes; its connections move to the top level, after the others.
+    func deleteFolder(_ id: UUID) {
+        folders.removeAll { $0.id == id }
+        let all = (try? context.fetch(FetchDescriptor<SavedConnection>())) ?? []
+        for connection in all where connection.folderID == id.uuidString {
+            move(connection, before: nil, into: "", all: all)
+        }
+    }
+
+    func setFolderExpanded(_ id: UUID, _ expanded: Bool) {
+        guard let index = folders.firstIndex(where: { $0.id == id }) else { return }
+        folders[index].expanded = expanded
+    }
+
+    /// The connections in one folder ("" is the top level), in sidebar order.
+    static func ordered(_ all: [SavedConnection], in folderID: String) -> [SavedConnection] {
+        all.filter { $0.folderID == folderID }
+            .sorted { ($0.sortIndex, $0.name.localizedLowercase) < ($1.sortIndex, $1.name.localizedLowercase) }
+    }
+
+    /// Puts a connection before another (or last) in a folder, and numbers that folder again.
+    func move(_ connection: SavedConnection, before target: SavedConnection?, into folderID: String, all: [SavedConnection]) {
+        guard connection.uuid != target?.uuid else { return }
+        var level = Self.ordered(all, in: folderID).filter { $0.uuid != connection.uuid }
+        let index = target.flatMap { t in level.firstIndex { $0.uuid == t.uuid } } ?? level.endIndex
+        level.insert(connection, at: index)
+        connection.folderID = folderID
+        for (position, item) in level.enumerated() { item.sortIndex = position }
+        try? context.save()
     }
 
     /// Grows when an agent added or removed a connection through the MCP

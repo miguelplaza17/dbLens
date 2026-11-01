@@ -18,8 +18,12 @@ enum SeedData {
             return
         }
         guard ((try? model.context.fetchCount(FetchDescriptor<SavedConnection>())) ?? 0) == 0 else { return }
+        // A folder with the two servers, as a user would file them.
+        let folder = model.addFolder(named: "Servers")
         for name in ["production @ db.example.com", "analytics @ server"] {
-            model.context.insert(SavedConnection(name: name))
+            let connection = SavedConnection(name: name)
+            connection.folderID = folder.id.uuidString
+            model.context.insert(connection)
         }
         do {
             try await model.save(url: url, name: "demo @ localhost")

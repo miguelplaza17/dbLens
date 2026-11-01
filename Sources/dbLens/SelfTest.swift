@@ -44,6 +44,16 @@ enum SelfTest {
             check("a working URL is saved and opened", saved != nil && model.session != nil && connections().count == 1)
             check("the name comes from the URL", saved?.name == Connector.summary(url)?.suggestedName)
             check("the URL is kept for the connection", saved?.url == url)
+            // Folders: a connection files into one, and comes out when the folder goes.
+            if let saved {
+                let all = (try? model.context.fetch(FetchDescriptor<SavedConnection>())) ?? []
+                let folder = model.addFolder(named: "Test")
+                model.move(saved, before: nil, into: folder.id.uuidString, all: all)
+                let filed = AppModel.ordered(all, in: folder.id.uuidString).map(\.uuid) == [saved.uuid]
+                model.deleteFolder(folder.id)
+                check("connections file into folders and come out when one is deleted",
+                      filed && saved.folderID.isEmpty && !model.folders.contains { $0.id == folder.id })
+            }
             // Let Agents Write: what the switch saves must reach the file another process (the MCP server) reads.
             if let saved {
                 saved.agentsCanWrite = true

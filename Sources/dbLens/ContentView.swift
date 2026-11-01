@@ -65,6 +65,9 @@ struct Sidebar: View {
     @State private var folded: Set<String> = []
     @State private var deleting: SavedConnection?
     @State private var deletingKey: Relation?
+    /// The folder whose name is being typed (new or renamed).
+    @State private var naming: ConnectionFolder?
+    @State private var folderName = ""
 
     private enum Row: Hashable { case connection(UUID), relation(String) }
 
@@ -110,17 +113,33 @@ struct Sidebar: View {
 
     var body: some View {
         List(selection: selection) {
-            Section("Connections") {
-                ForEach(connections) { connection in
-                    ConnectionRow(connection: connection)
-                        .tag(Row.connection(connection.uuid))
-                        .contextMenu { menu(for: connection) }
+            Section {
+                // Folders first, like Finder; then the connections outside any folder.
+                ForEach(model.folders) { folder in
+                    DisclosureGroup(isExpanded: Binding(get: { folder.expanded },
+                                                        set: { model.setFolderExpanded(folder.id, $0) })) {
+                        ForEach(AppModel.ordered(connections, in: folder.id.uuidString)) { connection in
+                            connectionRow(connection)
+                        }
+                    } label: {
+                        Label(folder.name, systemImage: "folder")
+                            .dropDestination(for: String.self) { items, _ in drop(items, before: nil, into: folder.id.uuidString) }
+                            .contextMenu { folderMenu(folder) }
+                    }
+                }
+                ForEach(AppModel.ordered(connections, in: "")) { connection in
+                    connectionRow(connection)
                 }
                 Button("New Connection…", systemImage: "plus") { model.showingNewConnection = true }
                     .buttonStyle(.borderless)
                     .foregroundStyle(.secondary)
                     // This row is always there, so it carries the thin scroll bars for the list.
                     .background(ThinScrollBars().frame(width: 0, height: 0))
+            } header: {
+                // Drop here to take a connection out of its folder.
+                Text("Connections")
+                    .dropDestination(for: String.self) { items, _ in drop(items, before: nil, into: "") }
+                    .contextMenu { Button("New Folder", systemImage: "folder.badge.plus") { newFolder() } }
             }
             if model.session != nil {
                 ForEach(schemas, id: \.0) { schema, relations in
@@ -144,6 +163,15 @@ struct Sidebar: View {
             }
         }
         .searchable(text: $filter, placement: .sidebar, prompt: model.usesCommands ? Text("Filter Keys") : model.usesQueries ? Text("Filter Collections") : Text("Filter Tables"))
+        .alert("Folder Name", isPresented: Binding(get: { naming != nil }, set: { if !$0 { naming = nil } })) {
+            TextField("Name", text: $folderName)
+            Button("Save") {
+                if let naming { model.renameFolder(naming.id, to: folderName) }
+                naming = nil
+            }
+            Button("Cancel", role: .cancel) { naming = nil }
+        }
+        .contextMenu { Button("New Folder", systemImage: "folder.badge.plus") { newFolder() } }
         .onAppear(perform: loadFolded)
         .onChange(of: model.activeID) { loadFolded() }
         .confirmationDialog("Delete the key “\(deletingKey?.name ?? "")”?", isPresented: .init(
@@ -177,6 +205,42 @@ struct Sidebar: View {
         }
     }
 
+    /// A connection in the list: drag it onto another to put it there, onto a folder to file it.
+    private func connectionRow(_ connection: SavedConnection) -> some View {
+        ConnectionRow(connection: connection)
+            .tag(Row.connection(connection.uuid))
+            .draggable(connection.uuid.uuidString)
+            .dropDestination(for: String.self) { items, _ in drop(items, before: connection, into: connection.folderID) }
+            .contextMenu { menu(for: connection) }
+    }
+
+    /// A dragged connection id lands before `target`, or last in the folder.
+    @discardableResult
+    private func drop(_ items: [String], before target: SavedConnection?, into folderID: String) -> Bool {
+        guard let id = items.first.flatMap(UUID.init(uuidString:)),
+              let dragged = connections.first(where: { $0.uuid == id }) else { return false }
+        withAnimation(.snappy) { model.move(dragged, before: target, into: folderID, all: connections) }
+        return true
+    }
+
+    private func newFolder() {
+        let folder = model.addFolder(named: String(localized: "New Folder"))
+        folderName = folder.name
+        naming = folder
+    }
+
+    @ViewBuilder
+    private func folderMenu(_ folder: ConnectionFolder) -> some View {
+        Button("Rename…", systemImage: "pencil") {
+            folderName = folder.name
+            naming = folder
+        }
+        Button("New Folder", systemImage: "folder.badge.plus") { newFolder() }
+        Divider()
+        Button("Delete Folder", systemImage: "trash", role: .destructive) { model.deleteFolder(folder.id) }
+            .help("The connections in it move out of the folder; none is deleted.")
+    }
+
     @ViewBuilder
     private func menu(for connection: SavedConnection) -> some View {
         Button("Connect", systemImage: "bolt.horizontal") { Task { await model.connect(connection) } }
@@ -189,6 +253,21 @@ struct Sidebar: View {
             .help("Cleared from the clipboard after a minute")
         if connection.uuid == model.activeID {
             Button("Disconnect", systemImage: "bolt.horizontal.slash") { model.disconnect() }
+        }
+        Menu("Move to", systemImage: "folder") {
+            ForEach(model.folders) { folder in
+                Button(folder.name) { model.move(connection, before: nil, into: folder.id.uuidString, all: connections) }
+                    .disabled(connection.folderID == folder.id.uuidString)
+            }
+            if !model.folders.isEmpty { Divider() }
+            Button("No Folder") { model.move(connection, before: nil, into: "", all: connections) }
+                .disabled(connection.folderID.isEmpty)
+            Button("New Folder", systemImage: "folder.badge.plus") {
+                let folder = model.addFolder(named: String(localized: "New Folder"))
+                model.move(connection, before: nil, into: folder.id.uuidString, all: connections)
+                folderName = folder.name
+                naming = folder
+            }
         }
         Divider()
         // dbLens's MCP server always lets agents read; writing is opt-in, per connection.
