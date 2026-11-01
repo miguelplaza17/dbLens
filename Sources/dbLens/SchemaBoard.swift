@@ -561,10 +561,13 @@ struct SchemaBoard: View {
             .help("Lay the cards out again automatically")
             ControlGroup {
                 Button("Zoom Out", systemImage: "minus.magnifyingglass") { withAnimation(.snappy) { board.zoom(by: 1 / 1.25) } }
+                    .help("Zoom out (Command-Minus)")
                 Button("Fit", systemImage: "arrow.up.left.and.down.right.magnifyingglass") {
                     withAnimation(.snappy) { board.fit(BoardLayout.bounds(tables, notes: board.notes, board: board)) }
                 }
+                .help("Fit every table in view (Command-0)")
                 Button("Zoom In", systemImage: "plus.magnifyingglass") { withAnimation(.snappy) { board.zoom(by: 1.25) } }
+                    .help("Zoom in (Command-Plus)")
             }
             .fixedSize()
             Text(verbatim: "\(Int((board.zoom * 100).rounded()))%")
@@ -573,6 +576,7 @@ struct SchemaBoard: View {
                 .frame(minWidth: Space.section + Space.sm, alignment: .trailing)
             Button("Shortcuts", systemImage: "keyboard") { showingHelp.toggle() }
                 .labelStyle(.iconOnly)
+                .help("Mouse and keyboard shortcuts for the board")
                 .popover(isPresented: $showingHelp, arrowEdge: .bottom) { BoardHelp() }
         }
         .controlSize(.small)

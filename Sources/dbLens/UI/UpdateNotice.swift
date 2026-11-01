@@ -20,6 +20,7 @@ struct UpdateNotice: View {
                 }
                 Button("Close", systemImage: "xmark") { updater.dismissNotice() }
                     .labelStyle(.iconOnly)
+                    .help("Hide this notice; the update still installs when you quit")
                     .buttonStyle(.borderless)
             }
             .controlSize(.small)
