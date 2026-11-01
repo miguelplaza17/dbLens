@@ -136,6 +136,10 @@ Claude Desktop and Cursor take the same command in their MCP settings:
 Everything an agent runs shows in the connection's History in the SQL panel, marked
 "via agent". `tools/mcp-test.sh` drives every tool against a throwaway Postgres.
 
+`.claude/skills/dblens-mcp/SKILL.md` is a skill that teaches agents the safe order of the
+tools: look before reading, rehearse with `test_changes`, and confirm before `execute`.
+Copy it to `~/.claude/skills/` to use it in every project.
+
 ## Where things are kept
 
 | What | Where |
