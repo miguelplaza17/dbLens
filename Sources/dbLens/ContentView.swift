@@ -150,6 +150,8 @@ struct Sidebar: View {
                         .frame(maxWidth: .infinity, minHeight: Space.xxl, alignment: .leading)
                         .background(Palette.accent.opacity(lit ? 1 : 0), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop highlight
                         .contentShape(Rectangle())
+                        // A click on the folder opens or closes it, like its arrow.
+                        .onTapGesture { withAnimation(.snappy) { model.setFolderExpanded(folder.id, !folder.expanded) } }
                         .dropDestination(for: String.self, action: { items, _ in drop(items, before: nil, into: folder.id.uuidString) },
                                          isTargeted: targeting(.folder(folder.id)))
                         .contextMenu { folderMenu(folder) }
@@ -166,20 +168,24 @@ struct Sidebar: View {
                 ForEach(AppModel.ordered(connections, in: "")) { connection in
                     connectionRow(connection)
                 }
-                Button("New Folder", systemImage: "folder.badge.plus") { newFolder() }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(.secondary)
-                Button("New Connection…", systemImage: "plus") { model.showingNewConnection = true }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(.secondary)
-                    // This row is always there, so it carries the thin scroll bars for the list.
-                    .background(ThinScrollBars().frame(width: 0, height: 0))
             } header: {
                 // Drop here to take a connection out of its folder.
-                Text(dropTarget == .top ? String(localized: "Connections · drop to take it out of the folder") : String(localized: "Connections"))
-                    .foregroundStyle(dropTarget == .top ? Palette.accentText : .secondary)
-                    .dropDestination(for: String.self, action: { items, _ in drop(items, before: nil, into: "") },
-                                     isTargeted: targeting(.top))
+                HStack(spacing: Space.sm) {
+                    Text(dropTarget == .top ? String(localized: "Connections · drop to take it out of the folder") : String(localized: "Connections"))
+                        .foregroundStyle(dropTarget == .top ? Palette.accentText : .secondary)
+                    Spacer(minLength: 0)
+                    Button("New Folder", systemImage: "folder.badge.plus") { newFolder() }
+                        .help("New Folder")
+                    Button("New Connection…", systemImage: "plus") { model.showingNewConnection = true }
+                        .help("New Connection (Command-N)")
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+                .contentShape(Rectangle())
+                // The header is always there, so it carries the thin scroll bars for the list.
+                .background(ThinScrollBars().frame(width: 0, height: 0))
+                .dropDestination(for: String.self, action: { items, _ in drop(items, before: nil, into: "") },
+                                 isTargeted: targeting(.top))
                     .contextMenu { Button("New Folder", systemImage: "folder.badge.plus") { newFolder() } }
             }
             if model.session != nil {
