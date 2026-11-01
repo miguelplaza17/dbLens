@@ -413,6 +413,7 @@
   "dbLens can't show %@ keys yet. Use the command panel.": "O dbLens ainda não mostra chaves %@. Use o painel de comandos.",
   "dbLens doesn't know %@ here. Write the value itself, like \"text\", 42 or {a: 1}.": "O dbLens não conhece %@ aqui. Escreva o próprio valor, como \"texto\", 42 ou {a: 1}.",
   "default": "padrão",
+  "drop to move": "solte para mover",
   "from ~/.ssh/config": "do ~/.ssh/config",
   "host %@": "host %@",
   "host not found": "host não encontrado",

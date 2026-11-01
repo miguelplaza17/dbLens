@@ -133,16 +133,34 @@ struct Sidebar: View {
                         ForEach(AppModel.ordered(connections, in: folder.id.uuidString)) { connection in
                             connectionRow(connection)
                         }
+                        // Where a connection dropped on the folder lands: last inside it.
+                        if dropTarget == .folder(folder.id) { dropSlot }
                     } label: {
                         let lit = dropTarget == .folder(folder.id)
-                        Label(folder.name, systemImage: lit ? "folder.fill" : "folder")
-                            .foregroundStyle(lit ? Palette.accentText : .primary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
-                            .background(Palette.accent.opacity(lit ? 0.18 : 0), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop highlight
-                            .dropDestination(for: String.self, action: { items, _ in drop(items, before: nil, into: folder.id.uuidString) },
-                                             isTargeted: targeting(.folder(folder.id)))
-                            .contextMenu { folderMenu(folder) }
+                        HStack(spacing: Space.sm) {
+                            Image(systemName: lit ? "folder.fill" : "folder")
+                            Text(verbatim: folder.name).lineLimit(1)
+                            Spacer(minLength: 0)
+                            if lit {
+                                Text("drop to move").font(.caption)
+                            }
+                        }
+                        .foregroundStyle(lit ? Color.white : Color.primary)
+                        .padding(.horizontal, lit ? Space.sm : 0)
+                        .frame(maxWidth: .infinity, minHeight: Space.xxl, alignment: .leading)
+                        .background(Palette.accent.opacity(lit ? 1 : 0), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop highlight
+                        .contentShape(Rectangle())
+                        .dropDestination(for: String.self, action: { items, _ in drop(items, before: nil, into: folder.id.uuidString) },
+                                         isTargeted: targeting(.folder(folder.id)))
+                        .contextMenu { folderMenu(folder) }
+                        // Spring-loaded, like Finder: a closed folder opens after a moment under a drag.
+                        .task(id: lit) {
+                            guard lit, !folder.expanded else { return }
+                            try? await Task.sleep(for: .milliseconds(500))
+                            if !Task.isCancelled, dropTarget == .folder(folder.id) {
+                                withAnimation(.snappy) { model.setFolderExpanded(folder.id, true) }
+                            }
+                        }
                     }
                 }
                 ForEach(AppModel.ordered(connections, in: "")) { connection in
@@ -229,6 +247,15 @@ struct Sidebar: View {
     }
 
     /// A connection in the list: drag it onto another to put it there, onto a folder to file it.
+    /// The outlined space where a dragged connection will land.
+    private var dropSlot: some View {
+        RoundedRectangle(cornerRadius: 6, style: .continuous)  // grid: ok drop slot
+            .strokeBorder(Palette.accent, style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))  // grid: ok dashed outline
+            .background(Palette.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop slot
+            .frame(height: Space.xxl)
+            .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .top)))
+    }
+
     /// While a connection is dragged over this row, the row steps down and leaves
     /// an outlined slot above it: where the connection will land.
     private func connectionRow(_ connection: SavedConnection) -> some View {
@@ -332,12 +359,16 @@ private struct ConnectionDragCard: View {
         } icon: {
             Image(systemName: engine.symbol).foregroundStyle(engine.color)
         }
-        .padding(.horizontal, Space.md)
-        .padding(.vertical, Space.sm)
-        .frame(width: 220, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Palette.accent.opacity(0.6)))
-        .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+        .font(.callout)
+        .padding(.horizontal, Space.sm)
+        .padding(.vertical, Space.xs)
+        .frame(maxWidth: 160, alignment: .leading)
+        .fixedSize()
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(Palette.accent.opacity(0.6)))
+        .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+        // Small and see-through, so the folder or slot under the pointer stays visible.
+        .opacity(0.85)
     }
 }
 
