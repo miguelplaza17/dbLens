@@ -1,0 +1,291 @@
+/* Theme tokens. Dark is the default (like the macOS app); a light system
+   preference switches to light unless the app forces a theme with
+   <html data-theme="dark|light">. Views use only these variables. */
+:root {
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --radius: 6px;
+  --font-ui: system-ui, -apple-system, "Segoe UI", "Ubuntu", "Cantarell", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Consolas", "DejaVu Sans Mono", monospace;
+  --font-size: 13px;
+  --duration: 120ms;
+
+  --bg: #1a1c24;
+  --bg-sidebar: #15161c;
+  --bg-panel: #1f2129;
+  --bg-hover: #2a2d37;
+  --bg-selected: #2f4a6e;
+  --border: #2e313b;
+  --text: #e6e7eb;
+  --text-secondary: #9a9eab;
+  --accent: #4a8fe0;
+  --accent-text: #79adf0;
+  --on-accent: #ffffff;
+  --danger: #e5534b;
+  --null: #6b7080;
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #ffffff;
+    --bg-sidebar: #f3f4f6;
+    --bg-panel: #f8f9fa;
+    --bg-hover: #e9ebef;
+    --bg-selected: #d6e6fb;
+    --border: #dcdfe5;
+    --text: #1d1f24;
+    --text-secondary: #5f6573;
+    --accent: #2f74c9;
+    --accent-text: #2462ad;
+    --on-accent: #ffffff;
+    --danger: #c9372c;
+    --null: #9aa0ad;
+    color-scheme: light;
+  }
+}
+
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --bg-sidebar: #f3f4f6;
+  --bg-panel: #f8f9fa;
+  --bg-hover: #e9ebef;
+  --bg-selected: #d6e6fb;
+  --border: #dcdfe5;
+  --text: #1d1f24;
+  --text-secondary: #5f6573;
+  --accent: #2f74c9;
+  --accent-text: #2462ad;
+  --on-accent: #ffffff;
+  --danger: #c9372c;
+  --null: #9aa0ad;
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--font-size);
+  overflow: hidden;
+  user-select: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-1) var(--space-2);
+}
+
+input:focus,
+textarea:focus,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  height: 100%;
+}
+
+.sidebar {
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.sidebar h2 {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  margin: var(--space-3) var(--space-3) var(--space-1);
+}
+
+.sidebar .list {
+  overflow: auto;
+  flex: 1;
+  padding: 0 var(--space-2) var(--space-2);
+}
+
+.sidebar .item {
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius);
+  cursor: default;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar .item:hover {
+  background: var(--bg-hover);
+}
+
+.sidebar .item.selected {
+  background: var(--bg-selected);
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.toolbar .title {
+  font-weight: 600;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grid {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+
+.grid table {
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  user-select: text;
+}
+
+.grid th,
+.grid td {
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  padding: 2px var(--space-2);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.grid th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-panel);
+  font-family: var(--font-ui);
+  font-weight: 600;
+}
+
+.grid td.null {
+  color: var(--null);
+  font-style: italic;
+}
+
+.empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  color: var(--text-secondary);
+}
+
+.empty h3 {
+  color: var(--text);
+  margin: 0;
+  font-size: 15px;
+}
+
+.sql-panel {
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
+  display: flex;
+  flex-direction: column;
+  height: 220px;
+}
+
+.sql-panel textarea {
+  flex: 1;
+  resize: none;
+  border: none;
+  border-radius: 0;
+  font-family: var(--font-mono);
+  user-select: text;
+}
+
+.sql-panel .bar {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  padding: var(--space-1) var(--space-2);
+  border-top: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+.sql-panel .bar .log {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.error {
+  color: var(--danger);
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.connect-box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: min(560px, 90%);
+}
+
+.grid > .error {
+  padding: var(--space-3);
+}

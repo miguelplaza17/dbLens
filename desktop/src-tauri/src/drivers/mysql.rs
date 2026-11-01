@@ -1,0 +1,1012 @@
+//! MySQL and MariaDB driver (mysql_async, pure Rust, rustls). Port of
+//! `Sources/DBLensKit/MySQL.swift`: same SQL, same semantics.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+use mysql_async::consts::{ColumnFlags, ColumnType};
+use mysql_async::prelude::Queryable;
+use mysql_async::{Column as MyColumn, Conn, Opts, OptsBuilder, Row, SslOpts, Value};
+use tokio::sync::Mutex;
+
+use crate::connector::Summary;
+use crate::engine::Engine;
+use crate::session::{
+    like_pattern, CellValue, Column, ColumnSort, DatabaseSession, DbError, DbResult, EditOutcome, Execution, QueryResult,
+    Relation, RelationKind, RowKey, RowKeyKind, RowKeys, SchemaGraph, ROW_LIMIT,
+};
+use crate::sql_script::{self, Dialect};
+use crate::url::UrlParts;
+
+const SCHEMES: [&str; 3] = ["mysql", "mariadb", "mysqlx"];
+const SYSTEM_SCHEMAS: &str = "('mysql','information_schema','performance_schema','sys')";
+/// Tables with more estimated rows than this are not counted exactly.
+const COUNT_LIMIT: f64 = 500_000.0;
+/// Bytes shown as 0x…, cut after this many, so the grid stays fast.
+const HEX_LIMIT: usize = 64;
+
+/// Host, database, user and TLS mode for the connection sheet.
+pub fn summary(text: &str) -> Option<Summary> {
+    let parts = UrlParts::new(text).filter(|p| SCHEMES.contains(&p.scheme.as_str()))?;
+    let host = parts.first_host().map(|h| h.name.clone()).filter(|h| !h.is_empty()).unwrap_or_else(|| "localhost".into());
+    let tls = parts
+        .query
+        .iter()
+        .find(|(k, _)| ["ssl-mode", "sslmode", "ssl_mode"].contains(&k.to_lowercase().as_str()))
+        .map(|(_, v)| v.to_uppercase())
+        .or_else(|| {
+            parts.query.iter().find(|(k, v)| ["ssl", "usessl"].contains(&k.to_lowercase().as_str()) && v.eq_ignore_ascii_case("true")).map(|_| "REQUIRED".into())
+        });
+    let database = parts.path.split('/').next().unwrap_or("").to_string();
+    Some(Summary {
+        engine: Engine::Mysql,
+        suggested_name: format!("{} @ {host}", if database.is_empty() { "mysql" } else { &database }),
+        database,
+        host: Some(host),
+        port: parts.first_host().and_then(|h| h.port),
+        user: parts.user.clone(),
+        tls,
+    })
+}
+
+// MARK: - Target
+
+/// MySQL's own words for the TLS setting: DISABLED, PREFERRED, REQUIRED,
+/// VERIFY_CA, VERIFY_IDENTITY. None means the URL says nothing (PREFERRED).
+pub(crate) fn ssl_mode(query: &std::collections::BTreeMap<String, String>) -> Option<&'static str> {
+    let q: std::collections::HashMap<String, &str> = query.iter().map(|(k, v)| (k.to_lowercase(), v.as_str())).collect();
+    if let Some(mode) = q.get("ssl-mode").or_else(|| q.get("sslmode")).or_else(|| q.get("ssl_mode")) {
+        return match mode.to_lowercase().replace('-', "_").as_str() {
+            "disabled" | "disable" | "false" | "0" | "off" => Some("DISABLED"),
+            "preferred" | "prefer" | "allow" => Some("PREFERRED"),
+            "required" | "require" | "true" | "1" | "on" | "trust" | "no_verify" => Some("REQUIRED"),
+            "verify_ca" => Some("VERIFY_CA"),
+            "verify_identity" | "verify_full" => Some("VERIFY_IDENTITY"),
+            _ => None,
+        };
+    }
+    let flag = q.get("ssl").or_else(|| q.get("usessl")).or_else(|| q.get("requiressl"))?.to_lowercase();
+    if ["false", "0", "off", "no"].contains(&flag.as_str()) {
+        return Some("DISABLED");
+    }
+    if !["true", "1", "on", "yes", "require", "required"].contains(&flag.as_str()) {
+        return None;
+    }
+    if q.get("verifyservercertificate").map(|v| v.eq_ignore_ascii_case("true")).unwrap_or(false) {
+        Some("VERIFY_CA")
+    } else {
+        Some("REQUIRED")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tls {
+    Off,
+    /// Encrypted, certificate not checked.
+    Required,
+    VerifyCa,
+    VerifyIdentity,
+}
+
+#[derive(Debug, Clone)]
+struct Target {
+    host: String,
+    port: u16,
+    user: Option<String>,
+    password: Option<String>,
+    database: Option<String>,
+    socket: Option<String>,
+    ssl_mode: Option<&'static str>,
+    /// The URL's host when connecting through a tunnel, for the certificate check.
+    tls_name: Option<String>,
+}
+
+impl Target {
+    fn new(url: &str, local_port: Option<u16>) -> DbResult<Self> {
+        let parts = UrlParts::new(url)
+            .filter(|p| SCHEMES.contains(&p.scheme.as_str()))
+            .ok_or_else(|| DbError::msg("This doesn't look like a MySQL URL."))?;
+        let url_host = parts.first_host().map(|h| h.name.clone()).filter(|h| !h.is_empty()).unwrap_or_else(|| "localhost".into());
+        let url_port = parts.first_host().and_then(|h| h.port).unwrap_or(3306);
+        let database = parts.path.split('/').next().filter(|d| !d.is_empty()).map(String::from);
+        let socket = parts.query.iter().find(|(k, _)| k.eq_ignore_ascii_case("socket")).map(|(_, v)| v.clone()).filter(|s| !s.is_empty());
+        let (host, port, socket, tls_name) = match local_port {
+            Some(p) => ("127.0.0.1".to_string(), p, None, Some(url_host)),
+            None => (url_host, url_port, socket, None),
+        };
+        Ok(Self {
+            host,
+            port,
+            user: parts.user.clone().filter(|u| !u.is_empty()),
+            password: parts.password.clone(),
+            database,
+            socket,
+            ssl_mode: ssl_mode(&parts.query),
+            tls_name,
+        })
+    }
+
+    fn opts(&self, tls: Tls) -> Opts {
+        let ssl = match tls {
+            Tls::Off => None,
+            Tls::Required => Some(SslOpts::default().with_danger_accept_invalid_certs(true).with_danger_skip_domain_validation(true)),
+            Tls::VerifyCa => Some(SslOpts::default().with_danger_skip_domain_validation(true)),
+            Tls::VerifyIdentity => {
+                Some(SslOpts::default().with_danger_tls_hostname_override(self.tls_name.clone()))
+            }
+        };
+        OptsBuilder::default()
+            .ip_or_hostname(self.host.clone())
+            .tcp_port(self.port)
+            .user(self.user.clone())
+            .pass(self.password.clone())
+            .db_name(self.database.clone())
+            .socket(self.socket.clone())
+            .ssl_opts(ssl)
+            // Like the C client's CLIENT_FOUND_ROWS: affected = matched rows.
+            .client_found_rows(true)
+            .prefer_socket(false)
+            .into()
+    }
+
+    /// Opens a connection and returns it with the options that worked.
+    /// PREFERRED (the default) tries TLS first and falls back to plain TCP.
+    async fn open(&self) -> DbResult<(Conn, Opts)> {
+        let attempts: Vec<Tls> = match self.ssl_mode {
+            Some("DISABLED") => vec![Tls::Off],
+            Some("REQUIRED") => vec![Tls::Required],
+            Some("VERIFY_CA") => vec![Tls::VerifyCa],
+            Some("VERIFY_IDENTITY") => vec![Tls::VerifyIdentity],
+            _ => vec![Tls::Required, Tls::Off],
+        };
+        let mut last = None;
+        for tls in attempts {
+            let opts = self.opts(tls);
+            let connecting = Conn::new(opts.clone());
+            match tokio::time::timeout(Duration::from_secs(10), connecting).await {
+                Ok(Ok(conn)) => return Ok((conn, opts)),
+                Ok(Err(error)) => last = Some(to_error(&error)),
+                Err(_) => last = Some(DbError::msg("Connection timed out.")),
+            }
+        }
+        Err(last.unwrap_or_else(|| DbError::msg("Couldn't connect.")))
+    }
+}
+
+fn to_error(error: &mysql_async::Error) -> DbError {
+    match error {
+        mysql_async::Error::Server(server) => DbError::msg(server.message.trim().to_string()),
+        other => {
+            let text = other.to_string();
+            DbError::msg(if text.trim().is_empty() { "The server closed the connection.".to_string() } else { text })
+        }
+    }
+}
+
+/// Opens a session. Through an SSH tunnel, `local_port` replaces the URL's host and port.
+pub async fn connect(url: &str, local_port: Option<u16>) -> DbResult<Box<dyn DatabaseSession>> {
+    let target = Target::new(url, local_port)?;
+    let (mut conn, opts) = target.open().await?;
+    let info: Option<String> = conn.query_first("select version()").await.map_err(|e| to_error(&e))?;
+    let state = Arc::new(Shared { running: AtomicBool::new(false), requested: AtomicBool::new(false), id: conn.id(), opts });
+    Ok(Box::new(MySqlSession {
+        conn: Mutex::new(Some(conn)),
+        state,
+        database: target.database,
+        server_version: version(&info.unwrap_or_default()),
+    }))
+}
+
+/// "8.4.3", or "11.4.2-MariaDB" without the distribution suffix.
+pub(crate) fn version(info: &str) -> String {
+    match info.find("-MariaDB") {
+        Some(at) => info[..at + "-MariaDB".len()].to_string(),
+        None => info.to_string(),
+    }
+}
+
+// MARK: - Session
+
+/// What `cancel` needs without the connection's lock.
+struct Shared {
+    running: AtomicBool,
+    requested: AtomicBool,
+    id: u32,
+    opts: Opts,
+}
+
+pub struct MySqlSession {
+    conn: Mutex<Option<Conn>>,
+    state: Arc<Shared>,
+    database: Option<String>,
+    server_version: String,
+}
+
+fn closed() -> DbError {
+    DbError::msg("The connection is closed.")
+}
+
+/// Statements MySQL commits by itself (implicit commit): a transaction can't undo them.
+pub(crate) fn commits_by_itself(statement: &str) -> bool {
+    let verb = sql_script::verb(statement, 1);
+    if verb == "CREATE" && sql_script::verb(statement, 2) == "CREATE TEMPORARY" {
+        return false;
+    }
+    [
+        "CREATE", "ALTER", "DROP", "RENAME", "TRUNCATE", "GRANT", "REVOKE", "LOCK", "UNLOCK", "INSTALL", "UNINSTALL", "ANALYZE",
+        "OPTIMIZE", "REPAIR", "CHECK", "FLUSH", "RESET", "CALL", "LOAD",
+    ]
+    .contains(&verb.as_str())
+}
+
+/// The first word of each statement, uppercased, skipping comments and quoted
+/// text: "insert …; select …" -> ["INSERT", "SELECT"].
+pub(crate) fn statement_verbs(sql: &str) -> Vec<String> {
+    let bytes = sql.as_bytes();
+    let mut verbs: Vec<String> = Vec::new();
+    let mut verb: Vec<u8> = Vec::new();
+    let (mut started, mut collecting) = (false, false);
+    let mut i = 0;
+    let skip_to = |i: &mut usize, end: &[u8]| {
+        while *i < bytes.len() && !bytes[*i..].starts_with(end) {
+            *i += 1;
+        }
+        *i = bytes.len().min(*i + end.len());
+    };
+    while i < bytes.len() {
+        let byte = bytes[i];
+        let next = bytes.get(i + 1).copied().unwrap_or(0);
+        match byte {
+            b'-' if next == b'-' && (i + 2 >= bytes.len() || [9, 10, 13, 32].contains(&bytes[i + 2])) => {
+                skip_to(&mut i, b"\n");
+                collecting = false;
+            }
+            b'#' => {
+                skip_to(&mut i, b"\n");
+                collecting = false;
+            }
+            b'/' if next == b'*' => {
+                i += 2;
+                skip_to(&mut i, b"*/");
+                collecting = false;
+            }
+            b'\'' | b'"' | b'`' => {
+                started = true;
+                collecting = false;
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' && byte != b'`' {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == byte {
+                        if bytes.get(i + 1) == Some(&byte) {
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            b';' => {
+                if started {
+                    verbs.push(String::from_utf8_lossy(&verb).to_uppercase());
+                }
+                started = false;
+                collecting = false;
+                verb.clear();
+                i += 1;
+            }
+            9 | 10 | 13 | 32 => {
+                collecting = false;
+                i += 1;
+            }
+            _ => {
+                if !started {
+                    started = true;
+                    collecting = true;
+                }
+                if collecting && byte.is_ascii_alphabetic() {
+                    verb.push(byte);
+                } else {
+                    collecting = false;
+                }
+                i += 1;
+            }
+        }
+    }
+    if started {
+        verbs.push(String::from_utf8_lossy(&verb).to_uppercase());
+    }
+    verbs
+}
+
+/// Bytes as 0x…, cut after `HEX_LIMIT`.
+pub(crate) fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+    let mut text = String::with_capacity(2 + bytes.len().min(HEX_LIMIT) * 2 + 3);
+    text.push_str("0x");
+    for byte in bytes.iter().take(HEX_LIMIT) {
+        text.push(DIGITS[(byte >> 4) as usize] as char);
+        text.push(DIGITS[(byte & 0xF) as usize] as char);
+    }
+    if bytes.len() > HEX_LIMIT {
+        text.push('…');
+    }
+    text
+}
+
+/// A quoted string literal for a connection with (or without) backslash
+/// escapes; NULL for None.
+pub(crate) fn literal(value: Option<&str>, no_backslash_escapes: bool) -> String {
+    let Some(value) = value else { return "NULL".into() };
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('\'');
+    for c in value.chars() {
+        match c {
+            '\'' => out.push_str("''"),
+            _ if no_backslash_escapes => out.push(c),
+            '\\' => out.push_str("\\\\"),
+            '\0' => out.push_str("\\0"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '"' => out.push_str("\\\""),
+            '\u{1a}' => out.push_str("\\Z"),
+            _ => out.push(c),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+fn quote_name(identifier: &str) -> String {
+    format!("`{}`", identifier.replace('`', "``"))
+}
+
+/// Bytes, not text: BLOB, BINARY, VARBINARY, BIT and geometry in the binary charset.
+fn is_binary(column: &MyColumn) -> bool {
+    if column.character_set() != 63 {
+        return false;
+    }
+    use ColumnType::*;
+    matches!(
+        column.column_type(),
+        MYSQL_TYPE_TINY_BLOB
+            | MYSQL_TYPE_MEDIUM_BLOB
+            | MYSQL_TYPE_LONG_BLOB
+            | MYSQL_TYPE_BLOB
+            | MYSQL_TYPE_STRING
+            | MYSQL_TYPE_VAR_STRING
+            | MYSQL_TYPE_VARCHAR
+            | MYSQL_TYPE_BIT
+            | MYSQL_TYPE_GEOMETRY
+    )
+}
+
+/// The type of a result column: "int", "varchar", "datetime", "json"…
+fn type_name(column: &MyColumn) -> &'static str {
+    use ColumnType::*;
+    let flags = column.flags();
+    if flags.contains(ColumnFlags::ENUM_FLAG) {
+        return "enum";
+    }
+    if flags.contains(ColumnFlags::SET_FLAG) {
+        return "set";
+    }
+    let binary = column.character_set() == 63;
+    match column.column_type() {
+        MYSQL_TYPE_TINY => "tinyint",
+        MYSQL_TYPE_SHORT => "smallint",
+        MYSQL_TYPE_INT24 => "mediumint",
+        MYSQL_TYPE_LONG => "int",
+        MYSQL_TYPE_LONGLONG => "bigint",
+        MYSQL_TYPE_FLOAT => "float",
+        MYSQL_TYPE_DOUBLE => "double",
+        MYSQL_TYPE_DECIMAL | MYSQL_TYPE_NEWDECIMAL => "decimal",
+        MYSQL_TYPE_NULL => "null",
+        MYSQL_TYPE_TIMESTAMP | MYSQL_TYPE_TIMESTAMP2 => "timestamp",
+        MYSQL_TYPE_DATE | MYSQL_TYPE_NEWDATE => "date",
+        MYSQL_TYPE_TIME | MYSQL_TYPE_TIME2 => "time",
+        MYSQL_TYPE_DATETIME | MYSQL_TYPE_DATETIME2 => "datetime",
+        MYSQL_TYPE_YEAR => "year",
+        MYSQL_TYPE_VARCHAR | MYSQL_TYPE_VAR_STRING => {
+            if binary {
+                "varbinary"
+            } else {
+                "varchar"
+            }
+        }
+        MYSQL_TYPE_STRING => {
+            if binary {
+                "binary"
+            } else {
+                "char"
+            }
+        }
+        MYSQL_TYPE_BIT => "bit",
+        MYSQL_TYPE_JSON => "json",
+        MYSQL_TYPE_ENUM => "enum",
+        MYSQL_TYPE_SET => "set",
+        MYSQL_TYPE_TINY_BLOB | MYSQL_TYPE_MEDIUM_BLOB | MYSQL_TYPE_LONG_BLOB | MYSQL_TYPE_BLOB => {
+            if binary {
+                "blob"
+            } else {
+                "text"
+            }
+        }
+        MYSQL_TYPE_GEOMETRY => "geometry",
+        MYSQL_TYPE_VECTOR => "vector",
+        _ => "",
+    }
+}
+
+fn cell(value: &Value, binary: bool) -> Option<String> {
+    match value {
+        Value::NULL => None,
+        Value::Bytes(bytes) => Some(if binary { hex(bytes) } else { String::from_utf8_lossy(bytes).into_owned() }),
+        other => Some(other.as_sql(true).trim_matches('\'').to_string()),
+    }
+}
+
+fn status(verb: &str, affected: u64) -> QueryResult {
+    let command = if ["INSERT", "UPDATE", "DELETE", "REPLACE"].contains(&verb) {
+        format!("{verb} {affected}")
+    } else if verb.is_empty() {
+        "OK".to_string()
+    } else {
+        verb.to_string()
+    };
+    QueryResult::command(command, affected)
+}
+
+/// Whether the connection treats backslash as a plain character.
+async fn no_backslash_escapes(conn: &mut Conn) -> DbResult<bool> {
+    let mode: Option<String> = conn.query_first("select @@SESSION.sql_mode").await.map_err(|e| to_error(&e))?;
+    Ok(mode.unwrap_or_default().to_uppercase().contains("NO_BACKSLASH_ESCAPES"))
+}
+
+impl MySqlSession {
+    async fn guard(&self) -> DbResult<tokio::sync::MappedMutexGuard<'_, Conn>> {
+        let guard = self.conn.lock().await;
+        tokio::sync::MutexGuard::try_map(guard, |c| c.as_mut()).map_err(|_| closed())
+    }
+
+    /// Runs one or more statements, the way the mysql client does. A canceled
+    /// run is an error, also when the server ended it quietly.
+    async fn run_all(&self, conn: &mut Conn, sql: &str) -> DbResult<Vec<QueryResult>> {
+        self.state.requested.store(false, Ordering::SeqCst);
+        self.state.running.store(true, Ordering::SeqCst);
+        let outcome = read_all(conn, sql).await;
+        self.state.running.store(false, Ordering::SeqCst);
+        let canceled = self.state.requested.swap(false, Ordering::SeqCst);
+        if canceled {
+            return Err(DbError::Cancelled);
+        }
+        outcome
+    }
+
+    async fn single(&self, conn: &mut Conn, sql: &str) -> DbResult<QueryResult> {
+        let mut results = self.run_all(conn, sql).await?;
+        let at = results.iter().rposition(QueryResult::has_rows).or_else(|| results.len().checked_sub(1));
+        match at {
+            Some(at) => Ok(results.swap_remove(at)),
+            None => Err(DbError::msg("No result.")),
+        }
+    }
+
+    async fn silent(&self, conn: &mut Conn, sql: &str) -> DbResult<()> {
+        self.run_all(conn, sql).await.map(|_| ())
+    }
+
+    async fn primary_key(&self, conn: &mut Conn, relation: &Relation) -> DbResult<Vec<String>> {
+        if relation.kind != RelationKind::Table {
+            return Ok(vec![]);
+        }
+        let sql = format!(
+            "select COLUMN_NAME from information_schema.KEY_COLUMN_USAGE \
+             where TABLE_SCHEMA = {s} and TABLE_NAME = {n} and CONSTRAINT_NAME = 'PRIMARY' order by ORDINAL_POSITION",
+            s = literal(Some(&relation.schema), false),
+            n = literal(Some(&relation.name), false)
+        );
+        Ok(self.single(conn, &sql).await?.rows.into_iter().filter_map(|r| r.into_iter().next().flatten()).collect())
+    }
+
+    /// Column name and type, in table order.
+    async fn column_types(&self, conn: &mut Conn, relation: &Relation) -> DbResult<Vec<(String, String)>> {
+        let sql = format!(
+            "select COLUMN_NAME, COLUMN_TYPE from information_schema.COLUMNS \
+             where TABLE_SCHEMA = {s} and TABLE_NAME = {n} order by ORDINAL_POSITION",
+            s = literal(Some(&relation.schema), false),
+            n = literal(Some(&relation.name), false)
+        );
+        Ok(self
+            .single(conn, &sql)
+            .await?
+            .rows
+            .into_iter()
+            .map(|r| (r.first().cloned().flatten().unwrap_or_default(), r.get(1).cloned().flatten().unwrap_or_default()))
+            .collect())
+    }
+
+    /// Every column joined into one text (NULLs skipped) and matched with LIKE.
+    fn filter(search: &str, columns: &[String], backslash_off: bool) -> String {
+        if search.is_empty() || columns.is_empty() {
+            return String::new();
+        }
+        let names = columns.iter().map(|c| quote_name(c)).collect::<Vec<_>>().join(", ");
+        format!(" where concat_ws(' ', {names}) like {}", literal(Some(&like_pattern(search)), backslash_off))
+    }
+
+    /// Runs one edit. An edit meant for exactly one row is rolled back if it
+    /// would touch more, and refused if it touches none.
+    async fn edit(&self, conn: &mut Conn, sent: &str, logged: String, expect_one: bool) -> DbResult<EditOutcome> {
+        if expect_one {
+            self.silent(conn, "start transaction").await?;
+        }
+        let outcome = async {
+            let result = self.single(conn, sent).await?;
+            let affected = result.total_rows;
+            if expect_one {
+                if affected > 1 {
+                    return Err(DbError::msg(format!("The change would have affected {affected} rows and was rolled back.")));
+                }
+                if affected != 1 {
+                    return Err(DbError::msg("The row changed or was deleted since it was loaded. Reload the table and try again."));
+                }
+                self.silent(conn, "commit").await?;
+            }
+            Ok(EditOutcome { sql: logged, command: result.command, affected })
+        }
+        .await;
+        if outcome.is_err() && expect_one {
+            let _ = self.silent(conn, "rollback").await;
+        }
+        outcome
+    }
+
+    /// `where` for one row: the key columns, NULLs as `is null`. (sent, logged).
+    fn where_clause(key: &RowKey, backslash_off: bool) -> (String, String) {
+        let (mut sent, mut logged) = (Vec::new(), Vec::new());
+        for (i, column) in key.columns.iter().enumerate() {
+            let name = quote_name(column);
+            match key.values.get(i).cloned().flatten() {
+                Some(v) => {
+                    sent.push(format!("{name} = {}", literal(Some(&v), backslash_off)));
+                    logged.push(format!("{name} = ?"));
+                }
+                None => {
+                    sent.push(format!("{name} is null"));
+                    logged.push(format!("{name} is null"));
+                }
+            }
+        }
+        // Non-null comparisons first, then the NULL tests, like the Swift app.
+        let order = |parts: Vec<String>| {
+            let (nulls, rest): (Vec<_>, Vec<_>) = parts.into_iter().partition(|p| p.ends_with(" is null"));
+            rest.into_iter().chain(nulls).collect::<Vec<_>>().join(" and ")
+        };
+        (order(sent), order(logged))
+    }
+
+    /// The script in a transaction, committed or always rolled back. Only data
+    /// changes: DDL commits by itself in MySQL and would stay.
+    async fn in_transaction(&self, sql: &str, commit: bool) -> DbResult<Execution> {
+        let statements = sql_script::checked(sql, Dialect::Mysql)?;
+        if let Some(index) = statements.iter().position(|s| commits_by_itself(s)) {
+            let verb = sql_script::verb(&statements[index], 1);
+            let n = index + 1;
+            return Err(if commit {
+                DbError::NotAtomic(format!("Statement {n} ({verb}) commits by itself in MySQL, so the script can't run all or nothing."))
+            } else {
+                DbError::msg(format!(
+                    "Statement {n} ({verb}) commits by itself in MySQL, so it can't be tried and undone. Test data changes only, or try the DDL on a copy."
+                ))
+            });
+        }
+        let start = Instant::now();
+        let mut conn = self.guard().await?;
+        self.silent(&mut conn, "start transaction").await?;
+        let outcome = async {
+            let mut results = Vec::with_capacity(statements.len());
+            for (index, statement) in statements.iter().enumerate() {
+                let run = self.run_all(&mut conn, statement).await.and_then(|mut r| r.pop().ok_or_else(|| DbError::msg("No result.")));
+                match run {
+                    Ok(result) => results.push(result),
+                    Err(DbError::Cancelled) => return Err(DbError::Cancelled),
+                    Err(error) => return Err(sql_script::failed(index, statements.len(), statement, &error)),
+                }
+            }
+            self.silent(&mut conn, if commit { "commit" } else { "rollback" }).await?;
+            Ok(results)
+        }
+        .await;
+        match outcome {
+            Ok(results) => Ok(Execution::new(results, start.elapsed())),
+            Err(error) => {
+                let _ = self.silent(&mut conn, "rollback").await;
+                Err(error)
+            }
+        }
+    }
+}
+
+/// Reads every result set of `sql`.
+async fn read_all(conn: &mut Conn, sql: &str) -> DbResult<Vec<QueryResult>> {
+    let verbs = statement_verbs(sql);
+    let mut results: Vec<QueryResult> = Vec::new();
+    let mut result = conn.query_iter(sql).await.map_err(|e| to_error(&e))?;
+    let mut index = 0;
+    while result.columns().is_some() {
+        let verb = verbs.get(index).or(verbs.last()).cloned().unwrap_or_default();
+        let columns = result.columns();
+        match columns.filter(|c| !c.is_empty()) {
+            Some(columns) => {
+                let binary: Vec<bool> = columns.iter().map(is_binary).collect();
+                let names: Vec<Column> = columns.iter().map(|c| Column::new(c.name_str().into_owned(), type_name(c))).collect();
+                let (rows, total) = result
+                    .reduce((Vec::<Vec<Option<String>>>::new(), 0usize), |(mut rows, total), row: Row| {
+                        if rows.len() < ROW_LIMIT {
+                            rows.push((0..row.len()).map(|i| cell(row.as_ref(i).unwrap_or(&Value::NULL), binary.get(i).copied().unwrap_or(false))).collect());
+                        }
+                        (rows, total + 1)
+                    })
+                    .await
+                    .map_err(|e| to_error(&e))?;
+                let mut set = QueryResult::rows(names, rows, format!("SELECT {total}"));
+                set.truncated = total > ROW_LIMIT;
+                set.total_rows = total as u64;
+                results.push(set);
+                // A procedure's result sets come before its own status.
+                if verb != "CALL" {
+                    index += 1;
+                }
+            }
+            None => {
+                let affected = result.affected_rows();
+                results.push(status(&verb, affected));
+                index += 1;
+                result.reduce((), |_, _: Row| ()).await.map_err(|e| to_error(&e))?;
+            }
+        }
+        // After a set is read the next one is already pending, even when it is
+        // only a status (`is_empty` would say no: it ignores such a set).
+        if result.columns().is_none() {
+            break;
+        }
+    }
+    // An error in a later statement shows up only when the rest is drained.
+    result.drop_result().await.map_err(|e| to_error(&e))?;
+    Ok(results)
+}
+
+#[async_trait]
+impl DatabaseSession for MySqlSession {
+    fn engine(&self) -> Engine {
+        Engine::Mysql
+    }
+
+    fn server_version(&self) -> String {
+        self.server_version.clone()
+    }
+
+    /// Stops the running query: a second, short connection sends KILL QUERY.
+    /// Never waits for the connection's lock.
+    fn cancel(&self) {
+        if !self.state.running.load(Ordering::SeqCst) {
+            return;
+        }
+        self.state.requested.store(true, Ordering::SeqCst);
+        let state = self.state.clone();
+        let kill = async move {
+            let connecting = Conn::new(state.opts.clone());
+            if let Ok(Ok(mut conn)) = tokio::time::timeout(Duration::from_secs(10), connecting).await {
+                let _ = conn.query_drop(format!("KILL QUERY {}", state.id)).await;
+                let _ = conn.disconnect().await;
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(kill);
+            }
+            Err(_) => {
+                std::thread::spawn(move || {
+                    if let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                        runtime.block_on(kill);
+                    }
+                });
+            }
+        }
+    }
+
+    fn quote(&self, identifier: &str) -> String {
+        quote_name(identifier)
+    }
+
+    async fn execute(&self, sql: &str) -> DbResult<Execution> {
+        let start = Instant::now();
+        let mut conn = self.guard().await?;
+        let results = self.run_all(&mut conn, sql).await?;
+        Ok(Execution::new(results, start.elapsed()))
+    }
+
+    /// One statement in a read-only session and transaction, rolled back. DDL
+    /// is refused too: it needs a read-write session.
+    async fn read_only(&self, text: &str) -> DbResult<Execution> {
+        let statements = sql_script::statements(text, Dialect::Mysql);
+        if statements.len() > 1 {
+            return Err(DbError::msg("Run one statement at a time."));
+        }
+        if statements.is_empty() {
+            return Err(DbError::msg("There is no statement to run."));
+        }
+        let start = Instant::now();
+        let mut conn = self.guard().await?;
+        self.silent(&mut conn, "set session transaction read only").await?;
+        let outcome = async {
+            self.silent(&mut conn, "start transaction read only").await?;
+            self.run_all(&mut conn, &statements[0]).await
+        }
+        .await;
+        let _ = self.silent(&mut conn, "rollback").await;
+        let _ = self.silent(&mut conn, "set session transaction read write").await;
+        Ok(Execution::new(outcome?, start.elapsed()))
+    }
+
+    async fn rehearse(&self, text: &str) -> DbResult<Execution> {
+        self.in_transaction(text, false).await
+    }
+
+    async fn execute_atomically(&self, text: &str) -> DbResult<Execution> {
+        self.in_transaction(text, true).await
+    }
+
+    /// Tables and views in every database the user can see, the URL's database first.
+    async fn relations(&self) -> DbResult<Vec<Relation>> {
+        let sql = format!(
+            "select TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE, TABLE_ROWS from information_schema.TABLES where TABLE_SCHEMA not in {SYSTEM_SCHEMAS}"
+        );
+        let mut conn = self.guard().await?;
+        let rows = self.single(&mut conn, &sql).await?.rows;
+        let text = |r: &Vec<Option<String>>, i: usize| r.get(i).cloned().flatten().unwrap_or_default();
+        let mut relations: Vec<Relation> = rows
+            .iter()
+            .map(|r| {
+                let kind = if text(r, 2).ends_with("VIEW") { RelationKind::View } else { RelationKind::Table };
+                Relation::new(text(r, 0), text(r, 1), kind, text(r, 3).parse().unwrap_or(-1.0))
+            })
+            .collect();
+        let first = self.database.clone().unwrap_or_default();
+        relations.sort_by(|a, b| {
+            ((a.schema != first), &a.schema, &a.name).cmp(&((b.schema != first), &b.schema, &b.name))
+        });
+        Ok(relations)
+    }
+
+    async fn page(&self, relation: &Relation, limit: u32, offset: u64, search: &str, sort: Option<&ColumnSort>) -> DbResult<QueryResult> {
+        let mut conn = self.guard().await?;
+        let primary_key = self.primary_key(&mut conn, relation).await?;
+        // MySQL sorts NULL first going up; "x is null" puts it last either way.
+        let mut terms: Vec<String> = Vec::new();
+        if let Some(sort) = sort {
+            let name = quote_name(&sort.column);
+            terms.push(format!("{name} is null"));
+            terms.push(format!("{name} {}", sort.direction()));
+        }
+        terms.extend(primary_key.iter().map(|c| quote_name(c)));
+        let order = if terms.is_empty() { String::new() } else { format!(" order by {}", terms.join(", ")) };
+        let types = self.column_types(&mut conn, relation).await?;
+        let where_ = if search.is_empty() {
+            String::new()
+        } else {
+            let names: Vec<String> = types.iter().map(|t| t.0.clone()).collect();
+            let off = no_backslash_escapes(&mut conn).await?;
+            Self::filter(search, &names, off)
+        };
+        let sql = format!("select * from {}{where_}{order} limit {limit} offset {offset}", self.qualified(relation));
+        let mut result = self.single(&mut conn, &sql).await?;
+        let indexes: Vec<usize> = primary_key.iter().filter_map(|n| result.columns.iter().position(|c| &c.name == n)).collect();
+        if !primary_key.is_empty() && indexes.len() == primary_key.len() {
+            let values = result.rows.iter().map(|row| indexes.iter().map(|&i| row[i].clone()).collect()).collect();
+            result.keys = Some(RowKeys { columns: primary_key, kind: RowKeyKind::PrimaryKey, values });
+        }
+        for column in &mut result.columns {
+            if let Some((_, t)) = types.iter().find(|(n, _)| n == &column.name) {
+                column.type_name = t.clone();
+            }
+        }
+        Ok(result)
+    }
+
+    /// Exact row count, or None when the table is big enough that counting is slow.
+    async fn count(&self, relation: &Relation, search: &str) -> DbResult<Option<u64>> {
+        if relation.estimate > COUNT_LIMIT {
+            return Ok(None);
+        }
+        let mut conn = self.guard().await?;
+        let where_ = if search.is_empty() {
+            String::new()
+        } else {
+            let names: Vec<String> = self.column_types(&mut conn, relation).await?.into_iter().map(|t| t.0).collect();
+            let off = no_backslash_escapes(&mut conn).await?;
+            Self::filter(search, &names, off)
+        };
+        let result = self.single(&mut conn, &format!("select count(*) from {}{where_}", self.qualified(relation))).await?;
+        Ok(result.rows.first().and_then(|r| r.first().cloned().flatten()).and_then(|v| v.parse().ok()))
+    }
+
+    async fn update(&self, relation: &Relation, key: &RowKey, changes: &[CellValue]) -> DbResult<EditOutcome> {
+        if changes.is_empty() {
+            return Ok(EditOutcome { sql: String::new(), command: "UPDATE 0".into(), affected: 0 });
+        }
+        let mut conn = self.guard().await?;
+        let off = no_backslash_escapes(&mut conn).await?;
+        let target = self.qualified(relation);
+        let set = changes.iter().map(|c| format!("{} = {}", quote_name(&c.column), literal(c.value.as_deref(), off))).collect::<Vec<_>>().join(", ");
+        let set_logged = changes.iter().map(|c| format!("{} = ?", quote_name(&c.column))).collect::<Vec<_>>().join(", ");
+        let (w_sent, w_logged) = Self::where_clause(key, off);
+        self.edit(
+            &mut conn,
+            &format!("update {target} set {set} where {w_sent}"),
+            format!("update {target} set {set_logged} where {w_logged}"),
+            true,
+        )
+        .await
+    }
+
+    async fn insert(&self, relation: &Relation, values: &[CellValue]) -> DbResult<EditOutcome> {
+        let mut conn = self.guard().await?;
+        let off = no_backslash_escapes(&mut conn).await?;
+        let head = format!("insert into {}", self.qualified(relation));
+        if values.is_empty() {
+            let sql = format!("{head} () values ()");
+            return self.edit(&mut conn, &sql, sql.clone(), false).await;
+        }
+        let names = values.iter().map(|c| quote_name(&c.column)).collect::<Vec<_>>().join(", ");
+        let sent = values.iter().map(|c| literal(c.value.as_deref(), off)).collect::<Vec<_>>().join(", ");
+        let logged = vec!["?"; values.len()].join(", ");
+        self.edit(&mut conn, &format!("{head} ({names}) values ({sent})"), format!("{head} ({names}) values ({logged})"), false).await
+    }
+
+    async fn delete(&self, relation: &Relation, key: &RowKey) -> DbResult<EditOutcome> {
+        let mut conn = self.guard().await?;
+        let off = no_backslash_escapes(&mut conn).await?;
+        let head = format!("delete from {} where ", self.qualified(relation));
+        let (sent, logged) = Self::where_clause(key, off);
+        self.edit(&mut conn, &format!("{head}{sent}"), format!("{head}{logged}"), true).await
+    }
+
+    async fn schema_graph(&self) -> DbResult<SchemaGraph> {
+        let columns = format!(
+            "select c.table_schema, c.table_name, t.table_type = 'VIEW', c.column_name, c.column_type, \
+                    c.is_nullable = 'YES', c.column_key = 'PRI' \
+             from information_schema.columns c \
+             join information_schema.tables t on t.table_schema = c.table_schema and t.table_name = c.table_name \
+             where c.table_schema not in {SYSTEM_SCHEMAS} \
+             order by c.table_schema = database() desc, c.table_schema, c.table_name, c.ordinal_position"
+        );
+        // 0x1F is a binary string: convert the joined names back to text.
+        let links = format!(
+            "select constraint_name, concat(table_schema, '.', table_name), \
+                    concat(referenced_table_schema, '.', referenced_table_name), \
+                    convert(group_concat(column_name order by ordinal_position separator 0x1F) using utf8mb4), \
+                    convert(group_concat(referenced_column_name order by ordinal_position separator 0x1F) using utf8mb4) \
+             from information_schema.key_column_usage \
+             where referenced_table_name is not null and table_schema not in {SYSTEM_SCHEMAS} \
+             group by table_schema, table_name, constraint_name, referenced_table_schema, referenced_table_name \
+             order by 1"
+        );
+        let mut conn = self.guard().await?;
+        let columns = self.single(&mut conn, &columns).await?.rows;
+        let links = self.single(&mut conn, &links).await?.rows;
+        Ok(SchemaGraph::build(&columns, &links))
+    }
+
+    async fn close(&self) {
+        if let Some(conn) = self.conn.lock().await.take() {
+            let _ = conn.disconnect().await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn query(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn reads_ssl_modes() {
+        assert_eq!(ssl_mode(&query(&[("ssl-mode", "required")])), Some("REQUIRED"));
+        assert_eq!(ssl_mode(&query(&[("sslMode", "verify-full")])), Some("VERIFY_IDENTITY"));
+        assert_eq!(ssl_mode(&query(&[("sslmode", "verify_ca")])), Some("VERIFY_CA"));
+        assert_eq!(ssl_mode(&query(&[("ssl", "false")])), Some("DISABLED"));
+        assert_eq!(ssl_mode(&query(&[("useSSL", "true")])), Some("REQUIRED"));
+        assert_eq!(ssl_mode(&query(&[("useSSL", "true"), ("verifyServerCertificate", "true")])), Some("VERIFY_CA"));
+        assert_eq!(ssl_mode(&query(&[("ssl-mode", "nonsense")])), None);
+        assert_eq!(ssl_mode(&query(&[])), None);
+    }
+
+    #[test]
+    fn builds_targets() {
+        let t = Target::new("mysql://ana:p%40ss@db.example.com:3307/shop?ssl-mode=REQUIRED", None).unwrap();
+        assert_eq!((t.host.as_str(), t.port), ("db.example.com", 3307));
+        assert_eq!(t.user.as_deref(), Some("ana"));
+        assert_eq!(t.password.as_deref(), Some("p@ss"));
+        assert_eq!(t.database.as_deref(), Some("shop"));
+        assert_eq!(t.ssl_mode, Some("REQUIRED"));
+        let t = Target::new("mariadb://root@/", None).unwrap();
+        assert_eq!((t.host.as_str(), t.port), ("localhost", 3306));
+        assert_eq!(t.database, None);
+        let t = Target::new("mysql://ana@db.example.com/shop", Some(40000)).unwrap();
+        assert_eq!((t.host.as_str(), t.port), ("127.0.0.1", 40000));
+        assert_eq!(t.tls_name.as_deref(), Some("db.example.com"));
+        assert!(Target::new("postgres://x@y/z", None).is_err());
+    }
+
+    #[test]
+    fn trims_versions() {
+        assert_eq!(version("8.4.3"), "8.4.3");
+        assert_eq!(version("11.4.2-MariaDB-ubu2404"), "11.4.2-MariaDB");
+    }
+
+    #[test]
+    fn finds_statement_verbs() {
+        assert_eq!(statement_verbs("insert into t values (';'); -- x\n select 1; /* c */ call p()"), vec!["INSERT", "SELECT", "CALL"]);
+        assert_eq!(statement_verbs("  # note\n update t set a = 'it\\'s; x'"), vec!["UPDATE"]);
+        assert_eq!(statement_verbs("select 1;"), vec!["SELECT"]);
+        assert!(statement_verbs("-- nothing").is_empty());
+    }
+
+    #[test]
+    fn knows_implicit_commits() {
+        assert!(commits_by_itself("alter table t add c int"));
+        assert!(commits_by_itself("/* x */ DROP TABLE t"));
+        assert!(!commits_by_itself("create temporary table t (a int)"));
+        assert!(!commits_by_itself("update t set a = 1"));
+    }
+
+    #[test]
+    fn writes_hex() {
+        assert_eq!(hex(&[0xDE, 0xAD, 0x01]), "0xDEAD01");
+        assert_eq!(hex(&[0xAB; 65]), format!("0x{}…", "AB".repeat(64)));
+    }
+
+    #[test]
+    fn escapes_literals() {
+        assert_eq!(literal(None, false), "NULL");
+        assert_eq!(literal(Some("it's"), false), "'it''s'");
+        assert_eq!(literal(Some("a\\b\n\"\0"), false), "'a\\\\b\\n\\\"\\0'");
+        assert_eq!(literal(Some("a\\b'"), true), "'a\\b'''");
+    }
+
+    #[test]
+    fn labels_statuses() {
+        assert_eq!(status("UPDATE", 2).command, "UPDATE 2");
+        assert_eq!(status("CREATE", 0).command, "CREATE");
+        assert_eq!(status("", 0).command, "OK");
+    }
+
+    #[test]
+    fn builds_where_clauses() {
+        let key = RowKey {
+            columns: vec!["a".into(), "b".into(), "c".into()],
+            kind: RowKeyKind::PrimaryKey,
+            values: vec![Some("1".into()), None, Some("x'y".into())],
+        };
+        let (sent, logged) = MySqlSession::where_clause(&key, false);
+        assert_eq!(sent, "`a` = '1' and `c` = 'x''y' and `b` is null");
+        assert_eq!(logged, "`a` = ? and `c` = ? and `b` is null");
+    }
+
+    #[test]
+    fn quotes_names() {
+        assert_eq!(quote_name("we`ird"), "`we``ird`");
+    }
+}
