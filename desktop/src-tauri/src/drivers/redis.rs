@@ -1118,6 +1118,8 @@ struct Inner {
 /// a key holds, by type.
 pub struct RedisSession {
     inner: Mutex<Inner>,
+    /// `SELECT n` in the panel moved the connection off the URL's database.
+    scope_changed: AtomicBool,
     version: String,
     running: AtomicBool,
     cancel_tx: watch::Sender<u64>,
@@ -1139,6 +1141,7 @@ pub async fn connect(url: &str, local_port: Option<u16>) -> DbResult<Box<dyn Dat
     let version = version(&info.text().unwrap_or_default());
     Ok(Box::new(RedisSession {
         inner: Mutex::new(inner),
+        scope_changed: AtomicBool::new(false),
         version,
         running: AtomicBool::new(false),
         cancel_tx: watch::channel(0).0,
@@ -2030,7 +2033,12 @@ impl DatabaseSession for RedisSession {
                 )));
             }
         }
-        let results = guarded!(self, inner => inner.execute(commands).await)?;
+        let results = guarded!(self, inner => {
+            let results = inner.execute(commands).await;
+            let moved = inner.database != inner.target.url.database;
+            self.scope_changed.store(moved, Ordering::SeqCst);
+            results
+        })?;
         Ok(Execution::new(results, start.elapsed()))
     }
 
@@ -2083,6 +2091,10 @@ impl DatabaseSession for RedisSession {
 
     async fn delete(&self, relation: &Relation, key: &RowKey) -> DbResult<EditOutcome> {
         guarded!(self, inner => inner.delete(relation, key).await)
+    }
+
+    fn scope_changed(&self) -> bool {
+        self.scope_changed.load(Ordering::SeqCst)
     }
 
     async fn close(&self) {

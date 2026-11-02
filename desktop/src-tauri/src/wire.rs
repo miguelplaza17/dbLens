@@ -31,6 +31,9 @@ const BLOCK_BYTES: usize = 2 << 20;
 const FLUSH_MS: u128 = 200;
 /// Rows a streamed run keeps by default; more are counted, not sent.
 pub const STREAM_ROW_CAP: usize = 100_000;
+/// Encoded bytes a streamed result keeps at most (whatever its row cap); later
+/// rows are counted, not sent, and the result is marked truncated.
+pub const STREAM_BYTE_CAP: usize = 128 << 20;
 
 // MARK: - Values
 
@@ -264,6 +267,13 @@ pub struct StreamSink {
     writers: Vec<ColumnWriter>,
     at: usize,
     pending: usize,
+    /// Encoded bytes of the pending rows.
+    pending_bytes: usize,
+    /// Encoded bytes kept (sent or pending) of the current result, its limit,
+    /// and whether it was reached.
+    kept_bytes: usize,
+    byte_cap: usize,
+    full: bool,
     /// Rows sent (or pending) of the current result, and rows seen.
     kept: usize,
     seen: u64,
@@ -288,6 +298,10 @@ impl StreamSink {
             writers: vec![],
             at: 0,
             pending: 0,
+            pending_bytes: 0,
+            kept_bytes: 0,
+            byte_cap: STREAM_BYTE_CAP,
+            full: false,
             kept: 0,
             seen: 0,
             sent_first: false,
@@ -296,6 +310,22 @@ impl StreamSink {
             messages: 0,
             first_rows_at: None,
         }
+    }
+
+    /// The same sink with another byte limit per result (for tests).
+    pub fn with_byte_cap(mut self, bytes: usize) -> Self {
+        self.byte_cap = bytes.max(1);
+        self
+    }
+
+    /// A new sink to the same receiver, with the same limits and nothing sent:
+    /// what a driver keeps while the real one is away (moved to a blocking
+    /// task), so `done` still reaches the receiver if that task fails.
+    pub fn sibling(&self) -> Self {
+        let mut sink = Self::new(self.send.clone(), self.cap);
+        sink.byte_cap = self.byte_cap;
+        sink.open = self.open;
+        sink
     }
 
     /// A sink with nobody listening, as a placeholder.
@@ -313,7 +343,7 @@ impl StreamSink {
     /// Whether the next row's values are kept (false past the cap): the
     /// driver may skip `cell` calls then, but still calls `end_row`.
     pub fn keeping(&self) -> bool {
-        self.open && self.kept < self.cap
+        self.open && self.kept < self.cap && !self.full
     }
 
     /// Rows seen in the current result set.
@@ -349,6 +379,9 @@ impl StreamSink {
         self.writers = (0..self.width).map(|_| ColumnWriter::new()).collect();
         self.at = 0;
         self.pending = 0;
+        self.pending_bytes = 0;
+        self.kept_bytes = 0;
+        self.full = false;
         self.kept = 0;
         self.seen = 0;
         self.sent_first = false;
@@ -362,33 +395,40 @@ impl StreamSink {
 
     /// The next value of the current row (NULL is None).
     pub fn cell(&mut self, value: Option<&str>) {
-        if self.kept >= self.cap || self.at >= self.width {
+        if self.kept >= self.cap || self.full || self.at >= self.width {
             return;
         }
-        self.writers[self.at].value(&mut self.buffers[self.at], value);
+        let buffer = &mut self.buffers[self.at];
+        let before = buffer.len();
+        self.writers[self.at].value(buffer, value);
+        self.pending_bytes += buffer.len() - before;
         self.at += 1;
     }
 
     /// The current row is complete.
     pub fn end_row(&mut self) {
         self.seen += 1;
-        if self.kept < self.cap && self.open {
+        if self.kept < self.cap && !self.full && self.open {
             // A short row (fewer values than columns) gets NULLs.
             while self.at < self.width {
                 let _ = encode::write_nil(&mut self.buffers[self.at]);
+                self.pending_bytes += 1;
                 self.at += 1;
             }
             self.kept += 1;
             self.pending += 1;
+            if self.kept_bytes + self.pending_bytes >= self.byte_cap {
+                self.full = true;
+            }
             let limit = if self.sent_first {
                 BLOCK_ROWS
             } else {
                 FIRST_BLOCK_ROWS
             };
+            // Every row: one huge cell, or rows trickling in, still flush in time.
             if self.pending >= limit
-                || (self.pending % 256 == 0
-                    && (self.buffered() >= BLOCK_BYTES
-                        || self.last_flush.elapsed().as_millis() >= FLUSH_MS))
+                || self.pending_bytes >= BLOCK_BYTES
+                || self.last_flush.elapsed().as_millis() >= FLUSH_MS
             {
                 self.flush();
             }
@@ -396,16 +436,12 @@ impl StreamSink {
         self.at = 0;
     }
 
-    fn buffered(&self) -> usize {
-        self.buffers.iter().map(Vec::len).sum()
-    }
-
     /// Sends the pending rows as one `rows` message.
     pub fn flush(&mut self) {
         if self.pending == 0 {
             return;
         }
-        let mut out = Vec::with_capacity(self.buffered() + 64 + self.width * 5);
+        let mut out = Vec::with_capacity(self.pending_bytes + 64 + self.width * 5);
         Self::head(&mut out, 5, "rows", Some(self.result));
         key(&mut out, "offset");
         let _ = encode::write_uint(&mut out, (self.kept - self.pending) as u64);
@@ -419,6 +455,11 @@ impl StreamSink {
             buffer.clear();
         }
         self.pending = 0;
+        self.kept_bytes += self.pending_bytes;
+        self.pending_bytes = 0;
+        if self.kept_bytes >= self.byte_cap {
+            self.full = true;
+        }
         self.sent_first = true;
         self.last_flush = Instant::now();
         if self.first_rows_at.is_none() {
@@ -456,6 +497,9 @@ impl StreamSink {
         self.writers.clear();
         self.kept = 0;
         self.seen = 0;
+        self.pending_bytes = 0;
+        self.kept_bytes = 0;
+        self.full = false;
     }
 
     /// A whole result from a driver that doesn't stream.
@@ -584,5 +628,64 @@ mod tests {
         assert_eq!(all[3]["truncated"], true);
         assert_eq!(all[4]["result"], 1);
         assert_eq!(all[5]["error"], serde_json::Value::Null);
+    }
+
+    fn collect() -> (Sender, Arc<Mutex<Vec<Vec<u8>>>>) {
+        let messages = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let kept = messages.clone();
+        let send: Sender = Arc::new(move |m| {
+            kept.lock().unwrap().push(m);
+            true
+        });
+        (send, messages)
+    }
+
+    #[test]
+    fn big_cells_flush_by_bytes_and_stop_at_the_byte_cap() {
+        let (send, messages) = collect();
+        let mut sink = StreamSink::new(send, STREAM_ROW_CAP).with_byte_cap(5 << 20);
+        let cell = "x".repeat(1 << 20);
+        sink.begin(&[Column::new("t", "text")]);
+        for _ in 0..20 {
+            if sink.keeping() {
+                sink.cell(Some(&cell));
+            }
+            sink.end_row();
+        }
+        sink.end("SELECT 20");
+        let all: Vec<Vec<u8>> = messages.lock().unwrap().clone();
+        let rows: Vec<serde_json::Value> = all
+            .iter()
+            .map(|m| decode(m))
+            .filter(|m| m["type"] == "rows")
+            .collect();
+        // 2 MiB a message: two rows each, never 256.
+        assert!(rows.iter().all(|m| m["rowCount"].as_u64().unwrap() <= 2));
+        assert!(all.iter().all(|m| m.len() < (3 << 20)));
+        let sent: u64 = rows.iter().map(|m| m["rowCount"].as_u64().unwrap()).sum();
+        assert_eq!(sent, 5);
+        let end = decode(all.last().unwrap());
+        assert_eq!(end["totalRows"], 20);
+        assert_eq!(end["truncated"], true);
+    }
+
+    #[test]
+    fn slow_rows_flush_after_the_wait() {
+        let (send, messages) = collect();
+        let mut sink = StreamSink::new(send, STREAM_ROW_CAP);
+        sink.begin(&[Column::new("n", "")]);
+        sink.cell(Some("1"));
+        sink.end_row();
+        std::thread::sleep(std::time::Duration::from_millis(FLUSH_MS as u64 + 20));
+        sink.cell(Some("2"));
+        sink.end_row();
+        let rows = messages
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|m| decode(m))
+            .filter(|m| m["type"] == "rows")
+            .count();
+        assert_eq!(rows, 1);
     }
 }

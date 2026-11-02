@@ -12,8 +12,15 @@
 //!   (`DatabaseSession::transaction_open`), browsing and edits go to the pinned
 //!   connection too: the grid then shows the transaction's own rows, and an
 //!   edit joins the transaction behind a savepoint (the drivers' existing logic).
+//! - The same while the SQL panel moved the pinned connection to another scope
+//!   (`DatabaseSession::scope_changed`: Redis `SELECT n`, MySQL `USE db`,
+//!   Postgres `SET ROLE`/`search_path`, temp tables), so the sidebar, grid and
+//!   edits act on what the panel sees.
 //! - Engines whose browse connections can't write (SQLite readers) keep their
 //!   edits on the pinned connection.
+//! - A browse connection that died (server restart, idle timeout, a dropped
+//!   tunnel, `pg_terminate_backend`) is dropped with the idle ones, and a read
+//!   is tried once more on a fresh connection.
 //!
 //! `PooledSession` also remembers block boundaries (the key of the last row of
 //! each block) so `page_block` can hand drivers a `KeyHint` for keyset pagination.
@@ -21,6 +28,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures_util::future::BoxFuture;
@@ -29,7 +37,7 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 use crate::engine::Engine;
 use crate::session::{
     keyset_direction, CellValue, ColumnSort, DatabaseSession, DbResult, EditOutcome, Execution,
-    KeyHint, QueryResult, Relation, RowKey, SchemaGraph,
+    DbError, KeyHint, QueryResult, Relation, RowKey, SchemaGraph,
 };
 use crate::wire::StreamSink;
 
@@ -76,18 +84,90 @@ struct Browse {
     permits: Semaphore,
     idle: StdMutex<Vec<Arc<dyn DatabaseSession>>>,
     all: StdMutex<Vec<Arc<dyn DatabaseSession>>>,
-    /// Opening one failed (too many connections, say): use the pinned one.
-    broken: AtomicBool,
+    /// When opening one last failed (too many connections, the server down):
+    /// use the pinned one until `RETRY_OPEN` has passed.
+    broken: StdMutex<Option<Instant>>,
     closed: AtomicBool,
+}
+
+/// How long the pool uses only the pinned connection after a browse
+/// connection failed to open.
+const RETRY_OPEN: Duration = Duration::from_secs(30);
+
+fn same(a: &Arc<dyn DatabaseSession>, b: &Arc<dyn DatabaseSession>) -> bool {
+    std::ptr::addr_eq(Arc::as_ptr(a), Arc::as_ptr(b))
+}
+
+/// Whether an error says the connection itself is gone (not the statement):
+/// the drivers' texts for a closed socket or a backend the server ended.
+pub fn connection_lost(error: &DbError) -> bool {
+    let DbError::Message(text) = error else {
+        return false;
+    };
+    let text = text.to_lowercase();
+    [
+        "connection closed",
+        "closed the connection",
+        "connection is closed",
+        "connection to the server is closed",
+        "terminating connection",
+        "broken pipe",
+        "connection reset",
+        "connection aborted",
+        "server has gone away",
+        "lost connection",
+        "unexpected eof",
+        "not connected",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
 }
 
 impl Browse {
     fn put_back(&self, conn: Arc<dyn DatabaseSession>) {
-        if self.closed.load(Ordering::SeqCst) {
+        if self.closed.load(Ordering::SeqCst) || conn.is_closed() {
+            self.forget(&conn);
             return;
         }
         if let Ok(mut idle) = self.idle.lock() {
             idle.push(conn);
+        }
+    }
+
+    fn forget(&self, conn: &Arc<dyn DatabaseSession>) {
+        if let Ok(mut all) = self.all.lock() {
+            all.retain(|c| !same(c, conn));
+        }
+    }
+
+    /// Drops a dead connection and the idle ones, which likely died with it
+    /// (a server restart, a dropped tunnel); the next lease opens a new one.
+    fn evict(&self, dead: &Arc<dyn DatabaseSession>) {
+        let idle = self
+            .idle
+            .lock()
+            .map(|mut idle| std::mem::take(&mut *idle))
+            .unwrap_or_default();
+        if let Ok(mut all) = self.all.lock() {
+            all.retain(|c| !same(c, dead) && !idle.iter().any(|i| same(c, i)));
+        }
+    }
+
+    fn broken(&self) -> bool {
+        match self.broken.lock() {
+            Ok(at) => at.is_some_and(|at| at.elapsed() < RETRY_OPEN),
+            Err(_) => true,
+        }
+    }
+
+    /// An idle connection that still looks alive.
+    fn take_idle(&self) -> Option<Arc<dyn DatabaseSession>> {
+        loop {
+            let conn = self.idle.lock().ok()?.pop()?;
+            if !conn.is_closed() {
+                return Some(conn);
+            }
+            self.forget(&conn);
         }
     }
 
@@ -98,10 +178,15 @@ impl Browse {
                 if let Ok(mut all) = self.all.lock() {
                     all.push(conn.clone());
                 }
+                if let Ok(mut broken) = self.broken.lock() {
+                    *broken = None;
+                }
                 Some(conn)
             }
             Err(_) => {
-                self.broken.store(true, Ordering::SeqCst);
+                if let Ok(mut broken) = self.broken.lock() {
+                    *broken = Some(Instant::now());
+                }
                 None
             }
         }
@@ -126,6 +211,55 @@ impl std::ops::Deref for Lease<'_> {
             Lease::Browse { conn, .. } => conn.as_deref().expect("leased connection"),
         }
     }
+}
+
+impl Lease<'_> {
+    /// Whether `error` came from a browse connection that is gone.
+    fn lost(&self, error: &DbError) -> bool {
+        matches!(self, Lease::Browse { .. }) && (self.is_closed() || connection_lost(error))
+    }
+
+    /// Ends the lease without returning its (dead) connection to the pool.
+    fn discard(mut self) {
+        if let Lease::Browse { conn, pool, .. } = &mut self {
+            if let Some(dead) = conn.take() {
+                pool.evict(&dead);
+            }
+        }
+    }
+}
+
+/// Runs a read on a reader lease; when its browse connection turns out dead,
+/// drops it and tries once more on a fresh one.
+macro_rules! read {
+    ($self:ident, $conn:ident => $call:expr) => {{
+        let $conn = $self.reader().await;
+        let result = $call.await;
+        match result {
+            Err(error) if $conn.lost(&error) => {
+                $conn.discard();
+                let $conn = $self.reader().await;
+                $call.await
+            }
+            other => other,
+        }
+    }};
+}
+
+/// Runs an edit on a writer lease. A dead browse connection is dropped, but
+/// the edit is not repeated: it may have reached the server.
+macro_rules! edit {
+    ($self:ident, $conn:ident => $call:expr) => {{
+        let $conn = $self.writer().await;
+        let result = $call.await;
+        match result {
+            Err(error) if $conn.lost(&error) => {
+                $conn.discard();
+                Err(error)
+            }
+            other => other,
+        }
+    }};
 }
 
 impl Drop for Lease<'_> {
@@ -177,7 +311,7 @@ impl PooledSession {
                 permits: Semaphore::new(policy.browse),
                 idle: StdMutex::new(vec![]),
                 all: StdMutex::new(vec![]),
-                broken: AtomicBool::new(false),
+                broken: StdMutex::new(None),
                 closed: AtomicBool::new(false),
             })
         });
@@ -235,17 +369,23 @@ impl PooledSession {
         }
     }
 
-    /// A browse connection, or the pinned one while the user's transaction is
-    /// open there (or when there is no pool).
+    /// Browsing and edits follow the pinned connection: the user's transaction
+    /// is open there, or the panel moved it to another database, role or path.
+    fn follow_pinned(&self) -> bool {
+        self.pinned.transaction_open() || self.pinned.scope_changed()
+    }
+
+    /// A browse connection, or the pinned one while browsing follows it (or
+    /// when there is no pool).
     async fn reader(&self) -> Lease<'_> {
-        if self.pinned.transaction_open() {
+        if self.follow_pinned() {
             return Lease::Pinned(&self.pinned);
         }
         self.browse_lease().await
     }
 
     async fn writer(&self) -> Lease<'_> {
-        if self.edits_on_pinned || self.pinned.transaction_open() {
+        if self.edits_on_pinned || self.follow_pinned() {
             return Lease::Pinned(&self.pinned);
         }
         self.browse_lease().await
@@ -255,14 +395,13 @@ impl PooledSession {
         let Some(pool) = self.browse.as_deref() else {
             return Lease::Pinned(&self.pinned);
         };
-        if pool.broken.load(Ordering::SeqCst) || pool.closed.load(Ordering::SeqCst) {
+        if pool.broken() || pool.closed.load(Ordering::SeqCst) {
             return Lease::Pinned(&self.pinned);
         }
         let Ok(permit) = pool.permits.acquire().await else {
             return Lease::Pinned(&self.pinned);
         };
-        let idle = pool.idle.lock().ok().and_then(|mut idle| idle.pop());
-        let conn = match idle {
+        let conn = match pool.take_idle() {
             Some(conn) => Some(conn),
             None => pool.open_one().await,
         };
@@ -366,7 +505,7 @@ impl DatabaseSession for PooledSession {
     }
 
     async fn relations(&self) -> DbResult<Vec<Relation>> {
-        self.reader().await.relations().await
+        read!(self, conn => conn.relations())
     }
 
     async fn page(
@@ -395,17 +534,20 @@ impl DatabaseSession for PooledSession {
             Some(hint) => Some(hint.clone()),
             None => self.hint(&view, offset),
         };
-        let result = self
-            .reader()
-            .await
-            .page_block(relation, offset, limit, search, sort, remembered.as_ref())
-            .await?;
+        let result = read!(self, conn => conn.page_block(
+            relation,
+            offset,
+            limit,
+            search,
+            sort,
+            remembered.as_ref()
+        ))?;
         self.remember(view, offset, &result, sort);
         Ok(result)
     }
 
     async fn count(&self, relation: &Relation, search: &str) -> DbResult<Option<u64>> {
-        self.reader().await.count(relation, search).await
+        read!(self, conn => conn.count(relation, search))
     }
 
     async fn update(
@@ -415,25 +557,33 @@ impl DatabaseSession for PooledSession {
         changes: &[CellValue],
     ) -> DbResult<EditOutcome> {
         self.forget_hints();
-        self.writer().await.update(relation, key, changes).await
+        edit!(self, conn => conn.update(relation, key, changes))
     }
 
     async fn insert(&self, relation: &Relation, values: &[CellValue]) -> DbResult<EditOutcome> {
         self.forget_hints();
-        self.writer().await.insert(relation, values).await
+        edit!(self, conn => conn.insert(relation, values))
     }
 
     async fn delete(&self, relation: &Relation, key: &RowKey) -> DbResult<EditOutcome> {
         self.forget_hints();
-        self.writer().await.delete(relation, key).await
+        edit!(self, conn => conn.delete(relation, key))
     }
 
     async fn schema_graph(&self) -> DbResult<SchemaGraph> {
-        self.reader().await.schema_graph().await
+        read!(self, conn => conn.schema_graph())
     }
 
     fn transaction_open(&self) -> bool {
         self.pinned.transaction_open()
+    }
+
+    fn scope_changed(&self) -> bool {
+        self.pinned.scope_changed()
+    }
+
+    fn is_closed(&self) -> bool {
+        self.pinned.is_closed()
     }
 
     async fn close(&self) {

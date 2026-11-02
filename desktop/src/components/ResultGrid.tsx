@@ -128,6 +128,9 @@ function measure(data: GridData, colors: GridColors): number[] {
   });
 }
 
+/** Column types whose values line up on the right (Postgres, MySQL, SQLite spellings). */
+const NUMERIC_TYPE = /^(u?int\d*|integer|bigint|smallint|tinyint|mediumint|numeric|decimal|real|double|float\d*|money|number|serial|bigserial|smallserial|oid)\b/i;
+
 function display(text: string): string {
   const short = text.length > SHOWN_CHARS ? `${text.slice(0, SHOWN_CHARS)}…` : text;
   return /[\r\n\t]/.test(short) ? short.replace(/[\r\n\t]+/g, " ") : short;
@@ -221,6 +224,8 @@ export const ResultGrid = memo(function ResultGrid(props: GridProps) {
 
   const loading = useMemo<GridCell>(() => ({ kind: GridCellKind.Loading, allowOverlay: false }), []);
 
+  const numericColumns = useMemo(() => data.columns.map((c) => NUMERIC_TYPE.test(c.type)), [data.columns]);
+
   const getCellContent = useCallback(
     ([col, row]: Item): GridCell => {
       const value = data.shown(row, col);
@@ -247,14 +252,15 @@ export const ResultGrid = memo(function ResultGrid(props: GridProps) {
         dbNull: false,
         allowOverlay: true,
         readonly: !editable,
-        contentAlign: typeof value === "number" ? "right" : undefined,
+        // By the column's type, so a saved edit (patched in as text) stays aligned.
+        contentAlign: typeof value === "number" || numericColumns[col] ? "right" : undefined,
         themeOverride: pending ? themes.pending : undefined,
       };
       return cell;
     },
     // A new `tick` re-creates this, so the grid repaints everything.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [data, editable, themes, loading, data.rows, tick],
+    [data, editable, themes, loading, data.rows, tick, numericColumns],
   );
 
   const getRowThemeOverride = useCallback(

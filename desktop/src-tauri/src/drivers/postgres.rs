@@ -354,18 +354,25 @@ pub async fn connect(url: &str, local_port: Option<u16>) -> DbResult<Box<dyn Dat
         let _ = connection.await;
     });
 
-    let version = match client
-        .simple_query("select current_setting('server_version_num')")
+    let (version, scope) = match client
+        .simple_query(&format!(
+            "select current_setting('server_version_num'), {SCOPE}"
+        ))
         .await
     {
-        Ok(messages) => messages
-            .iter()
-            .find_map(|m| match m {
-                SimpleQueryMessage::Row(row) => row.get(0).and_then(|v| v.parse::<u64>().ok()),
+        Ok(messages) => {
+            let row = messages.iter().find_map(|m| match m {
+                SimpleQueryMessage::Row(row) => Some(row),
                 _ => None,
-            })
-            .map(format_version)
-            .unwrap_or_default(),
+            });
+            let version = row
+                .and_then(|r| r.get(0))
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(format_version)
+                .unwrap_or_default();
+            let scope = row.and_then(|r| r.get(1)).unwrap_or_default().to_string();
+            (version, scope)
+        }
         Err(error) => {
             task.abort();
             return Err(DbError::Message(describe(&error)));
@@ -382,6 +389,8 @@ pub async fn connect(url: &str, local_port: Option<u16>) -> DbResult<Box<dyn Dat
         connection: StdMutex::new(Some(task)),
         server_version: version,
         in_transaction: AtomicBool::new(false),
+        scope,
+        scope_changed: AtomicBool::new(false),
     }))
 }
 
@@ -585,6 +594,34 @@ pub struct PostgresSession {
     server_version: String,
     /// The user's transaction is open, as of the last SQL run.
     in_transaction: AtomicBool,
+    /// `SCOPE` right after connecting.
+    scope: String,
+    /// `SCOPE` differs from `scope`, as of the last SQL run.
+    scope_changed: AtomicBool,
+}
+
+/// What other connections to the same URL would not share: the role, the
+/// search path and whether this backend has temp tables.
+const SCOPE: &str = "current_user || '|' || current_setting('search_path') || '|' || \
+     exists(select 1 from pg_class where relnamespace = pg_my_temp_schema())";
+
+/// Whether a run may have changed the session's role, search path or temp tables.
+fn may_change_scope(statements: &[String]) -> bool {
+    statements.iter().any(|s| {
+        let verb = sql_script::verb(s, 1);
+        let upper = s.to_uppercase();
+        match verb.as_str() {
+            "SET" | "RESET" => {
+                sql_script::verb(s, 2) != "SET LOCAL"
+                    && ["ROLE", "AUTHORIZATION", "SEARCH_PATH", "ALL"]
+                        .iter()
+                        .any(|w| upper.contains(w))
+            }
+            "DISCARD" => true,
+            "CREATE" | "SELECT" => upper.contains("TEMP"),
+            _ => false,
+        }
+    })
 }
 
 /// Whether a run may have opened a transaction block (or changed one already open).
@@ -759,6 +796,27 @@ impl PostgresSession {
             let open = self.transaction_state().await.map(|s| s != TxState::Idle);
             self.in_transaction
                 .store(open.unwrap_or(false), Ordering::SeqCst);
+        }
+    }
+
+    /// Remembers whether the panel moved the connection to another role, search
+    /// path or temp tables, asking the server only when a run could have.
+    async fn note_scope(&self, statements: &[String]) {
+        if self.scope_changed.load(Ordering::SeqCst) || may_change_scope(statements) {
+            let now = self
+                .client
+                .simple_query(&format!("select {SCOPE}"))
+                .await
+                .ok()
+                .and_then(|messages| {
+                    messages.iter().find_map(|m| match m {
+                        SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+                        _ => None,
+                    })
+                });
+            if let Some(now) = now {
+                self.scope_changed.store(now != self.scope, Ordering::SeqCst);
+            }
         }
     }
 
@@ -999,6 +1057,12 @@ impl PostgresSession {
             })
             .unwrap_or_default();
         terms.extend(keys.iter().cloned());
+        if keys.is_empty() {
+            // No key and no ctid (a view, a materialized or foreign table): the
+            // whole row as text breaks ties (any type has a text form), so blocks
+            // fetched one by one with OFFSET neither overlap nor skip rows.
+            terms.push("(t.*)::text".into());
+        }
         let order = if terms.is_empty() {
             String::new()
         } else {
@@ -1242,6 +1306,7 @@ impl DatabaseSession for PostgresSession {
         let outcome = self.simple(sql, &statements).await;
         let outcome = self.after_run(outcome).await;
         self.note_transaction(&statements).await;
+        self.note_scope(&statements).await;
         outcome.map(|results| Execution::new(results, start.elapsed()))
     }
 
@@ -1251,11 +1316,20 @@ impl DatabaseSession for PostgresSession {
         let outcome = self.simple_stream(sql, &statements, sink).await;
         let outcome = self.after_run(outcome).await;
         self.note_transaction(&statements).await;
+        self.note_scope(&statements).await;
         outcome
     }
 
     fn transaction_open(&self) -> bool {
         self.in_transaction.load(Ordering::SeqCst)
+    }
+
+    fn scope_changed(&self) -> bool {
+        self.scope_changed.load(Ordering::SeqCst)
+    }
+
+    fn is_closed(&self) -> bool {
+        self.client.is_closed()
     }
 
     async fn page_block(
@@ -1310,7 +1384,10 @@ impl DatabaseSession for PostgresSession {
         let outcome = sql_script::run(&statements, |statement| self.one(statement)).await;
         match outcome {
             Ok(results) => match self.command("commit").await {
-                Ok(()) => Ok(Execution::new(results, start.elapsed())),
+                Ok(()) => {
+                    self.note_scope(&statements).await;
+                    Ok(Execution::new(results, start.elapsed()))
+                }
                 Err(error) => {
                     self.rollback().await;
                     Err(error)

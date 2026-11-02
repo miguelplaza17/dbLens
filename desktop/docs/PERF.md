@@ -74,3 +74,49 @@ Not measured yet: decode in WebKitGTK (JSC) and WebView2.
 - **Connections don't wait for each other.** `tests/pool.rs` checks that a
   page and a count return while `select pg_sleep(3)` / `select sleep(3)` runs in
   the SQL panel.
+
+## In the app (perf HUD)
+
+2026-11-02, the release build (`npm run tauri build -- --bundles deb`, full LTO)
+run under Xvfb on the same Linux container (WebKitGTK 4.1, **software
+rendering**: no GPU, no DRI3), `DBLENS_STORE=memory`, PostgreSQL 16 on the same
+machine, `bench_rows` (1,000,000 rows, made by the bench with
+`DBLENS_BENCH_KEEP=1`, dropped afterwards). Numbers read from the perf HUD
+(Ctrl+Shift+P); scrolling driven by `xdotool`.
+
+| Measure | Result |
+|---|---|
+| first rows after clicking the table (`markStart` → first block painted) | 81 ms |
+| first 3 blocks (open): fetch p50 / p95 | 13 / 24 ms |
+| steady wheel scroll (300 wheel steps in 3.2 s, rows 1 → 1,051): scroll fps / longest frame | 31 fps / 68 ms |
+| same: block fetch p50 / p95 | 7.0 / 19 ms |
+| scrollbar dragged to the end (60 moves, ~1 s), then settled: scroll fps / longest frame | 42 fps / 37 ms |
+| same: fetches / p50 / p95 | 50 / 16 / 32 ms |
+| rows kept after reaching row 1,000,000 | 14,800 (50 blocks, the cap) |
+| footer at the end | "Rows 999,986–1,000,000 of 1,000,000" (estimate "~1,000,000" until the count came in) |
+| JS heap | not shown: WebKitGTK has no `performance.memory` |
+
+What this says: fetches through the real IPC (MessagePack, keyset) stay in
+the low tens of milliseconds even for the cold jump to the end, and the block
+cache stays at its cap. The frame numbers are bounded by Xvfb's software
+rendering, not by the grid: the same grid held 60 fps with a 16.8 ms longest
+frame in headless Chromium (mock backend, see the grid notes), and these runs
+had no GPU at all. Real frame rates need a run on real hardware (MIGRATION.md,
+benchmark protocol M2/M3).
+
+## Contract check
+
+`tests/contract.rs` pins the MessagePack and JSON shapes. To check the JS side
+against the real bytes:
+
+```sh
+cd desktop/src-tauri
+DBLENS_WIRE_FIXTURES=/tmp/wire cargo test --test contract
+```
+
+writes a block, an execution and a stream; decoding them with
+`@msgpack/msgpack` and `api.ts` (`cellText`, `mainResult`, `StreamCollector`)
+gave the expected keys and values on 2026-11-02, including: integers JS holds
+exactly as numbers until a value in the column is not one (then text, e.g.
+`"9007199254740993"` and the `"-42"` after it), UTF-8 text, empty strings,
+NULL, and a streamed result equal to the same block.

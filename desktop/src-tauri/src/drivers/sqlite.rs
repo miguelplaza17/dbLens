@@ -554,6 +554,11 @@ fn page_of(
         .into_iter()
         .collect();
     terms.extend(keys.iter().cloned());
+    if keys.is_empty() {
+        // A view: every column breaks ties, so blocks fetched one by one with
+        // OFFSET neither overlap nor skip rows.
+        terms.extend(info.columns.iter().map(|c| quote_ident(c)));
+    }
     let order = if terms.is_empty() {
         String::new()
     } else {
@@ -930,15 +935,24 @@ impl DatabaseSession for SqliteSession {
     /// Steps each statement and sends its rows as they come.
     async fn execute_stream(&self, sql: &str, sink: &mut StreamSink) -> DbResult<()> {
         let sql = sql.to_string();
-        let mut owned = std::mem::replace(sink, StreamSink::closed());
-        let (outcome, back) = self
+        // The real sink goes to the blocking task; if that task never gives it
+        // back (closed connection, panic), a sibling on the same channel takes
+        // its place so the caller's `done` still arrives.
+        let spare = sink.sibling();
+        let mut owned = std::mem::replace(sink, spare);
+        let ran = self
             .with(move |conn| {
                 let outcome = stream_script(conn, &sql, &mut owned);
                 Ok((outcome, owned))
             })
-            .await?;
-        *sink = back;
-        outcome
+            .await;
+        match ran {
+            Ok((outcome, back)) => {
+                *sink = back;
+                outcome
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Exact count; SQLite keeps no estimate.

@@ -662,6 +662,20 @@ pub trait DatabaseSession: Send + Sync {
         false
     }
 
+    /// Whether the SQL panel moved this connection away from the URL's scope
+    /// (Redis `SELECT n`, MySQL `USE db`, Postgres `SET ROLE`, `search_path` or
+    /// a temp table), as last seen (no round trip). The pool then sends
+    /// browsing and edits here too, so they act on what the panel sees.
+    fn scope_changed(&self) -> bool {
+        false
+    }
+
+    /// Whether the connection is known to be gone (the socket closed), without
+    /// a round trip. The pool drops such a browse connection instead of reusing it.
+    fn is_closed(&self) -> bool {
+        false
+    }
+
     /// One block of a table for the grid, like `page`. `hint`, when given, is the
     /// key of an earlier row in the same order; drivers with keyset pagination
     /// start from it (`where key > hint`) instead of skipping `offset` rows.

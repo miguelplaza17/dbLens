@@ -422,3 +422,104 @@ async fn mysql_streams() {
 async fn sqlite_streams() {
     streams(Kind::Sqlite).await;
 }
+
+#[tokio::test]
+async fn sqlite_stream_on_a_closed_session_still_ends() {
+    let Some(db) = open(Kind::Sqlite).await else {
+        return;
+    };
+    db.pool.close().await;
+    let (mut sink, messages) = collecting(100);
+    let outcome = db.pool.execute_stream("select 1", &mut sink).await;
+    assert!(outcome.is_err());
+    sink.done(1.0, outcome.as_ref().err());
+    let all = messages.lock().unwrap().clone();
+    let last = all.last().expect("a done message");
+    assert_eq!(last["type"], "done");
+    assert!(last["error"].is_string());
+}
+
+fn view(name: &str) -> Relation {
+    Relation::new("public", name, RelationKind::View, -1.0)
+}
+
+/// The browse connection's backend, read through the pool.
+async fn browse_pid(db: &Db) -> String {
+    let page = db
+        .pool
+        .page(&view("dblens_pool_pid"), 1, 0, "", None)
+        .await
+        .expect("page");
+    page.rows[0][0].clone().unwrap()
+}
+
+#[tokio::test]
+async fn postgres_replaces_a_dead_browse_connection() {
+    let Some(db) = open(Kind::Postgres).await else {
+        return;
+    };
+    db.run("create or replace view dblens_pool_pid as select pg_backend_pid()::text as pid")
+        .await;
+    let pid = browse_pid(&db).await;
+    db.run(&format!("select pg_terminate_backend({pid})")).await;
+    // The connection task notices the closed socket in a moment.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for _ in 0..3 {
+        db.pool.relations().await.expect("relations on a fresh connection");
+    }
+    assert_ne!(browse_pid(&db).await, pid);
+
+    // Killed without the pool noticing first: the read is tried again.
+    let pid = browse_pid(&db).await;
+    db.run(&format!("select pg_terminate_backend({pid})")).await;
+    db.pool.relations().await.expect("retried on a fresh connection");
+    db.run("drop view dblens_pool_pid").await;
+    db.pool.close().await;
+}
+
+#[tokio::test]
+async fn postgres_browsing_follows_the_panels_scope() {
+    let Some(db) = open(Kind::Postgres).await else {
+        return;
+    };
+    db.run("create or replace view dblens_pool_scope as select pg_backend_pid()::text as pid")
+        .await;
+    let relation = view("dblens_pool_scope");
+    let pinned: String = {
+        let run = db.pool.execute("select pg_backend_pid()::text").await.unwrap();
+        run.results[0].rows[0][0].clone().unwrap()
+    };
+    let shown = |r: QueryResult| r.rows[0][0].clone().unwrap();
+    let before = shown(db.pool.page(&relation, 1, 0, "", None).await.unwrap());
+    assert_ne!(before, pinned, "a browse connection");
+    db.run("set search_path to pg_catalog, public").await;
+    assert!(db.pool.scope_changed());
+    let during = shown(db.pool.page(&relation, 1, 0, "", None).await.unwrap());
+    assert_eq!(during, pinned, "browsing follows the panel");
+    db.run("reset search_path").await;
+    assert!(!db.pool.scope_changed());
+    db.run("drop view dblens_pool_scope").await;
+    db.pool.close().await;
+}
+
+#[tokio::test]
+async fn redis_browsing_follows_select() {
+    let Ok(url) = std::env::var("DBLENS_TEST_REDIS_URL") else {
+        return;
+    };
+    if !url.ends_with("/15") {
+        return;
+    }
+    let connection = connector::connect(&url, None).await.expect("connect");
+    let pool = connection.session.clone();
+    pool.execute("SET dblens_pool_scope:k 1").await.unwrap();
+    let has = |relations: Vec<Relation>| relations.iter().any(|r| r.name == "dblens_pool_scope:k");
+    assert!(has(pool.relations().await.unwrap()));
+    pool.execute("SELECT 14").await.unwrap();
+    assert!(pool.scope_changed());
+    assert!(!has(pool.relations().await.unwrap()), "the sidebar shows db 14");
+    pool.execute("SELECT 15\nDEL dblens_pool_scope:k").await.unwrap();
+    assert!(!pool.scope_changed());
+    assert!(!has(pool.relations().await.unwrap()));
+    pool.close().await;
+}

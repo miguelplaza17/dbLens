@@ -255,6 +255,7 @@ pub async fn connect(url: &str, local_port: Option<u16>) -> DbResult<Box<dyn Dat
         activity: Activity::default(),
         editing: AtomicBool::new(false),
         in_transaction: AtomicBool::new(false),
+        scope_changed: AtomicBool::new(false),
         id: conn.id(),
         opts,
     });
@@ -285,6 +286,8 @@ struct Shared {
     editing: AtomicBool,
     /// The user's transaction is open, as of the last SQL run.
     in_transaction: AtomicBool,
+    /// `USE` in the panel moved the connection off the URL's database.
+    scope_changed: AtomicBool,
     id: u32,
     opts: Opts,
 }
@@ -712,12 +715,17 @@ impl MySqlSession {
             terms.push(format!("{name} {}", sort.direction()));
         }
         terms.extend(primary_key.iter().map(|c| quote_name(c)));
+        let types = self.column_types(conn, relation).await?;
+        if primary_key.is_empty() {
+            // No key (a view, a table without one): every column breaks ties, so
+            // blocks fetched one by one with OFFSET neither overlap nor skip rows.
+            terms.extend(types.iter().map(|(name, _)| quote_name(name)));
+        }
         let order = if terms.is_empty() {
             String::new()
         } else {
             format!(" order by {}", terms.join(", "))
         };
-        let types = self.column_types(conn, relation).await?;
         let off = if search.is_empty() && hint.is_none() && offset < DEEP_OFFSET {
             false
         } else {
@@ -905,6 +913,20 @@ impl MySqlSession {
         if changes || self.state.in_transaction.load(Ordering::SeqCst) {
             let open = self.user_transaction(conn).await.unwrap_or(false);
             self.state.in_transaction.store(open, Ordering::SeqCst);
+        }
+    }
+
+    /// Remembers whether `USE` moved the connection off the URL's database,
+    /// asking the server only when the run had a USE (or it had moved).
+    async fn note_scope(&self, conn: &mut Conn, sql: &str) {
+        let uses = statement_verbs(sql).iter().any(|v| v == "USE");
+        if uses || self.state.scope_changed.load(Ordering::SeqCst) {
+            let now: Result<Option<Option<String>>, _> =
+                conn.query_first("select database()").await;
+            if let Ok(now) = now {
+                let moved = now.flatten() != self.database;
+                self.state.scope_changed.store(moved, Ordering::SeqCst);
+            }
         }
     }
 
@@ -1363,6 +1385,7 @@ impl DatabaseSession for MySqlSession {
         let mut conn = self.guard().await?;
         let results = self.run_all(&mut conn, sql).await;
         self.note_transaction(&mut conn, sql).await;
+        self.note_scope(&mut conn, sql).await;
         Ok(Execution::new(results?, start.elapsed()))
     }
 
@@ -1469,6 +1492,10 @@ impl DatabaseSession for MySqlSession {
         self.state.in_transaction.load(Ordering::SeqCst)
     }
 
+    fn scope_changed(&self) -> bool {
+        self.state.scope_changed.load(Ordering::SeqCst)
+    }
+
     async fn execute_stream(&self, sql: &str, sink: &mut StreamSink) -> DbResult<()> {
         let mut conn = self.guard().await?;
         let id = self.state.activity.start();
@@ -1478,6 +1505,7 @@ impl DatabaseSession for MySqlSession {
             self.cancel();
         }
         self.note_transaction(&mut conn, sql).await;
+        self.note_scope(&mut conn, sql).await;
         if cancelled {
             return Err(DbError::Cancelled);
         }
