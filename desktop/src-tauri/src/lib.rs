@@ -10,6 +10,8 @@ pub mod engine;
 pub mod export;
 pub mod history;
 pub mod import_swift;
+#[cfg(target_os = "linux")]
+mod linux_gtk;
 pub mod mcp;
 pub mod menu;
 pub mod pool;
@@ -50,6 +52,13 @@ pub fn run() {
         .manage(updater::UpdaterState::default())
         .setup(|app| {
             menu::install(app.handle())?;
+            #[cfg(target_os = "linux")]
+            {
+                linux_gtk::follow_theme(settings::current(app.handle()).native_theme());
+                for window in app.webview_windows().values() {
+                    linux_gtk::run_keys_to_page(window);
+                }
+            }
             windows::queue_launch_args(app.handle());
             updater::start(app.handle());
             Ok(())

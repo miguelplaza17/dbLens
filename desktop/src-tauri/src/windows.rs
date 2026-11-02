@@ -82,6 +82,8 @@ pub fn open_new(app: &AppHandle, open: Option<Vec<String>>) -> tauri::Result<Str
         }
     }
     let window = builder.build()?;
+    #[cfg(target_os = "linux")]
+    crate::linux_gtk::run_keys_to_page(&window);
     let _ = window.set_focus();
     Ok(label)
 }

@@ -994,6 +994,7 @@ dependencies = [
  "chrono",
  "directories",
  "futures-util",
+ "gtk",
  "keyring",
  "libc",
  "mongodb",

@@ -116,7 +116,7 @@ impl Settings {
         Ok(next)
     }
 
-    fn native_theme(&self) -> Option<tauri::Theme> {
+    pub(crate) fn native_theme(&self) -> Option<tauri::Theme> {
         match self.appearance {
             Appearance::System => None,
             Appearance::Light => Some(tauri::Theme::Light),
@@ -187,6 +187,18 @@ pub struct SettingsInfo {
     pub os: String,
 }
 
+/// Linux: the GTK menu bar takes the same theme as the windows (linux_gtk.rs).
+/// Elsewhere the window theme already covers it.
+fn follow_menu_theme(app: &AppHandle, settings: &Settings) {
+    #[cfg(target_os = "linux")]
+    {
+        let theme = settings.native_theme();
+        let _ = app.run_on_main_thread(move || crate::linux_gtk::follow_theme(theme));
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (app, settings);
+}
+
 // MARK: - Commands
 
 /// The settings; also gives the calling window the native (title bar) theme.
@@ -194,6 +206,7 @@ pub struct SettingsInfo {
 pub fn get_settings(window: WebviewWindow, state: tauri::State<SettingsState>) -> Settings {
     let settings = state.get();
     let _ = window.set_theme(settings.native_theme());
+    follow_menu_theme(window.app_handle(), &settings);
     settings
 }
 
@@ -208,6 +221,7 @@ pub fn set_settings(
     for window in app.webview_windows().values() {
         let _ = window.set_theme(settings.native_theme());
     }
+    follow_menu_theme(&app, &settings);
     let _ = app.emit(SETTINGS_EVENT, &settings);
     Ok(settings)
 }

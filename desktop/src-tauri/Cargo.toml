@@ -71,6 +71,11 @@ tauri-plugin-updater = "2.14.1"
 tauri-plugin-single-instance = "2"
 
 # flock / LockFileEx: the store folder's lock between the app and `dblens --mcp` (store.rs).
+# The menu bar's light or dark theme and the run keys (src/linux_gtk.rs); already
+# in the tree through tauri.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

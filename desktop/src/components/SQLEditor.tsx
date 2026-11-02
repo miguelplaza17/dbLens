@@ -3,7 +3,7 @@
 // plain editor (commands). Mod-Enter runs; the colors come from theme.css.
 
 import { useEffect, useRef } from "react";
-import { autocompletion, closeBrackets, closeBracketsKeymap, completionKeymap } from "@codemirror/autocomplete";
+import { autocompletion, closeBrackets, closeBracketsKeymap, closeCompletion, completionKeymap } from "@codemirror/autocomplete";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { MySQL, PostgreSQL, SQLite, sql, type SQLConfig } from "@codemirror/lang-sql";
 import { bracketMatching, HighlightStyle, indentOnInput, syntaxHighlighting } from "@codemirror/language";
@@ -74,6 +74,23 @@ export interface SQLEditorProps {
   onRunAtomically: () => void;
 }
 
+/** This window's SQL editor, while one is shown. */
+let shown: EditorView | null = null;
+
+/**
+ * Before a run that didn't come through the editor's own keys (a menu click or
+ * accelerator, a key outside the editor): lets the keys already typed land in
+ * the editor first (they can still be on their way when a native menu fires),
+ * then closes its completion list, so the run takes the whole text.
+ */
+export async function settleSQLEditor(): Promise<void> {
+  // A frame (none come while the window is hidden, hence the cap), then the
+  // tasks queued behind it.
+  await Promise.race([new Promise((done) => requestAnimationFrame(done)), new Promise((done) => setTimeout(done, 100))]);
+  await new Promise((done) => setTimeout(done, 0));
+  if (shown) closeCompletion(shown);
+}
+
 export function SQLEditor(props: SQLEditorProps) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
@@ -84,7 +101,8 @@ export function SQLEditor(props: SQLEditorProps) {
   latest.current = props;
 
   useEffect(() => {
-    const run = (action: "onRun" | "onRehearse" | "onRunAtomically") => () => {
+    const run = (action: "onRun" | "onRehearse" | "onRunAtomically") => (editor: EditorView) => {
+      closeCompletion(editor);
       latest.current[action]();
       return true;
     };
@@ -124,7 +142,9 @@ export function SQLEditor(props: SQLEditorProps) {
       ],
     });
     view.current = new EditorView({ state, parent: host.current! });
+    shown = view.current;
     return () => {
+      if (shown === view.current) shown = null;
       view.current?.destroy();
       view.current = null;
     };

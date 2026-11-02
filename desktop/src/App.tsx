@@ -21,6 +21,7 @@ import { RowEditor } from "./components/RowEditor";
 import { ContextMenu, Sheet } from "./components/Sheet";
 import { Sidebar } from "./components/Sidebar";
 import { SQLPanel } from "./components/SQLPanel";
+import { settleSQLEditor } from "./components/SQLEditor";
 import { SchemaBoard } from "./schema/SchemaBoard";
 import { UpdateNotice } from "./native/UpdateNotice";
 import { performSchema, schema } from "./schema/store";
@@ -319,12 +320,13 @@ function perform(model: AppModel, action: Action, fields: { filter: HTMLInputEle
       if (!result) return;
       return void copyText(tsv(result)).then(() => model.showToast(t("Copied %@ rows", result.rowCount)));
     }
+    // From the menu or a key outside the editor: the editor's text first.
     case "run":
-      return void model.run();
+      return void settleSQLEditor().then(() => model.run());
     case "rehearse":
-      return void model.run("rehearse");
+      return void settleSQLEditor().then(() => model.run("rehearse"));
     case "runAtomically":
-      return void model.run("atomic");
+      return void settleSQLEditor().then(() => model.run("atomic"));
     case "cancel":
       return model.cancel();
     case "toggleTheme":
