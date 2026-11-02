@@ -41,6 +41,8 @@ export interface MenuItem {
   disabled?: boolean;
   /** Shown on the right, like a shortcut. */
   detail?: string;
+  /** The tooltip. */
+  hint?: string;
   action?: () => void;
   /** A separator line instead of an item. */
   separator?: boolean;
@@ -91,6 +93,7 @@ export function ContextMenu({ menu, onClose }: { menu: MenuState; onClose: () =>
             role="menuitem"
             className={`menu-item${item.destructive ? " destructive" : ""}`}
             disabled={item.disabled}
+            title={item.hint}
             onClick={() => {
               onClose();
               item.action?.();

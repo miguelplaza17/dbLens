@@ -31,7 +31,7 @@ export function HistoryButton() {
     <>
       <button
         ref={button}
-        className={`icon-button${open ? " active" : ""}`}
+        className={`button${open ? " active" : ""}`}
         disabled={!model.session}
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="dialog"
@@ -40,6 +40,7 @@ export function HistoryButton() {
         aria-label={t("History")}
       >
         <Icon name="history" size={14} />
+        {t("History")}
       </button>
       {open && <Popover anchor={button} onClose={() => setOpen(false)} />}
     </>

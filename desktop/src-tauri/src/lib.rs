@@ -1,6 +1,7 @@
 //! dbLens for Windows and Linux: a Tauri 2 shell around database drivers that
 //! mirror the macOS app's DBLensKit. See desktop/CONTRACT.md.
 
+pub mod agents;
 pub mod close_guard;
 pub mod commands;
 pub mod connection_problem;
@@ -138,6 +139,9 @@ pub fn run() {
             history::clear_sql_history,
             commands::set_agents_can_write,
             commands::set_agents_manage_connections,
+            agents::agent_clients,
+            agents::set_agent_installed,
+            agents::agent_tools,
             commands::move_connection,
             commands::add_folder,
             commands::rename_folder,

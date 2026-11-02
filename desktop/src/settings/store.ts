@@ -8,6 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { inTauri } from "../api";
 import { applyAccent, type AccentId } from "./accents";
+import { setEngineIconPrefs, type EngineIconPref } from "../engineIcons";
 
 export type Appearance = "system" | "light" | "dark";
 
@@ -16,6 +17,8 @@ export interface Settings {
   accent: AccentId;
   checkForUpdates: boolean;
   updateAutomatically: boolean;
+  /** Per kind of database (postgres, mysql…): logo or symbol, and its color. */
+  engineIcons: Record<string, EngineIconPref>;
 }
 
 export interface SettingsInfo {
@@ -30,10 +33,11 @@ export interface SettingsInfo {
 export const SETTINGS_EVENT = "settings-changed";
 
 const defaults: Settings = {
-  appearance: "dark",
+  appearance: "system",
   accent: "system",
   checkForUpdates: true,
   updateAutomatically: false,
+  engineIcons: {},
 };
 
 // MARK: - Browser stand-in
@@ -167,10 +171,11 @@ async function migrateTheme(s: Settings): Promise<Settings> {
  */
 export function followSettings(setTheme: (theme: "light" | "dark") => void, onChange?: (s: Settings) => void): () => void {
   const forced = new URLSearchParams(location.search).get("theme");
-  let appearance: Appearance = "dark";
+  let appearance: Appearance = "system";
   const apply = (s: Settings) => {
     appearance = s.appearance;
     applyAccent(s.accent);
+    setEngineIconPrefs(s.engineIcons);
     if (!forced) setTheme(effectiveTheme(s.appearance));
     onChange?.(s);
   };

@@ -40,6 +40,27 @@ async function binary<T>(command: string, args: Record<string, unknown>, fromMoc
 
 export type Engine = "postgres" | "mysql" | "sqlite" | "redis" | "mongodb";
 
+/** An app dbLens can add its MCP server to (src-tauri/src/agents.rs). */
+export type AgentClientId = "claudeCode" | "claudeDesktop" | "codex" | "cursor" | "windsurf" | "vsCode" | "geminiCli" | "grokCli" | "zed";
+
+export interface AgentStatus {
+  id: AgentClientId;
+  /** The app or its command is on this computer. */
+  available: boolean;
+  installed: boolean;
+  /** The entry runs this copy of dbLens, not one moved or deleted since. */
+  current: boolean;
+  installedCommand: string | null;
+  configFile: string;
+}
+
+export interface AgentTool {
+  name: string;
+  summary: string;
+  /** Changes data: works only on connections that allow agents to write. */
+  writes: boolean;
+}
+
 export const engineNames: Record<Engine, string> = {
   postgres: "PostgreSQL",
   mysql: "MySQL",
@@ -586,6 +607,11 @@ export const api = {
   /** "Let Agents Write" for the MCP server (src-tauri/src/mcp.rs). */
   setAgentsCanWrite: (id: string, allowed: boolean) => invoke<SavedConnection>("set_agents_can_write", { id, allowed }),
   setAgentsManageConnections: (allowed: boolean) => invoke<void>("set_agents_manage_connections", { allowed }),
+  /** The apps dbLens can install its MCP server into, and where each stands. */
+  agentClients: () => invoke<AgentStatus[]>("agent_clients"),
+  /** Adds or removes dbLens in one app; the new state of all of them. */
+  setAgentInstalled: (client: AgentClientId, installed: boolean) => invoke<AgentStatus[]>("set_agent_installed", { client, installed }),
+  agentTools: () => invoke<AgentTool[]>("agent_tools"),
   /** The saved URL with passwords masked, for the edit sheet. */
   connectionUrl: (id: string) => invoke<string>("connection_url", { id }),
   moveConnection: (id: string, folderId: string, beforeId: string | null = null) =>

@@ -67,7 +67,7 @@ pub fn open_new(app: &AppHandle, open: Option<Vec<String>>) -> tauri::Result<Str
         .title("dbLens")
         .inner_size(1280.0, 800.0)
         .min_inner_size(800.0, 500.0)
-        .theme(Some(tauri::Theme::Dark));
+        .theme(crate::settings::current(app).native_theme());
     // A new window lands a little down and right of the one in front, unless
     // the plugin restores a saved place for this label.
     if let Some(front) = app

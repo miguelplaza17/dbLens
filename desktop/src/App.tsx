@@ -131,26 +131,29 @@ export default function App() {
             </div>
           )}
           <span className="spacer" />
-          {model.session && schema.available(model) && (
-            <button
-              className={`icon-button${model.shown === "schema" ? " active" : ""}`}
-              onClick={() => (model.shown === "schema" ? model.showResultTab("table") : void schema.show(model))}
-              title={withKeys(t("Show Schema"), "showSchema")}
-              aria-label={t("Show Schema")}
-              aria-pressed={model.shown === "schema"}
-            >
-              <Icon name="schema" />
-            </button>
-          )}
+          <button
+            className={`icon-button${model.shown === "schema" ? " active" : ""}`}
+            disabled={!model.session || !schema.available(model)}
+            onClick={() => (model.shown === "schema" ? model.showResultTab("table") : void schema.show(model))}
+            title={withKeys(t("Show Schema"), "showSchema")}
+            aria-label={t("Show Schema")}
+            aria-pressed={model.shown === "schema"}
+          >
+            <Icon name="schema" />
+          </button>
+          <button
+            className="icon-button"
+            disabled={!model.session}
+            onClick={() => void model.reload()}
+            title={withKeys(t("Reload"), "refresh")}
+            aria-label={t("Reload")}
+          >
+            <Icon name="refresh" />
+          </button>
           {model.session && (
-            <>
-              <button className="icon-button" onClick={() => void model.reload()} title={withKeys(t("Reload"), "refresh")} aria-label={t("Reload")}>
-                <Icon name="refresh" />
-              </button>
-              <button className="icon-button" onClick={() => void model.disconnect()} title={withKeys(t("Disconnect"), "disconnect")} aria-label={t("Disconnect")}>
-                <Icon name="disconnect" />
-              </button>
-            </>
+            <button className="icon-button" onClick={() => void model.disconnect()} title={withKeys(t("Disconnect"), "disconnect")} aria-label={t("Disconnect")}>
+              <Icon name="disconnect" />
+            </button>
           )}
           {!model.showSQLPanel && (
             <button
@@ -162,17 +165,6 @@ export default function App() {
               <Icon name="panelBottom" />
             </button>
           )}
-          <button className="icon-button" onClick={() => model.open({ kind: "shortcuts" })} title={t("Keyboard Shortcuts")} aria-label={t("Keyboard Shortcuts")}>
-            <Icon name="keyboard" />
-          </button>
-          <button
-            className="icon-button"
-            onClick={() => model.toggleTheme()}
-            title={withKeys(model.theme === "dark" ? t("Light") : t("Dark"), "toggleTheme")}
-            aria-label={t("Light or Dark")}
-          >
-            <Icon name={model.theme === "dark" ? "sun" : "moon"} />
-          </button>
         </header>
         <div className="content">
           {model.shown === "schema" ? <SchemaBoard /> : <ResultPane ref={searchRef} />}

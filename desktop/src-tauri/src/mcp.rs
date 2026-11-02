@@ -1160,6 +1160,10 @@ fn output(execution: &Execution, max_rows: usize) -> Value {
 
 // MARK: Tool list
 
+pub(crate) fn tool_list() -> Value {
+    tools()
+}
+
 fn tools() -> Value {
     let connection =
         json!({"type": "string", "description": "Connection name, from list_connections."});

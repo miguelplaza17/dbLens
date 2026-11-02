@@ -55,37 +55,15 @@ export function SQLPanel() {
             </span>
           )}
           <span className="spacer" />
-          {!commands && (
-            <>
-              <button
-                className="button"
-                disabled={!connected || model.running}
-                onClick={() => void model.run("rehearse")}
-                title={withKeys(t("Run in a transaction that is always rolled back: see what it would do, change nothing"), "rehearse")}
-              >
-                <Icon name="rehearse" size={14} />
-                {t("Rehearse")}
-              </button>
-              <button
-                className="button"
-                disabled={!connected || model.running}
-                onClick={() => void model.run("atomic")}
-                title={withKeys(t("Run every statement in one transaction: all of them, or none"), "runAtomically")}
-              >
-                <Icon name="atomic" size={14} />
-                {t("All or Nothing")}
-              </button>
-            </>
-          )}
           <HistoryButton />
           <button
-            className="icon-button"
+            className="button"
             disabled={!connected}
             onClick={() => void openInTerminal(model)}
             title={withKeys(t("Open in Terminal"), "openTerminal")}
-            aria-label={t("Open in Terminal")}
           >
             <Icon name="terminal" size={14} />
+            {t("Terminal")}
           </button>
           {model.running ? (
             <button className="button" onClick={() => model.cancel()} title={withKeys(t("Cancel"), "cancel")}>
@@ -93,10 +71,41 @@ export function SQLPanel() {
               {t("Cancel")}
             </button>
           ) : (
-            <button className="button prominent" disabled={!connected} onClick={() => void model.run()} title={withKeys(t("Run"), "run")}>
-              <Icon name="play" size={12} />
-              {t("Run")}
-            </button>
+            <div className="split-button">
+              <button className="button prominent" disabled={!connected} onClick={() => void model.run()} title={withKeys(t("Run"), "run")}>
+                <Icon name="play" size={12} />
+                {t("Run")}
+              </button>
+              {!commands && (
+                <button
+                  className="button prominent split-arrow"
+                  disabled={!connected}
+                  aria-label={t("More Run Options")}
+                  title={t("More Run Options")}
+                  onClick={(e) => {
+                    const box = e.currentTarget.getBoundingClientRect();
+                    model.showMenu({ clientX: box.right - 8, clientY: box.top - 4, preventDefault: () => {} }, [
+                      {
+                        title: t("Rehearse"),
+                        icon: "rehearse",
+                        detail: keyLabel("rehearse"),
+                        hint: t("Run in a transaction that is always rolled back: see what it would do, change nothing"),
+                        action: () => void model.run("rehearse"),
+                      },
+                      {
+                        title: t("All or Nothing"),
+                        icon: "atomic",
+                        detail: keyLabel("runAtomically"),
+                        hint: t("Run every statement in one transaction: all of them, or none"),
+                        action: () => void model.run("atomic"),
+                      },
+                    ]);
+                  }}
+                >
+                  <Icon name="chevronDown" size={12} />
+                </button>
+              )}
+            </div>
           )}
         </header>
         <SQLEditor

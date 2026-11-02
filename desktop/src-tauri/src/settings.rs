@@ -33,6 +33,20 @@ pub const ACCENTS: [&str; 12] = [
     "teal", "graphite",
 ];
 
+/// The kinds of database that have an icon setting, as `Engine`.
+pub const ENGINES: [&str; 5] = ["postgres", "mysql", "sqlite", "redis", "mongodb"];
+
+/// Settings > Appearance > Database Icons, for one kind of database.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EngineIconPref {
+    /// "logo" or "symbol".
+    pub style: String,
+    /// "#rrggbb"; the kind's own color when missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Appearance {
@@ -54,15 +68,18 @@ pub struct Settings {
     pub check_for_updates: bool,
     /// Settings > Updates > "Update automatically".
     pub update_automatically: bool,
+    /// Settings > Appearance > Database Icons, by kind of database.
+    pub engine_icons: std::collections::BTreeMap<String, EngineIconPref>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Settings {
-            appearance: Appearance::Dark,
+            appearance: Appearance::System,
             accent: "system".into(),
             check_for_updates: true,
             update_automatically: false,
+            engine_icons: Default::default(),
         }
     }
 }
@@ -112,6 +129,20 @@ impl Settings {
             serde_json::from_value(merged).map_err(|e| format!("Settings: {e}"))?;
         if !ACCENTS.contains(&next.accent.as_str()) {
             return Err(format!("Settings: unknown accent {}", next.accent));
+        }
+        for (engine, pref) in &next.engine_icons {
+            if !ENGINES.contains(&engine.as_str()) {
+                return Err(format!("Settings: unknown database kind {engine}"));
+            }
+            if !["logo", "symbol"].contains(&pref.style.as_str()) {
+                return Err(format!("Settings: unknown icon style {}", pref.style));
+            }
+            if let Some(color) = &pref.color {
+                let hex = color.strip_prefix('#').unwrap_or("");
+                if hex.len() != 6 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(format!("Settings: icon color must be #rrggbb, got {color}"));
+                }
+            }
         }
         Ok(next)
     }
@@ -338,6 +369,18 @@ mod tests {
         assert!(s.patched(&json!({ "acent": "mint" })).is_err());
         assert!(s.patched(&json!({ "accent": "chartreuse" })).is_err());
         assert!(s.patched(&json!({ "appearance": "sepia" })).is_err());
+        let ok = s
+            .patched(
+                &json!({ "engineIcons": { "redis": { "style": "symbol", "color": "#112233" } } }),
+            )
+            .unwrap();
+        assert_eq!(ok.engine_icons["redis"].style, "symbol");
+        assert!(s
+            .patched(&json!({ "engineIcons": { "oracle": { "style": "logo" } } }))
+            .is_err());
+        assert!(s
+            .patched(&json!({ "engineIcons": { "redis": { "style": "logo", "color": "red" } } }))
+            .is_err());
         assert!(s.patched(&json!({ "checkForUpdates": "yes" })).is_err());
         assert!(s.patched(&json!(["accent"])).is_err());
         assert!(s

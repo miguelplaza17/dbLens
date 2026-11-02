@@ -6,7 +6,8 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, engineNames, inTauri, type SavedConnection, type StoreSnapshot } from "../api";
+import { api, engineNames, inTauri, type AgentClientId, type AgentStatus, type AgentTool, type Engine, type SavedConnection, type StoreSnapshot } from "../api";
+import { EngineIcon, engineDefaultColors, type EngineIconPref } from "../engineIcons";
 import { copyText } from "../format";
 import { t } from "../i18n";
 import { Empty } from "../components/Empty";
@@ -208,6 +209,8 @@ function Toggle({ id, label, detail, checked, disabled, onChange }: {
 
 type Change = (patch: Partial<Settings>) => void;
 
+const engineKinds: Engine[] = ["postgres", "mysql", "sqlite", "redis", "mongodb"];
+
 // MARK: - Appearance (AppearanceSettings.swift, Theme.swift)
 
 function AppearanceTab({ settings, change }: { settings: Settings; change: Change }) {
@@ -255,6 +258,38 @@ function AppearanceTab({ settings, change }: { settings: Settings; change: Chang
             <span className="settings-row-detail">{t(accent.name)}</span>
           </div>
         </Row>
+      </Group>
+      <Group title={t("Database Icons")} footer={t("The logos belong to their owners.")}>
+        {engineKinds.map((e) => {
+          const pref = settings.engineIcons[e];
+          const style = pref?.style ?? "logo";
+          const color = pref?.color ?? engineDefaultColors[e];
+          const set = (next: Partial<EngineIconPref>) =>
+            change({ engineIcons: { ...settings.engineIcons, [e]: { style, color: pref?.color, ...next } } });
+          return (
+            <Row key={e} label={<span className="engine-label"><EngineIcon engine={e} />{engineNames[e]}</span>}>
+              <div className="segmented" role="radiogroup" aria-label={t("Icon")}>
+                {(["logo", "symbol"] as const).map((s) => (
+                  <button key={s} type="button" role="radio" aria-checked={style === s} className={style === s ? "selected" : ""} onClick={() => set({ style: s })}>
+                    {s === "logo" ? t("Logo") : t("Symbol")}
+                  </button>
+                ))}
+              </div>
+              <input type="color" className="color-well" aria-label={t("Color")} value={color} onChange={(ev) => set({ color: ev.target.value })} />
+              <button
+                type="button"
+                className="button"
+                disabled={!pref}
+                onClick={() => {
+                  const { [e]: _removed, ...rest } = settings.engineIcons;
+                  change({ engineIcons: rest });
+                }}
+              >
+                {t("Reset")}
+              </button>
+            </Row>
+          );
+        })}
       </Group>
       <Group title={t("Preview")}>
         <div className="form-row settings-preview">
@@ -329,11 +364,66 @@ function shellWord(path: string): string {
   return /^[\w@%+=:,./\\-]+$/.test(path) ? path : JSON.stringify(path);
 }
 
+const agentLogos = import.meta.glob("../assets/agent-logos/*.svg", { eager: true, query: "?url", import: "default" }) as Record<string, string>;
+const agentApps: { id: AgentClientId; name: string; logo: string; mono?: boolean }[] = [
+  { id: "claudeCode", name: "Claude Code", logo: "claudecode" },
+  { id: "claudeDesktop", name: "Claude (chat)", logo: "claude" },
+  { id: "codex", name: "ChatGPT (Codex)", logo: "chatgpt" },
+  { id: "cursor", name: "Cursor", logo: "cursor", mono: true },
+  { id: "windsurf", name: "Devin Desktop (Windsurf)", logo: "devin" },
+  { id: "vsCode", name: "VS Code (Copilot)", logo: "vscode" },
+  { id: "geminiCli", name: "Gemini CLI", logo: "geminicli" },
+  { id: "grokCli", name: "Grok CLI", logo: "grok", mono: true },
+  { id: "zed", name: "Zed", logo: "zed", mono: true },
+];
+
+function agentNote(id: AgentClientId, name: string): string {
+  switch (id) {
+    case "claudeCode": return t("The claude command and the Claude app's Code tab, every project.");
+    case "claudeDesktop": return t("Chats in the Claude app. Restart it afterwards.");
+    case "codex": return t("The app and the codex command (~/.codex/config.toml).");
+    case "geminiCli":
+    case "grokCli": return t("For every project.");
+    default: return t("Restart %@ afterwards.", name);
+  }
+}
+
+function agentMissing(id: AgentClientId, name: string): string {
+  switch (id) {
+    case "claudeCode": return t("Neither the Claude app nor the claude command was found.");
+    case "geminiCli":
+    case "grokCli": return t("Not installed (command not found).");
+    default: return t("%@ isn't installed.", name);
+  }
+}
+
+function AgentLogo({ logo, mono }: { logo: string; mono?: boolean }) {
+  const url = agentLogos[`../assets/agent-logos/${logo}.svg`];
+  return (
+    <span className="agent-logo">
+      {url && <img src={url} alt="" className={mono ? "mono-logo" : undefined} />}
+    </span>
+  );
+}
+
 function AgentsTab({ info, copy, say }: { info: SettingsInfo | null; copy: (text: string) => void; say: (text: string) => void }) {
   // Kept in the store, not settings.json: the MCP server is its own process and reads it there.
   const [manage, setManage] = useState<boolean | null>(null);
+  const [connections, setConnections] = useState<SavedConnection[] | null>(null);
+  const [statuses, setStatuses] = useState<AgentStatus[]>([]);
+  const [tools, setTools] = useState<AgentTool[]>([]);
+  const [working, setWorking] = useState<AgentClientId | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
   useEffect(() => {
-    void api.listConnections().then((s) => setManage(!!s.agentsManageConnections), (e) => say(String(e)));
+    void api.listConnections().then(
+      (s) => {
+        setManage(!!s.agentsManageConnections);
+        setConnections([...s.connections].sort((a, b) => a.name.localeCompare(b.name)));
+      },
+      (e) => say(String(e)),
+    );
+    void api.agentClients().then(setStatuses, (e) => say(String(e)));
+    void api.agentTools().then(setTools, (e) => say(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const changeManage = (on: boolean) => {
@@ -343,36 +433,89 @@ function AgentsTab({ info, copy, say }: { info: SettingsInfo | null; copy: (text
       say(String(e));
     });
   };
+  const changeWrite = (c: SavedConnection, on: boolean) => {
+    setConnections((list) => list && list.map((x) => (x.id === c.id ? { ...x, agentsCanWrite: on } : x)));
+    void api.setAgentsCanWrite(c.id, on).catch((e) => {
+      setConnections((list) => list && list.map((x) => (x.id === c.id ? { ...x, agentsCanWrite: !on } : x)));
+      say(String(e));
+    });
+  };
+  const run = (app: { id: AgentClientId; name: string }, installed: boolean) => {
+    setWorking(app.id);
+    setProblem(null);
+    api
+      .setAgentInstalled(app.id, installed)
+      .then(setStatuses, (e) => {
+        setProblem(`${app.name}: ${String(e)}`);
+        void api.agentClients().then(setStatuses);
+      })
+      .finally(() => setWorking(null));
+  };
   const exe = info?.executable ?? "dblens";
   const command = `${shellWord(exe)} --mcp`;
-  const claude = `claude mcp add --scope user dblens -- ${command}`;
-  const codex = `codex mcp add dblens -- ${command}`;
   const json = JSON.stringify({ mcpServers: { dblens: { command: exe, args: ["--mcp"] } } }, null, 2);
-  const commandRow = (label: string, text: string, title: string) => (
-    <Row label={label} detail={<code className="settings-code selectable">{text}</code>}>
-      <button type="button" className="button" title={title} onClick={() => copy(text)}>
-        <Icon name="copy" size={14} />
-        {t("Copy")}
+  const action = (app: (typeof agentApps)[number], status: AgentStatus | undefined) => {
+    if (!status) return null;
+    if (working === app.id) return <span className="spinner small" />;
+    if (status.installed && !status.current) {
+      return (
+        <span className="agent-actions">
+          <span className="agent-state warn" title={status.installedCommand ?? ""}>{t("Old path")}</span>
+          <button type="button" className="button" onClick={() => run(app, true)}>{t("Update")}</button>
+        </span>
+      );
+    }
+    if (status.installed) {
+      return (
+        <span className="agent-actions">
+          <span className="agent-state ok">{t("Installed")}</span>
+          <button type="button" className="button" onClick={() => run(app, false)}>{t("Remove")}</button>
+        </span>
+      );
+    }
+    return (
+      <button type="button" className="button" disabled={!status.available} onClick={() => run(app, true)}>
+        {t("Install")}
       </button>
-    </Row>
-  );
+    );
+  };
   return (
     <>
       <p className="settings-intro">
         {t("Agents read your databases through the connections saved here. They see names, never URLs or passwords, and queries are read-only, enforced by the database.")}
       </p>
       <Group title={t("MCP Server")}>
-        {commandRow(t("Command"), command, t("Copy the command that starts the MCP server"))}
+        <Row label={t("Command")} detail={<code className="settings-code selectable">{command}</code>}>
+          <button type="button" className="button" title={t("Copy the command that starts the MCP server")} onClick={() => copy(command)}>
+            <Icon name="copy" size={14} />
+            {t("Copy")}
+          </button>
+        </Row>
       </Group>
-      <Group title={t("Install")} footer={t("Restart the app afterwards, or start a new session.")}>
-        {commandRow("Claude Code", claude, t("Copy the command that adds dbLens to Claude Code"))}
-        {commandRow("Codex", codex, t("Copy the command that adds dbLens to Codex"))}
-        <Row label={t("Other apps")} detail={t("Most take this in their MCP settings.")}>
+      <Group title={t("Install")} footer={problem ? <span className="settings-error selectable">{problem}</span> : undefined}>
+        {agentApps.map((app) => {
+          const status = statuses.find((s) => s.id === app.id);
+          const name = app.id === "claudeDesktop" ? t(app.name) : app.name;
+          const detail = status && (status.available || status.installed) ? agentNote(app.id, name) : agentMissing(app.id, name);
+          return (
+            <Row key={app.id} label={<span className="agent-label"><AgentLogo logo={app.logo} mono={app.mono} />{name}</span>} detail={detail}>
+              {action(app, status)}
+            </Row>
+          );
+        })}
+        <Row label={<span className="agent-label"><span className="agent-logo other">…</span>{t("Other apps")}</span>} detail={t("Most take this in their MCP settings.")}>
           <button type="button" className="button" onClick={() => copy(json)}>
             <Icon name="copy" size={14} />
             {t("Copy JSON")}
           </button>
         </Row>
+      </Group>
+      <Group title={t("Tools")} footer={t("Tools that write work only on connections allowed below.")}>
+        {tools.map((tool) => (
+          <Row key={tool.name} label={<code className="settings-code">{tool.name}</code>} detail={tool.summary}>
+            <span className={`tool-badge ${tool.writes ? "writes" : "reads"}`}>{tool.writes ? t("Writes") : t("Reads")}</span>
+          </Row>
+        ))}
       </Group>
       <Group title={t("Connections")}>
         <Toggle
@@ -383,6 +526,15 @@ function AgentsTab({ info, copy, say }: { info: SettingsInfo | null; copy: (text
           disabled={manage === null}
           onChange={changeManage}
         />
+      </Group>
+      <Group
+        title={t("Let Agents Write")}
+        footer={t("Off: agents only read. On: they may change data and install extensions on that connection. Everything they run shows in the SQL panel's History.")}
+      >
+        {connections && connections.length === 0 && <p className="settings-intro">{t("No saved connections yet.")}</p>}
+        {(connections ?? []).map((c) => (
+          <Toggle key={c.id} id={`agents-write-${c.id}`} label={c.name} checked={!!c.agentsCanWrite} onChange={(on) => changeWrite(c, on)} />
+        ))}
       </Group>
     </>
   );

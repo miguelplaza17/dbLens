@@ -192,3 +192,65 @@ html.settings-window #root {
   box-shadow: var(--shadow);
   font-size: var(--font-size-small);
 }
+
+/* Settings > Agents */
+.agent-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+.agent-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: var(--space-xs);
+  border-radius: var(--radius-md);
+  background: #292929;
+}
+.agent-logo img {
+  width: 100%;
+  height: 100%;
+}
+.agent-logo img.mono-logo {
+  filter: invert(1);
+}
+.agent-logo.other {
+  background: #8e8e93;
+  color: #fff;
+  font-weight: 700;
+}
+.agent-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+.agent-state {
+  font-size: var(--font-size-small);
+  font-weight: 500;
+}
+.agent-state.ok {
+  color: var(--success);
+}
+.agent-state.warn {
+  color: var(--warning);
+}
+.tool-badge {
+  padding: var(--space-xxs) var(--space-sm);
+  border-radius: 999px;
+  font-size: var(--font-size-caption);
+  font-weight: 600;
+}
+.tool-badge.reads {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 15%, transparent);
+}
+.tool-badge.writes {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 15%, transparent);
+}
+.settings-error {
+  color: var(--danger);
+}

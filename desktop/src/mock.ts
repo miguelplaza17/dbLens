@@ -23,6 +23,21 @@ import { historyHandlers } from "./history/mock";
 
 import { bigSchema, demoLinks } from "./schema/sample";
 
+// MARK: Agents
+
+const mockAgentState = [
+  { id: "claudeCode", available: true, installed: true, current: true, installedCommand: "/Applications/dbLens.app/Contents/MacOS/dbLens", configFile: "~/.claude.json" },
+  { id: "claudeDesktop", available: true, installed: false, current: false, installedCommand: null, configFile: "" },
+  { id: "codex", available: true, installed: true, current: false, installedCommand: "/old/dbLens/dblens", configFile: "~/.codex/config.toml" },
+  { id: "cursor", available: false, installed: false, current: false, installedCommand: null, configFile: "" },
+  { id: "windsurf", available: false, installed: false, current: false, installedCommand: null, configFile: "" },
+  { id: "vsCode", available: true, installed: false, current: false, installedCommand: null, configFile: "" },
+  { id: "geminiCli", available: false, installed: false, current: false, installedCommand: null, configFile: "" },
+  { id: "grokCli", available: false, installed: false, current: false, installedCommand: null, configFile: "" },
+  { id: "zed", available: true, installed: false, current: false, installedCommand: null, configFile: "" },
+];
+const mockAgents = () => mockAgentState.map((c) => ({ ...c }));
+
 // MARK: - Sample databases
 
 interface Table {
@@ -773,6 +788,23 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     const { url: _u, ...rest } = c;
     return { ...rest };
   },
+  agent_clients: () => mockAgents(),
+  set_agent_installed: (a) => {
+    const c = mockAgentState.find((x) => x.id === a.id || x.id === a.client);
+    if (!c) throw "No such app.";
+    c.installed = !!a.installed;
+    c.current = true;
+    c.installedCommand = c.installed ? "/Applications/dbLens.app/Contents/MacOS/dbLens" : null;
+    return mockAgents();
+  },
+  agent_tools: () => [
+    { name: "list_connections", summary: "The database connections saved in dbLens.", writes: false },
+    { name: "describe_schema", summary: "Tables, columns and relations of a database.", writes: false },
+    { name: "query", summary: "Runs one read-only statement and returns its rows.", writes: false },
+    { name: "test_changes", summary: "Tries a change without keeping it.", writes: false },
+    { name: "execute", summary: "Changes data or schema, for real.", writes: true },
+    { name: "install_extension", summary: "Installs a PostgreSQL extension.", writes: true },
+  ],
   set_agents_manage_connections: (a) => {
     agentsManageConnections = !!a.allowed;
   },

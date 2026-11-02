@@ -3,6 +3,7 @@
 // proves it works before it is saved (ConnectionSheet.swift).
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { EngineIcon } from "../engineIcons";
 import { api, engineNames, errorText, type Engine, type SavedConnection, type SshConfig, type Summary } from "../api";
 import { t } from "../i18n";
 import { useModel } from "../model";
@@ -148,7 +149,12 @@ export function ConnectionSheet({ editing, initialUrl }: { editing: SavedConnect
         <section className="form-group">
           <header className="form-group-header">
             <span>{editing ? t("Edit Connection") : t("New Connection")}</span>
-            {mode === "url" && engine && <span className="engine-tag">{engineNames[engine]}</span>}
+            {mode === "url" && engine && (
+              <span className="engine-tag">
+                <EngineIcon engine={engine} size={13} />
+                {engineNames[engine]}
+              </span>
+            )}
           </header>
           <div className="form-card">
             {mode === "url" ? (

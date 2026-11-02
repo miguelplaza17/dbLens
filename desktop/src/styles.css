@@ -166,25 +166,27 @@ kbd {
 .bottom {
   flex: none;
   min-height: 0;
-  padding: 0 var(--space-sm) var(--space-sm);
   background: var(--surface);
 }
 
 .splitter {
+  position: relative;
   flex: none;
-  height: var(--space-md);
+  height: 1px;
   cursor: row-resize;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--surface);
-  border-top: 1px solid var(--separator);
+  background: var(--separator);
+}
+/* A wider grab area than the line itself; the line darkens on hover. */
+.splitter::before {
+  content: "";
+  position: absolute;
+  inset: -4px 0;
+}
+.splitter:hover {
+  background: var(--separator-strong);
 }
 .splitter-grip {
-  width: 36px;
-  height: 4px;
-  border-radius: var(--radius-sm);
-  background: var(--separator-strong);
+  display: none;
 }
 
 /* MARK: Controls */
@@ -617,7 +619,6 @@ select option {
 .sql-panel {
   display: grid;
   grid-template-columns: minmax(0, 1fr) var(--log-width);
-  gap: var(--space-sm);
   height: 100%;
 }
 .card {
@@ -625,10 +626,11 @@ select option {
   flex-direction: column;
   min-height: 0;
   min-width: 0;
-  border-radius: var(--radius-lg);
-  background: var(--card);
-  border: 1px solid var(--separator);
+  background: var(--surface);
   overflow: hidden;
+}
+.log-card {
+  border-left: 1px solid var(--separator);
 }
 .card-header {
   display: flex;
@@ -976,3 +978,43 @@ select option {
 /* Dragging a saved connection onto a folder (native/dragConnections.ts). */
 body.dragging-connection { cursor: grabbing; user-select: none; }
 .drop-target { background: color-mix(in srgb, var(--accent, #0a84ff) 22%, transparent); border-radius: 6px; }
+
+/* Run with the arrow for its other modes. */
+.split-button {
+  display: inline-flex;
+  gap: 1px;
+}
+.split-button .button:first-child:not(:last-child) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.split-button .split-arrow {
+  width: var(--control-height);
+  padding: 0;
+  justify-content: center;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+/* A kind of database's icon. */
+.engine-icon {
+  flex: none;
+}
+.engine-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+.engine-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+.color-well {
+  width: 28px;
+  height: var(--control-height);
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+}

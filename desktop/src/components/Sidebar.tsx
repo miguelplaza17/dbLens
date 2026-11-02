@@ -2,6 +2,7 @@
 // the open connection grouped by schema (ContentView.swift).
 
 import { forwardRef, useMemo, useState, type ReactNode } from "react";
+import { EngineIcon } from "../engineIcons";
 import { api, engineNames, relationId, type Relation, type SavedConnection } from "../api";
 import { t } from "../i18n";
 import { useModel } from "../model";
@@ -120,6 +121,7 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
       <SidebarRow
         key={c.id}
         icon="database"
+        iconNode={<EngineIcon engine={c.engine} />}
         nested={nested}
         selected={active}
         title={c.name}
@@ -193,12 +195,6 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
             </div>
           );
         })}
-        <SidebarRow
-          icon="plus"
-          title={t("New Connection…")}
-          muted
-          onClick={() => model.open({ kind: "connection", editing: null })}
-        />
 
         {model.session &&
           groups.map(([schema, relations]) => {
@@ -241,6 +237,8 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
 
 function SidebarRow(props: {
   icon: IconName;
+  /** Drawn instead of `icon` (a kind of database's own icon). */
+  iconNode?: ReactNode;
   title: string;
   nested?: boolean;
   selected?: boolean;
@@ -264,7 +262,7 @@ function SidebarRow(props: {
   if (props.renaming) {
     return (
       <div className={className}>
-        <Icon name={props.icon} size={15} />
+        {props.iconNode ?? <Icon name={props.icon} size={15} />}
         <input
           className="rename-field"
           autoFocus
@@ -291,7 +289,7 @@ function SidebarRow(props: {
       aria-current={props.selected ? "true" : undefined}
     >
       {props.disclosure && <Icon name={props.disclosure === "open" ? "chevronDown" : "chevronRight"} size={12} />}
-      <Icon name={props.icon} size={15} />
+      {props.iconNode ?? <Icon name={props.icon} size={15} />}
       <span className="sidebar-row-title">{props.title}</span>
       {props.trailing}
     </button>
