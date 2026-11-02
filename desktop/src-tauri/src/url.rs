@@ -1176,13 +1176,15 @@ mod tests {
     fn sqlite_locations() {
         let home = home();
         let loc = SqliteLocation::new("sqlite:///tmp/x/../app.db").unwrap();
-        assert_eq!(loc.path, "/tmp/app.db");
+        // Windows writes the same path with backslashes.
+        let native = |p: &str| p.replace('/', std::path::MAIN_SEPARATOR_STR);
+        assert_eq!(loc.path, native("/tmp/app.db"));
         assert_eq!(loc.suggested_name(), "app.db");
         assert_eq!(
             SqliteLocation::new("file://localhost/tmp/a%20b.db")
                 .unwrap()
                 .path,
-            "/tmp/a b.db"
+            native("/tmp/a b.db")
         );
         assert_eq!(
             SqliteLocation::new("~/data.sqlite3").unwrap().path,

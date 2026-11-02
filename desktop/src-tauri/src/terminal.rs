@@ -769,7 +769,8 @@ mod tests {
     fn sqlite_opens_the_file() {
         let c = make("sqlite:///tmp/shop.db", None);
         assert_eq!(c.tools, ["sqlite3"]);
-        assert_eq!(c.arguments, ["/tmp/shop.db"]);
+        let path = "/tmp/shop.db".replace('/', std::path::MAIN_SEPARATOR_STR);
+        assert_eq!(c.arguments, [path]);
         assert!(c.environment.is_empty());
     }
 

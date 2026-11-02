@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use mysql_async::consts::{ColumnFlags, ColumnType};
+use mysql_async::consts::{ColumnFlags, ColumnType, StatusFlags};
 use mysql_async::prelude::Queryable;
 use mysql_async::{Column as MyColumn, Conn, Opts, OptsBuilder, Row, SslOpts, Value};
 use tokio::sync::Mutex;
@@ -294,6 +294,16 @@ struct Shared {
     scope_changed: AtomicBool,
     id: u32,
     opts: Opts,
+}
+
+/// The server's status flags (transaction open, autocommit), read from the OK
+/// packet of a statement that does nothing. MySQL has no `@@in_transaction`
+/// (only MariaDB does), but both report these flags.
+async fn server_status(conn: &mut Conn) -> DbResult<StatusFlags> {
+    conn.query_drop("do 0").await.map_err(|e| to_error(&e))?;
+    conn.last_ok_packet()
+        .map(|ok| ok.status_flags())
+        .ok_or_else(|| DbError::msg("The server sent no status."))
 }
 
 pub struct MySqlSession {
@@ -921,15 +931,13 @@ impl MySqlSession {
             || state.in_transaction.load(Ordering::SeqCst)
             || state.autocommit_off.load(Ordering::SeqCst)
         {
-            let now: Result<Option<(Option<i64>, Option<i64>)>, _> = conn
-                .query_first("select @@in_transaction, @@autocommit")
-                .await;
-            let (open, autocommit) = match now {
-                Ok(Some((open, autocommit))) => {
-                    (open.unwrap_or(0) != 0, autocommit.unwrap_or(1) != 0)
-                }
+            let (open, autocommit) = match server_status(conn).await {
+                Ok(status) => (
+                    status.contains(StatusFlags::SERVER_STATUS_IN_TRANS),
+                    status.contains(StatusFlags::SERVER_STATUS_AUTOCOMMIT),
+                ),
                 // Unknown: keep asking after every run.
-                _ => (false, false),
+                Err(_) => (false, false),
             };
             state.in_transaction.store(open, Ordering::SeqCst);
             state.autocommit_off.store(!autocommit, Ordering::SeqCst);
@@ -950,14 +958,10 @@ impl MySqlSession {
         }
     }
 
-    /// Whether the user opened a transaction in the SQL panel (`@@in_transaction`,
-    /// MySQL 5.7 and MariaDB 10.3 and later).
+    /// Whether the user opened a transaction in the SQL panel.
     async fn user_transaction(&self, conn: &mut Conn) -> DbResult<bool> {
-        let open: Option<Option<i64>> = conn
-            .query_first("select @@in_transaction")
-            .await
-            .map_err(|e| to_error(&e))?;
-        Ok(open.flatten().unwrap_or(0) != 0)
+        let status = server_status(conn).await?;
+        Ok(status.contains(StatusFlags::SERVER_STATUS_IN_TRANS))
     }
 
     /// Refuses to start dbLens's own transaction inside the user's: START

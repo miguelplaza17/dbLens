@@ -66,7 +66,11 @@ async fn connects_and_runs_multiple_statements() {
         .unwrap();
     assert_eq!(run.results.len(), 3);
     assert_eq!(run.results[0].columns[0].name, "a");
-    assert_eq!(run.results[0].columns[0].type_name, "int");
+    // A literal is an int on MariaDB and a bigint on MySQL 8.
+    assert!(matches!(
+        run.results[0].columns[0].type_name.as_str(),
+        "int" | "bigint"
+    ));
     assert_eq!(
         run.results[0].rows,
         vec![vec![Some("1".to_string()), Some("x".to_string())]]

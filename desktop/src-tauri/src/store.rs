@@ -839,7 +839,8 @@ mod tests {
         let store = Store::open(&dir, KeySource::File(key.clone())).unwrap();
         assert_eq!(mode(&key), 0o600);
         assert_eq!(mode(&dir), 0o700);
-        assert!(store.snapshot().key_in_file);
+        // On macOS the key file is the design, so it raises no notice.
+        assert_eq!(store.snapshot().key_in_file, !KEY_FILE_FIRST);
         // The flag reaches the frontend but is never written to connections.json.
         assert!(!fs::read_to_string(dir.join(META_FILE))
             .unwrap()
