@@ -84,10 +84,34 @@ struct SQLPanel: View {
             if model.running {
                 Button("Cancel") { model.cancel() }
             } else {
-                Button("Run", systemImage: "play.fill") { Task { await model.run() } }
+                if !model.usesCommands && !model.usesQueries {
+                    // Run, with an arrow for its other two modes: all blue with a connection, all gray without.
+                    let ready = model.session != nil
+                    Menu {
+                        Button("Rehearse", systemImage: "testtube.2") { Task { await model.run(.rehearse) } }
+                            .help("Run in a transaction that is always rolled back: see what it would do, change nothing (Option-Command-Return)")
+                        Button("All or Nothing", systemImage: "shippingbox") { Task { await model.run(.atomic) } }
+                            .help("Run every statement in one transaction: all of them, or none (Shift-Command-Return)")
+                    } label: {
+                        Label("Run", systemImage: "play.fill")
+                    } primaryAction: {
+                        Task { await model.run() }
+                    }
+                    .menuStyle(.button)
                     .buttonStyle(.borderedProminent)
-                    .disabled(model.session == nil)
+                    .compositingGroup()
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6).fill(ready ? Palette.accent : Color.clear) // grid: ok
+                            .blendMode(.color).allowsHitTesting(false)
+                    }
+                    .disabled(!ready)
                     .help("Run (Command-Return)")
+                } else {
+                    Button("Run", systemImage: "play.fill") { Task { await model.run() } }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.session == nil)
+                        .help("Run (Command-Return)")
+                }
             }
         }
         .controlSize(.small)

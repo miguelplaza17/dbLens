@@ -384,7 +384,7 @@ private struct ConnectionDragCard: View {
         Label {
             Text(verbatim: connection.name).lineLimit(1)
         } icon: {
-            Image(systemName: engine.symbol).foregroundStyle(engine.color)
+            EngineIcon(engine)
         }
         .font(.callout)
         .padding(.horizontal, Space.sm)
@@ -416,8 +416,11 @@ struct ConnectionRow: View {
             } else {
                 // The kind of database, in its color; a lock when it goes through SSH.
                 let engine = Engine(rawValue: connection.engine) ?? .postgres
-                Image(systemName: connection.sshHost.isEmpty ? engine.symbol : "lock.shield")
-                    .foregroundStyle(engine.color)
+                if connection.sshHost.isEmpty {
+                    EngineIcon(engine)
+                } else {
+                    Image(systemName: "lock.shield").foregroundStyle(engine.color)
+                }
             }
         }
         .badge(isActive ? Text(Image(systemName: "circle.fill")).foregroundStyle(.green).font(.system(size: 7)) : nil)

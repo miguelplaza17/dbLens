@@ -133,7 +133,7 @@ struct ConnectionSettings: View {
                         Text(verbatim: connection.name)
                         Text(details(connection, engine))
                     } icon: {
-                        Image(systemName: engine.symbol).foregroundStyle(engine.color)
+                        EngineIcon(engine)
                     }
                 }
             }
