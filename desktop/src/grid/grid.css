@@ -1,0 +1,142 @@
+/* The canvas grid's DOM parts: its box, the cell editor, the error line and
+   the perf HUD. Colors come from theme.css only. */
+
+.glide-grid {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background: var(--surface);
+  outline: none;
+}
+.glide-grid .dvn-scroller {
+  scrollbar-color: var(--scrollbar) transparent;
+}
+
+.grid-portal {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 50;
+}
+
+/* The editor over a cell. */
+.cell-editor {
+  display: flex;
+  flex-direction: column;
+  background: var(--raised);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.cell-editor-text {
+  display: block;
+  width: 100%;
+  min-height: var(--row-height);
+  max-height: 160px;
+  resize: none;
+  border: none;
+  outline: none;
+  margin: 0;
+  padding: var(--space-xs) var(--space-sm);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-mono);
+  line-height: 16px;
+}
+.cell-editor-text::placeholder {
+  color: var(--null-text);
+}
+.cell-editor-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xxs) var(--space-xs);
+  border-top: 1px solid var(--separator);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-caption);
+  color: var(--text-tertiary);
+}
+.cell-editor-null {
+  height: 20px;
+  padding: 0 var(--space-sm);
+  border: 1px solid var(--field-border);
+  border-radius: var(--radius-sm);
+  background: var(--control);
+  color: var(--text-secondary);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.cell-editor-null:hover {
+  background: var(--control-hover);
+}
+.cell-editor-null.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+.cell-editor-hint {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.grid-error {
+  position: absolute;
+  left: var(--space-md);
+  right: var(--space-md);
+  bottom: var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  background: var(--raised);
+  color: var(--danger);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
+  font-size: var(--font-size-small);
+}
+
+/* Ctrl/Cmd+Shift+P */
+.perf-hud {
+  position: absolute;
+  top: 36px;
+  right: var(--space-lg);
+  z-index: 5;
+  min-width: 200px;
+  padding: var(--space-sm) var(--space-md);
+  background: var(--raised);
+  color: var(--text);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-caption);
+  line-height: 18px;
+  pointer-events: auto;
+}
+.perf-hud-row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-lg);
+}
+.perf-hud-row span:first-child {
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+}
+.perf-hud-value {
+  font-variant-numeric: tabular-nums;
+}
+.perf-hud-reset {
+  margin-top: var(--space-xs);
+  width: 100%;
+  height: 22px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--control);
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-caption);
+  cursor: pointer;
+}
+.perf-hud-reset:hover {
+  background: var(--control-hover);
+}

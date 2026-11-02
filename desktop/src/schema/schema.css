@@ -1,0 +1,68 @@
+/* The schema board: a bar of controls over a canvas that fills the rest. */
+
+.schema-board {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.schema-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex: none;
+  height: 44px;
+  padding: 0 var(--space-md);
+  border-bottom: 1px solid var(--separator);
+  background: var(--window);
+  font-size: var(--font-size-small);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.schema-count,
+.schema-zoom {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.schema-zoom {
+  min-width: var(--space-section);
+  text-align: right;
+}
+
+.schema-canvas {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.schema-canvas > canvas:first-child {
+  position: absolute;
+  inset: 0;
+  display: block;
+  outline: none;
+  touch-action: none;
+  cursor: grab;
+}
+
+.schema-minimap {
+  position: absolute;
+  right: var(--space-md);
+  bottom: var(--space-md);
+  border-radius: var(--radius-md);
+  background: var(--raised);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  touch-action: none;
+}
+
+/* The toolbar's Show Schema button while the board is on screen. */
+.icon-button.active {
+  background: var(--accent-faint);
+  color: var(--accent-text);
+}

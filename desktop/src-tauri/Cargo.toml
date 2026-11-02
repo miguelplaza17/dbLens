@@ -1,0 +1,101 @@
+[package]
+name = "dblens"
+version = "1.0.0"
+description = "dbLens: a fast, minimal database client"
+authors = ["dbLens contributors"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.80"
+
+[lib]
+# The _lib suffix keeps the lib apart from the bin on Windows (cargo issue #8519).
+name = "dblens_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "dblens"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+tauri = { version = "2.12", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "process", "io-util", "io-std"] }
+async-trait = "0.1"
+thiserror = "2"
+regex = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+percent-encoding = "2"
+futures-util = "0.3"
+bytes = "1"
+# Table data crosses the IPC as MessagePack (src/wire.rs), never JSON.
+rmp = "0.8"
+rmp-serde = "1.3"
+
+# Drivers: pure Rust (or bundled C), so nothing has to be installed on Windows or Linux.
+# TLS is rustls with the ring provider everywhere (no OpenSSL, no aws-lc build).
+tokio-postgres = { version = "0.7.18", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
+tokio-postgres-rustls = { version = "0.14", features = ["ring", "webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+mysql_async = { version = "0.37", default-features = false, features = ["default-rustls-ring", "chrono"] }
+rusqlite = { version = "0.41", default-features = false, features = ["bundled", "hooks", "column_decltype"] }
+mongodb = { version = "3.9", default-features = false, features = ["compat-3-0-0", "rustls-tls", "dns-resolver"] }
+
+# Saved connections: AES-GCM sealed URLs, key in the OS keyring (macOS Keychain,
+# Windows Credential Manager, Linux Secret Service over zbus) or a 0600 key file when there is none.
+aes-gcm = "0.10"
+base64 = "0.22"
+keyring = { version = "3.6", default-features = false, features = ["apple-native", "windows-native", "async-secret-service", "async-io", "crypto-rust"] }
+directories = "6"
+# Import from dbLens for Mac (src/import_swift.rs): its folders are in a plist.
+plist = "1"
+
+# Native behavior: window size and position per window, a file dialog for
+# Open SQLite File, and one running app on Windows and Linux.
+tauri-plugin-window-state = "2"
+tauri-plugin-dialog = "2"
+# Settings > Data & Privacy > Show Data Folder (src/settings.rs).
+tauri-plugin-opener = "2"
+# In-app updates from GitHub Releases (src/updater.rs). Same version as the npm package.
+tauri-plugin-updater = "2.14.1"
+
+# ssh children die with the app: PR_SET_PDEATHSIG on Linux, a kill-on-close
+# Job Object on Windows (both already in the dependency tree).
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+tauri-plugin-single-instance = "2"
+
+# flock / LockFileEx: the store folder's lock between the app and `dblens --mcp` (store.rs).
+# The menu bar's light or dark theme and the run keys (src/linux_gtk.rs); already
+# in the tree through tauri.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+
+[dev-dependencies]
+muda = "0.20"
+tempfile = "3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+strip = true
+
+# Smaller debug builds: line tables are enough for backtraces, and the full
+# debug info of the driver crates filled the disk.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

@@ -1,0 +1,856 @@
+//! Table data over the IPC: MessagePack, column-major, never JSON.
+//!
+//! A result block is a map (see CONTRACT.md, "Binary results"):
+//!
+//! ```text
+//! { columns: [{name, type}], data: [[v, …] per column], rowCount, offset,
+//!   command, truncated, totalRows, keys: null | {columns, kind, data}, note }
+//! ```
+//!
+//! Each `v` is nil (NULL), a string (the server's text), or an integer when the
+//! text is an integer's canonical form that a JS number holds exactly (so
+//! `String(v)` gives the text back, byte for byte). Key values are always
+//! strings: they go back to the driver as they came.
+//!
+//! `StreamSink` sends a streamed run as a sequence of such messages over a
+//! `tauri::ipc::Channel` (`execute_stream`).
+
+use std::sync::Arc;
+use std::time::Instant;
+
+use rmp::encode;
+
+use crate::session::{Column, DbError, Execution, QueryResult, RowKeyKind, RowKeys};
+
+/// Rows in the first block of a streamed run, so something shows at once.
+pub const FIRST_BLOCK_ROWS: usize = 500;
+/// Rows in each later block (a block is also sent when it holds this many bytes
+/// or rows have waited `FLUSH_MS`).
+pub const BLOCK_ROWS: usize = 5_000;
+const BLOCK_BYTES: usize = 2 << 20;
+const FLUSH_MS: u128 = 200;
+/// Rows a streamed run keeps by default; more are counted, not sent.
+pub const STREAM_ROW_CAP: usize = 100_000;
+/// Encoded bytes a streamed result keeps at most (whatever its row cap); later
+/// rows are counted, not sent, and the result is marked truncated.
+pub const STREAM_BYTE_CAP: usize = 64 << 20;
+/// Encoded bytes a whole streamed run keeps across all its result sets, and
+/// how many times the row cap its rows may add up to: a script of many big
+/// SELECTs stops sending (and marks the rest truncated) once these are spent.
+/// Tauri's channel queues every message until the webview takes it, so this
+/// bounds what both sides hold.
+pub const STREAM_RUN_BYTE_CAP: usize = 192 << 20;
+pub const STREAM_RUN_ROW_CAPS: usize = 3;
+/// Rows between liveness checks while rows are only counted.
+const ALIVE_EVERY: u64 = 1_024;
+
+// MARK: - Values
+
+/// The integer `text` is, when `String(n)` in JS gives `text` back exactly:
+/// no sign on zero, no leading zeros, within ±(2^53 - 1).
+pub fn safe_int(text: &str) -> Option<i64> {
+    let bytes = text.as_bytes();
+    let (negative, digits) = match bytes.first()? {
+        b'-' => (true, &bytes[1..]),
+        _ => (false, bytes),
+    };
+    if digits.is_empty() || digits.len() > 16 || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    if digits[0] == b'0' && (digits.len() > 1 || negative) {
+        return None;
+    }
+    let mut n: i64 = 0;
+    for d in digits {
+        n = n * 10 + i64::from(d - b'0');
+    }
+    const MAX: i64 = (1 << 53) - 1;
+    if n > MAX {
+        return None;
+    }
+    Some(if negative { -n } else { n })
+}
+
+/// Encodes the values of one column, trying integers until one value isn't.
+struct ColumnWriter {
+    try_int: bool,
+}
+
+impl ColumnWriter {
+    fn new() -> Self {
+        Self { try_int: true }
+    }
+
+    fn value(&mut self, out: &mut Vec<u8>, value: Option<&str>) {
+        match value {
+            None => {
+                let _ = encode::write_nil(out);
+            }
+            Some(text) => {
+                if self.try_int {
+                    if let Some(n) = safe_int(text) {
+                        let _ = encode::write_sint(out, n);
+                        return;
+                    }
+                    self.try_int = false;
+                }
+                let _ = encode::write_str(out, text);
+            }
+        }
+    }
+}
+
+fn str_or_nil(out: &mut Vec<u8>, value: Option<&str>) {
+    match value {
+        Some(text) => {
+            let _ = encode::write_str(out, text);
+        }
+        None => {
+            let _ = encode::write_nil(out);
+        }
+    }
+}
+
+fn key(out: &mut Vec<u8>, name: &str) {
+    let _ = encode::write_str(out, name);
+}
+
+fn columns(out: &mut Vec<u8>, columns: &[Column]) {
+    let _ = encode::write_array_len(out, columns.len() as u32);
+    for column in columns {
+        let _ = encode::write_map_len(out, 2);
+        key(out, "name");
+        let _ = encode::write_str(out, &column.name);
+        key(out, "type");
+        let _ = encode::write_str(out, &column.type_name);
+    }
+}
+
+fn kind_name(kind: RowKeyKind) -> &'static str {
+    match kind {
+        RowKeyKind::PrimaryKey => "primaryKey",
+        RowKeyKind::Ctid => "ctid",
+        RowKeyKind::Rowid => "rowid",
+    }
+}
+
+fn keys(out: &mut Vec<u8>, keys: Option<&RowKeys>) {
+    let Some(keys) = keys else {
+        let _ = encode::write_nil(out);
+        return;
+    };
+    let _ = encode::write_map_len(out, 3);
+    key(out, "columns");
+    let _ = encode::write_array_len(out, keys.columns.len() as u32);
+    for name in &keys.columns {
+        let _ = encode::write_str(out, name);
+    }
+    key(out, "kind");
+    let _ = encode::write_str(out, kind_name(keys.kind));
+    key(out, "data");
+    let _ = encode::write_array_len(out, keys.columns.len() as u32);
+    for c in 0..keys.columns.len() {
+        let _ = encode::write_array_len(out, keys.values.len() as u32);
+        for row in &keys.values {
+            str_or_nil(out, row.get(c).and_then(|v| v.as_deref()));
+        }
+    }
+}
+
+// MARK: - Blocks
+
+/// Appends one result as a block map. `offset` is where its first row sits in
+/// the table (0 for SQL results).
+pub fn write_block(out: &mut Vec<u8>, result: &QueryResult, offset: u64) {
+    let _ = encode::write_map_len(out, 9);
+    key(out, "columns");
+    columns(out, &result.columns);
+    key(out, "data");
+    let width = result.columns.len();
+    let _ = encode::write_array_len(out, width as u32);
+    for c in 0..width {
+        let _ = encode::write_array_len(out, result.rows.len() as u32);
+        let mut writer = ColumnWriter::new();
+        for row in &result.rows {
+            writer.value(out, row.get(c).and_then(|v| v.as_deref()));
+        }
+    }
+    key(out, "rowCount");
+    let _ = encode::write_uint(out, result.rows.len() as u64);
+    key(out, "offset");
+    let _ = encode::write_uint(out, offset);
+    key(out, "command");
+    let _ = encode::write_str(out, &result.command);
+    key(out, "truncated");
+    let _ = encode::write_bool(out, result.truncated);
+    key(out, "totalRows");
+    let _ = encode::write_uint(out, result.total_rows);
+    key(out, "keys");
+    keys(out, result.keys.as_ref());
+    key(out, "note");
+    str_or_nil(out, result.note.as_deref());
+}
+
+/// A table block (`page`, `page_block`).
+pub fn block(result: &QueryResult, offset: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(estimate(result));
+    write_block(&mut out, result, offset);
+    out
+}
+
+fn estimate(result: &QueryResult) -> usize {
+    let sample: usize = result
+        .rows
+        .first()
+        .map(|r| {
+            r.iter()
+                .map(|v| v.as_ref().map_or(1, |s| s.len() + 2))
+                .sum()
+        })
+        .unwrap_or(0);
+    256 + sample * result.rows.len() * 11 / 10
+}
+
+fn write_execution(out: &mut Vec<u8>, execution: &Execution) {
+    let _ = encode::write_map_len(out, 2);
+    key(out, "results");
+    let _ = encode::write_array_len(out, execution.results.len() as u32);
+    for result in &execution.results {
+        write_block(out, result, 0);
+    }
+    key(out, "durationMs");
+    let _ = encode::write_f64(out, execution.duration_ms);
+}
+
+/// `{ results: [block…], durationMs }` (`execute`, `read_only`, `rehearse`).
+pub fn execution(execution: &Execution) -> Vec<u8> {
+    let mut out = Vec::with_capacity(execution.results.iter().map(estimate).sum::<usize>() + 64);
+    write_execution(&mut out, execution);
+    out
+}
+
+/// `{ kind: "ran", execution }` (`execute_atomically`).
+pub fn atomic_ran(run: &Execution) -> Vec<u8> {
+    let mut out = Vec::new();
+    let _ = encode::write_map_len(&mut out, 2);
+    key(&mut out, "kind");
+    let _ = encode::write_str(&mut out, "ran");
+    key(&mut out, "execution");
+    write_execution(&mut out, run);
+    out
+}
+
+/// `{ kind: "notAtomic", message }` (`execute_atomically`).
+pub fn atomic_refused(message: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let _ = encode::write_map_len(&mut out, 2);
+    key(&mut out, "kind");
+    let _ = encode::write_str(&mut out, "notAtomic");
+    key(&mut out, "message");
+    let _ = encode::write_str(&mut out, message);
+    out
+}
+
+// MARK: - Streaming
+
+/// Sends one message; false when nobody listens any more (the window closed).
+pub type Sender = Arc<dyn Fn(Vec<u8>) -> bool + std::marker::Send + Sync>;
+
+/// Whether someone still listens (the window that started the run is there
+/// and its session is not closing). A channel send can't tell: Tauri accepts
+/// a big message for a webview that is gone.
+pub type Alive = Arc<dyn Fn() -> bool + std::marker::Send + Sync>;
+
+/// Where a streamed run sends its rows: the driver calls `begin` for each
+/// result set, `cell` for each value and `end_row` after each row, then `end`
+/// (or just `command` for a statement without rows). Rows go out in blocks:
+/// the first after `FIRST_BLOCK_ROWS`, then every `BLOCK_ROWS`. After `cap`
+/// rows of a result, rows are only counted.
+///
+/// Messages (each one MessagePack map, `type` first):
+/// `columns {result, columns}`, `rows {result, offset, rowCount, data}`,
+/// `end {result, command, totalRows, truncated}`, `done {durationMs, error, cancelled}`.
+pub struct StreamSink {
+    send: Sender,
+    alive: Option<Alive>,
+    cap: usize,
+    open: bool,
+    result: u32,
+    width: usize,
+    /// One encoded value buffer per column for the rows not sent yet.
+    buffers: Vec<Vec<u8>>,
+    writers: Vec<ColumnWriter>,
+    at: usize,
+    pending: usize,
+    /// Encoded bytes of the pending rows.
+    pending_bytes: usize,
+    /// Encoded bytes kept (sent or pending) of the current result, its limit,
+    /// and whether it was reached.
+    kept_bytes: usize,
+    byte_cap: usize,
+    full: bool,
+    /// Rows sent (or pending) of the current result, and rows seen.
+    kept: usize,
+    seen: u64,
+    sent_first: bool,
+    last_flush: Instant,
+    /// What the run kept across its finished result sets (never reset by
+    /// `begin`), its limits, and whether they were reached.
+    run_bytes: usize,
+    run_rows: usize,
+    run_byte_cap: usize,
+    run_row_cap: usize,
+    run_full: bool,
+    /// Bytes and messages sent, for the bench.
+    pub bytes: usize,
+    pub messages: usize,
+    /// When the first rows went out, for the bench.
+    pub first_rows_at: Option<Instant>,
+}
+
+impl StreamSink {
+    pub fn new(send: Sender, cap: usize) -> Self {
+        let cap = cap.max(1);
+        Self {
+            send,
+            alive: None,
+            cap,
+            open: true,
+            result: 0,
+            width: 0,
+            buffers: vec![],
+            writers: vec![],
+            at: 0,
+            pending: 0,
+            pending_bytes: 0,
+            kept_bytes: 0,
+            byte_cap: STREAM_BYTE_CAP,
+            full: false,
+            kept: 0,
+            seen: 0,
+            sent_first: false,
+            last_flush: Instant::now(),
+            run_bytes: 0,
+            run_rows: 0,
+            run_byte_cap: STREAM_RUN_BYTE_CAP,
+            run_row_cap: cap.saturating_mul(STREAM_RUN_ROW_CAPS),
+            run_full: false,
+            bytes: 0,
+            messages: 0,
+            first_rows_at: None,
+        }
+    }
+
+    /// The same sink with a liveness check: once it says false, the sink
+    /// closes and the driver stops reading (and cancels the statement).
+    pub fn with_alive(mut self, alive: Alive) -> Self {
+        self.alive = Some(alive);
+        self
+    }
+
+    /// The same sink with other limits for the whole run (for tests).
+    pub fn with_run_caps(mut self, bytes: usize, rows: usize) -> Self {
+        self.run_byte_cap = bytes.max(1);
+        self.run_row_cap = rows.max(1);
+        self
+    }
+
+    /// The same sink with another byte limit per result (for tests).
+    pub fn with_byte_cap(mut self, bytes: usize) -> Self {
+        self.byte_cap = bytes.max(1);
+        self
+    }
+
+    /// A new sink to the same receiver, with the same limits and nothing sent:
+    /// what a driver keeps while the real one is away (moved to a blocking
+    /// task), so `done` still reaches the receiver if that task fails.
+    pub fn sibling(&self) -> Self {
+        let mut sink = Self::new(self.send.clone(), self.cap);
+        sink.alive = self.alive.clone();
+        sink.byte_cap = self.byte_cap;
+        sink.open = self.open;
+        sink.run_bytes = self.run_bytes;
+        sink.run_rows = self.run_rows;
+        sink.run_byte_cap = self.run_byte_cap;
+        sink.run_row_cap = self.run_row_cap;
+        sink.run_full = self.run_full;
+        sink
+    }
+
+    /// A sink with nobody listening, as a placeholder.
+    pub fn closed() -> Self {
+        let mut sink = Self::new(Arc::new(|_| false), 1);
+        sink.open = false;
+        sink
+    }
+
+    /// False once the receiver is gone: the driver should stop reading.
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    /// Whether the next row's values are kept (false past the cap): the
+    /// driver may skip `cell` calls then, but still calls `end_row`.
+    pub fn keeping(&self) -> bool {
+        self.open && self.room()
+    }
+
+    /// Whether the current result and the run both have room for one more row.
+    fn room(&self) -> bool {
+        self.kept < self.cap && !self.full && !self.run_full
+    }
+
+    /// Asks the liveness check; closes the sink when nobody listens.
+    fn check_alive(&mut self) {
+        if self.open && self.alive.as_ref().is_some_and(|alive| !alive()) {
+            self.open = false;
+        }
+    }
+
+    /// How many results this run has ended so far (the next one's number).
+    pub fn result_index(&self) -> u32 {
+        self.result
+    }
+
+    /// Rows seen in the current result set.
+    pub fn seen(&self) -> u64 {
+        self.seen
+    }
+
+    fn emit(&mut self, message: Vec<u8>) {
+        self.check_alive();
+        if !self.open {
+            return;
+        }
+        self.bytes += message.len();
+        self.messages += 1;
+        if !(self.send)(message) {
+            self.open = false;
+        }
+    }
+
+    fn head(out: &mut Vec<u8>, entries: u32, kind: &str, result: Option<u32>) {
+        let _ = encode::write_map_len(out, entries);
+        key(out, "type");
+        let _ = encode::write_str(out, kind);
+        if let Some(result) = result {
+            key(out, "result");
+            let _ = encode::write_uint(out, u64::from(result));
+        }
+    }
+
+    /// A result set with these columns starts.
+    pub fn begin(&mut self, cols: &[Column]) {
+        self.width = cols.len();
+        self.buffers = (0..self.width).map(|_| Vec::with_capacity(4096)).collect();
+        self.writers = (0..self.width).map(|_| ColumnWriter::new()).collect();
+        self.at = 0;
+        self.pending = 0;
+        self.pending_bytes = 0;
+        self.kept_bytes = 0;
+        self.full = false;
+        self.kept = 0;
+        self.seen = 0;
+        self.sent_first = false;
+        self.last_flush = Instant::now();
+        let mut out = Vec::with_capacity(64 + cols.len() * 32);
+        Self::head(&mut out, 3, "columns", Some(self.result));
+        key(&mut out, "columns");
+        columns(&mut out, cols);
+        self.emit(out);
+    }
+
+    /// Columns found after rows were sent (MongoDB documents with new keys):
+    /// they append to the current result's columns. Call between rows. Rows
+    /// sent earlier have NULL there (the receiver pads them).
+    pub fn add_columns(&mut self, cols: &[Column]) {
+        if cols.is_empty() || self.width == 0 {
+            return;
+        }
+        self.flush();
+        self.width += cols.len();
+        for _ in cols {
+            self.buffers.push(Vec::with_capacity(4096));
+            self.writers.push(ColumnWriter::new());
+        }
+        let mut out = Vec::with_capacity(64 + cols.len() * 32);
+        Self::head(&mut out, 4, "columns", Some(self.result));
+        key(&mut out, "columns");
+        columns(&mut out, cols);
+        key(&mut out, "append");
+        let _ = encode::write_bool(&mut out, true);
+        self.emit(out);
+    }
+
+    /// The next value of the current row (NULL is None).
+    pub fn cell(&mut self, value: Option<&str>) {
+        if !self.room() || self.at >= self.width {
+            return;
+        }
+        let buffer = &mut self.buffers[self.at];
+        let before = buffer.len();
+        self.writers[self.at].value(buffer, value);
+        self.pending_bytes += buffer.len() - before;
+        self.at += 1;
+    }
+
+    /// The current row is complete.
+    pub fn end_row(&mut self) {
+        self.seen += 1;
+        if self.seen % ALIVE_EVERY == 0 {
+            // Past the caps nothing is sent, so this is the only way a run
+            // over millions of rows learns that its window is gone.
+            self.check_alive();
+        }
+        if self.room() && self.open {
+            // A short row (fewer values than columns) gets NULLs.
+            while self.at < self.width {
+                let _ = encode::write_nil(&mut self.buffers[self.at]);
+                self.pending_bytes += 1;
+                self.at += 1;
+            }
+            self.kept += 1;
+            self.pending += 1;
+            if self.kept_bytes + self.pending_bytes >= self.byte_cap {
+                self.full = true;
+            }
+            if self.run_bytes + self.kept_bytes + self.pending_bytes >= self.run_byte_cap
+                || self.run_rows + self.kept >= self.run_row_cap
+            {
+                self.run_full = true;
+            }
+            let limit = if self.sent_first {
+                BLOCK_ROWS
+            } else {
+                FIRST_BLOCK_ROWS
+            };
+            // Every row: one huge cell, or rows trickling in, still flush in time.
+            if self.pending >= limit
+                || self.pending_bytes >= BLOCK_BYTES
+                || self.last_flush.elapsed().as_millis() >= FLUSH_MS
+            {
+                self.flush();
+            }
+        }
+        self.at = 0;
+    }
+
+    /// Sends the pending rows as one `rows` message.
+    pub fn flush(&mut self) {
+        if self.pending == 0 {
+            return;
+        }
+        let mut out = Vec::with_capacity(self.pending_bytes + 64 + self.width * 5);
+        Self::head(&mut out, 5, "rows", Some(self.result));
+        key(&mut out, "offset");
+        let _ = encode::write_uint(&mut out, (self.kept - self.pending) as u64);
+        key(&mut out, "rowCount");
+        let _ = encode::write_uint(&mut out, self.pending as u64);
+        key(&mut out, "data");
+        let _ = encode::write_array_len(&mut out, self.width as u32);
+        for buffer in &mut self.buffers {
+            let _ = encode::write_array_len(&mut out, self.pending as u32);
+            out.extend_from_slice(buffer);
+            buffer.clear();
+        }
+        self.pending = 0;
+        self.kept_bytes += self.pending_bytes;
+        self.pending_bytes = 0;
+        if self.kept_bytes >= self.byte_cap {
+            self.full = true;
+        }
+        self.sent_first = true;
+        self.last_flush = Instant::now();
+        if self.first_rows_at.is_none() {
+            self.first_rows_at = Some(Instant::now());
+        }
+        self.emit(out);
+    }
+
+    /// The current result set is complete: what the statement did and how many rows it had.
+    pub fn end(&mut self, command: &str) {
+        self.flush();
+        let total = self.seen;
+        let truncated = total > self.kept as u64;
+        self.finish(command, total, truncated);
+    }
+
+    /// A statement without rows ("UPDATE 2", "CREATE TABLE").
+    pub fn command(&mut self, command: &str, affected: u64) {
+        self.finish(command, affected, false);
+    }
+
+    fn finish(&mut self, command: &str, total: u64, truncated: bool) {
+        let mut out = Vec::with_capacity(96 + command.len());
+        Self::head(&mut out, 5, "end", Some(self.result));
+        key(&mut out, "command");
+        let _ = encode::write_str(&mut out, command);
+        key(&mut out, "totalRows");
+        let _ = encode::write_uint(&mut out, total);
+        key(&mut out, "truncated");
+        let _ = encode::write_bool(&mut out, truncated);
+        self.emit(out);
+        self.result += 1;
+        self.run_bytes += self.kept_bytes + self.pending_bytes;
+        self.run_rows += self.kept;
+        self.width = 0;
+        self.buffers.clear();
+        self.writers.clear();
+        self.kept = 0;
+        self.seen = 0;
+        self.pending_bytes = 0;
+        self.kept_bytes = 0;
+        self.full = false;
+    }
+
+    /// A whole result from a driver that doesn't stream.
+    pub fn send_result(&mut self, result: &QueryResult) {
+        if !result.has_rows() {
+            self.command(&result.command, result.total_rows);
+            return;
+        }
+        self.begin(&result.columns);
+        for row in &result.rows {
+            if self.keeping() {
+                for value in row {
+                    self.cell(value.as_deref());
+                }
+            }
+            self.end_row();
+        }
+        self.flush();
+        // The driver may have cut the rows already: its counts stand.
+        let truncated = result.truncated || result.total_rows > self.kept as u64;
+        self.finish(&result.command, result.total_rows.max(self.seen), truncated);
+    }
+
+    /// The last message: the run's wall time, and its error if it failed.
+    pub fn done(&mut self, duration_ms: f64, error: Option<&DbError>) {
+        self.flush();
+        let mut out = Vec::with_capacity(96);
+        Self::head(&mut out, 4, "done", None);
+        key(&mut out, "durationMs");
+        let _ = encode::write_f64(&mut out, duration_ms);
+        key(&mut out, "error");
+        str_or_nil(&mut out, error.map(|e| e.message()).as_deref());
+        key(&mut out, "cancelled");
+        let _ = encode::write_bool(&mut out, matches!(error, Some(DbError::Cancelled)));
+        self.emit(out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    fn decode(bytes: &[u8]) -> serde_json::Value {
+        rmp_serde::from_slice(bytes).expect("valid MessagePack")
+    }
+
+    #[test]
+    fn integers_only_when_lossless() {
+        assert_eq!(safe_int("0"), Some(0));
+        assert_eq!(safe_int("-42"), Some(-42));
+        assert_eq!(safe_int("9007199254740991"), Some(9_007_199_254_740_991));
+        for text in [
+            "",
+            "-",
+            "-0",
+            "007",
+            "1.0",
+            "1e3",
+            " 1",
+            "+1",
+            "9007199254740992",
+            "12345678901234567",
+        ] {
+            assert_eq!(safe_int(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn blocks_are_column_major() {
+        let s = |v: &str| Some(v.to_string());
+        let mut result = QueryResult::rows(
+            vec![Column::new("id", "int4"), Column::new("name", "text")],
+            vec![
+                vec![s("1"), s("ana")],
+                vec![s("2"), None],
+                vec![s("x"), s("007")],
+            ],
+            "SELECT 3",
+        );
+        result.keys = Some(RowKeys {
+            columns: vec!["id".into()],
+            kind: RowKeyKind::PrimaryKey,
+            values: vec![vec![s("1")], vec![s("2")], vec![s("x")]],
+        });
+        let value = decode(&block(&result, 200));
+        assert_eq!(value["columns"][1]["type"], "text");
+        assert_eq!(value["data"][0], serde_json::json!([1, 2, "x"]));
+        assert_eq!(value["data"][1], serde_json::json!(["ana", null, "007"]));
+        assert_eq!(value["rowCount"], 3);
+        assert_eq!(value["offset"], 200);
+        assert_eq!(value["keys"]["kind"], "primaryKey");
+        assert_eq!(value["keys"]["data"][0], serde_json::json!(["1", "2", "x"]));
+        assert_eq!(value["note"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn streams_in_blocks_up_to_the_cap() {
+        let messages = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let kept = messages.clone();
+        let mut sink = StreamSink::new(
+            Arc::new(move |m| {
+                kept.lock().unwrap().push(m);
+                true
+            }),
+            FIRST_BLOCK_ROWS + 10,
+        );
+        sink.begin(&[Column::new("n", "")]);
+        for i in 0..FIRST_BLOCK_ROWS + 100 {
+            if sink.keeping() {
+                sink.cell(Some(&i.to_string()));
+            }
+            sink.end_row();
+        }
+        sink.end("SELECT 600");
+        sink.command("UPDATE 1", 1);
+        sink.done(1.5, None);
+        let all: Vec<serde_json::Value> =
+            messages.lock().unwrap().iter().map(|m| decode(m)).collect();
+        let kinds: Vec<&str> = all.iter().map(|m| m["type"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["columns", "rows", "rows", "end", "end", "done"]);
+        assert_eq!(all[1]["rowCount"], FIRST_BLOCK_ROWS);
+        assert_eq!(all[2]["offset"], FIRST_BLOCK_ROWS);
+        assert_eq!(all[2]["rowCount"], 10);
+        assert_eq!(all[3]["totalRows"], FIRST_BLOCK_ROWS + 100);
+        assert_eq!(all[3]["truncated"], true);
+        assert_eq!(all[4]["result"], 1);
+        assert_eq!(all[5]["error"], serde_json::Value::Null);
+    }
+
+    fn collect() -> (Sender, Arc<Mutex<Vec<Vec<u8>>>>) {
+        let messages = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+        let kept = messages.clone();
+        let send: Sender = Arc::new(move |m| {
+            kept.lock().unwrap().push(m);
+            true
+        });
+        (send, messages)
+    }
+
+    #[test]
+    fn big_cells_flush_by_bytes_and_stop_at_the_byte_cap() {
+        let (send, messages) = collect();
+        let mut sink = StreamSink::new(send, STREAM_ROW_CAP).with_byte_cap(5 << 20);
+        let cell = "x".repeat(1 << 20);
+        sink.begin(&[Column::new("t", "text")]);
+        for _ in 0..20 {
+            if sink.keeping() {
+                sink.cell(Some(&cell));
+            }
+            sink.end_row();
+        }
+        sink.end("SELECT 20");
+        let all: Vec<Vec<u8>> = messages.lock().unwrap().clone();
+        let rows: Vec<serde_json::Value> = all
+            .iter()
+            .map(|m| decode(m))
+            .filter(|m| m["type"] == "rows")
+            .collect();
+        // 2 MiB a message: two rows each, never 256.
+        assert!(rows.iter().all(|m| m["rowCount"].as_u64().unwrap() <= 2));
+        assert!(all.iter().all(|m| m.len() < (3 << 20)));
+        let sent: u64 = rows.iter().map(|m| m["rowCount"].as_u64().unwrap()).sum();
+        assert_eq!(sent, 5);
+        let end = decode(all.last().unwrap());
+        assert_eq!(end["totalRows"], 20);
+        assert_eq!(end["truncated"], true);
+    }
+
+    #[test]
+    fn the_run_budget_spans_result_sets() {
+        let (send, messages) = collect();
+        let mut sink = StreamSink::new(send, 100).with_run_caps(usize::MAX, 150);
+        for _ in 0..3 {
+            sink.begin(&[Column::new("n", "")]);
+            for i in 0..100 {
+                if sink.keeping() {
+                    sink.cell(Some(&i.to_string()));
+                }
+                sink.end_row();
+            }
+            sink.end("SELECT 100");
+        }
+        let ends: Vec<serde_json::Value> = messages
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|m| decode(m))
+            .filter(|m| m["type"] == "end")
+            .collect();
+        let truncated: Vec<bool> = ends
+            .iter()
+            .map(|m| m["truncated"].as_bool().unwrap())
+            .collect();
+        assert_eq!(truncated, [false, true, true]);
+        assert!(ends.iter().all(|m| m["totalRows"] == 100));
+        let sent: u64 = messages
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|m| decode(m))
+            .filter(|m| m["type"] == "rows")
+            .map(|m| m["rowCount"].as_u64().unwrap())
+            .sum();
+        assert_eq!(sent, 150);
+    }
+
+    #[test]
+    fn a_dead_listener_closes_the_sink_past_the_cap() {
+        let (send, _messages) = collect();
+        let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let flag = alive.clone();
+        let mut sink = StreamSink::new(send, 10).with_alive(Arc::new(move || {
+            flag.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+        sink.begin(&[Column::new("n", "")]);
+        let mut read = 0u64;
+        for i in 0..1_000_000u64 {
+            if i == 5_000 {
+                alive.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            if sink.keeping() {
+                sink.cell(Some("1"));
+            }
+            sink.end_row();
+            read += 1;
+            if !sink.is_open() {
+                break;
+            }
+        }
+        assert!(read < 5_000 + ALIVE_EVERY + 1, "read {read}");
+    }
+
+    #[test]
+    fn slow_rows_flush_after_the_wait() {
+        let (send, messages) = collect();
+        let mut sink = StreamSink::new(send, STREAM_ROW_CAP);
+        sink.begin(&[Column::new("n", "")]);
+        sink.cell(Some("1"));
+        sink.end_row();
+        std::thread::sleep(std::time::Duration::from_millis(FLUSH_MS as u64 + 20));
+        sink.cell(Some("2"));
+        sink.end_row();
+        let rows = messages
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|m| decode(m))
+            .filter(|m| m["type"] == "rows")
+            .count();
+        assert_eq!(rows, 1);
+    }
+}

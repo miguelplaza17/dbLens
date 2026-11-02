@@ -8,3 +8,10 @@ xcuserdata/
 /shots/
 /dist/
 CLAUDE.local.md
+
+# desktop (Tauri)
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+*.tsbuildinfo

@@ -1,0 +1,198 @@
+// The app settings (src-tauri/src/settings.rs): read, change, and follow them
+// live. Rust keeps them in settings.json and sends every change to all windows
+// (event "settings-changed"), so the theme and accent change everywhere at once.
+// In a plain browser (vite dev) they live in localStorage and travel between
+// tabs over a BroadcastChannel.
+
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { inTauri } from "../api";
+import { applyAccent, type AccentId } from "./accents";
+import { setEngineIconPrefs, type EngineIconPref } from "../engineIcons";
+
+export type Appearance = "system" | "light" | "dark";
+
+export interface Settings {
+  appearance: Appearance;
+  accent: AccentId;
+  checkForUpdates: boolean;
+  updateAutomatically: boolean;
+  /** Per kind of database (postgres, mysql…): logo or symbol, and its color. */
+  engineIcons: Record<string, EngineIconPref>;
+}
+
+export interface SettingsInfo {
+  version: string;
+  /** This program, for `<path> --mcp`. */
+  executable: string;
+  /** null: nothing on disk (DBLENS_STORE=memory). */
+  dataFolder: string | null;
+  os: "macos" | "windows" | "linux" | string;
+}
+
+export const SETTINGS_EVENT = "settings-changed";
+
+const defaults: Settings = {
+  appearance: "system",
+  accent: "system",
+  checkForUpdates: true,
+  updateAutomatically: false,
+  engineIcons: {},
+};
+
+// MARK: - Browser stand-in
+
+const MOCK_KEY = "dblens.mockSettings";
+const channel = !inTauri && typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("dblens-settings") : null;
+const localListeners = new Set<(s: Settings) => void>();
+
+function mockRead(): Settings {
+  try {
+    const text = localStorage.getItem(MOCK_KEY);
+    return text ? { ...defaults, ...(JSON.parse(text) as Partial<Settings>) } : { ...defaults };
+  } catch {
+    return { ...defaults };
+  }
+}
+
+function mockWrite(next: Settings) {
+  try {
+    localStorage.setItem(MOCK_KEY, JSON.stringify(next));
+  } catch {
+    // Private window: the change still reaches this tab.
+  }
+  channel?.postMessage(next);
+  for (const listener of localListeners) listener(next);
+}
+
+// MARK: - Commands
+
+export function getSettings(): Promise<Settings> {
+  if (!inTauri) return Promise.resolve(mockRead());
+  return invoke<Settings>("get_settings");
+}
+
+/** Changes some settings; every window hears about it. */
+export function setSettings(patch: Partial<Settings>): Promise<Settings> {
+  if (!inTauri) {
+    const next = { ...mockRead(), ...patch };
+    mockWrite(next);
+    return Promise.resolve(next);
+  }
+  return invoke<Settings>("set_settings", { patch });
+}
+
+export function settingsInfo(): Promise<SettingsInfo> {
+  if (!inTauri) {
+    return Promise.resolve({ version: "0.1.0", executable: "/usr/bin/dblens", dataFolder: "~/.local/share/dblens", os: "linux" });
+  }
+  return invoke<SettingsInfo>("settings_info");
+}
+
+/** Opens the Settings window, or brings it to the front. */
+export function openSettings(title: string): Promise<void> {
+  if (!inTauri) {
+    window.open(`${location.pathname}?window=settings`, "dblens-settings", "width=720,height=520");
+    return Promise.resolve();
+  }
+  return invoke<void>("open_settings", { title });
+}
+
+/** Sizes the Settings window to `height` CSS pixels of content. */
+export function fitSettings(height: number): Promise<void> {
+  if (!inTauri) return Promise.resolve();
+  return invoke<void>("fit_settings", { height });
+}
+
+/** Opens the data folder in the file manager. */
+export function showDataFolder(): Promise<void> {
+  if (!inTauri) return Promise.resolve();
+  return invoke<void>("show_data_folder");
+}
+
+/** Calls `listener` with every change, from any window. Returns the unsubscribe. */
+export function onSettings(listener: (s: Settings) => void): () => void {
+  if (!inTauri) {
+    localListeners.add(listener);
+    const onMessage = (event: MessageEvent<Settings>) => listener(event.data);
+    channel?.addEventListener("message", onMessage);
+    return () => {
+      localListeners.delete(listener);
+      channel?.removeEventListener("message", onMessage);
+    };
+  }
+  let stop: (() => void) | null = null;
+  let gone = false;
+  void listen<Settings>(SETTINGS_EVENT, (event) => listener(event.payload)).then((unlisten) => {
+    if (gone) unlisten();
+    else stop = unlisten;
+  });
+  return () => {
+    gone = true;
+    stop?.();
+  };
+}
+
+// MARK: - Applying them
+
+const darkQuery = typeof matchMedia === "function" ? matchMedia("(prefers-color-scheme: dark)") : null;
+
+/** "light" or "dark": the appearance, with "system" resolved from the OS. */
+export function effectiveTheme(appearance: Appearance): "light" | "dark" {
+  if (appearance === "system") return darkQuery?.matches === false ? "light" : "dark";
+  return appearance;
+}
+
+const THEME_MIGRATED = "dblens.themeMigrated";
+
+/**
+ * Once: before settings.json existed the theme lived only in localStorage
+ * ("theme"). A user who had picked light would otherwise get the default dark,
+ * so that choice becomes the appearance, unless one was already set.
+ */
+async function migrateTheme(s: Settings): Promise<Settings> {
+  try {
+    if (localStorage.getItem(THEME_MIGRATED)) return s;
+    localStorage.setItem(THEME_MIGRATED, "1");
+    if (s.appearance === defaults.appearance && localStorage.getItem("theme") === "light") {
+      return await setSettings({ appearance: "light" });
+    }
+  } catch {
+    // No storage or a failed save: keep what was read.
+  }
+  return s;
+}
+
+/**
+ * Follows the settings in this window: the accent at once, and the theme
+ * through `setTheme` (the main window keeps it in its model; the Settings
+ * window sets data-theme itself). A `?theme=` in the URL (screenshots) wins.
+ * Returns the unsubscribe.
+ */
+export function followSettings(setTheme: (theme: "light" | "dark") => void, onChange?: (s: Settings) => void): () => void {
+  const forced = new URLSearchParams(location.search).get("theme");
+  let appearance: Appearance = "system";
+  const apply = (s: Settings) => {
+    appearance = s.appearance;
+    applyAccent(s.accent);
+    setEngineIconPrefs(s.engineIcons);
+    if (!forced) setTheme(effectiveTheme(s.appearance));
+    onChange?.(s);
+  };
+  let stopped = false;
+  void getSettings()
+    .then(migrateTheme)
+    .then((s) => {
+      if (!stopped) apply(s);
+    });
+  const stop = onSettings(apply);
+  const onSystem = () => {
+    if (appearance === "system" && !forced) setTheme(effectiveTheme("system"));
+  };
+  darkQuery?.addEventListener("change", onSystem);
+  return () => {
+    stopped = true;
+    stop();
+    darkQuery?.removeEventListener("change", onSystem);
+  };
+}
