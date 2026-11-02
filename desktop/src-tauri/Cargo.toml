@@ -67,3 +67,11 @@ codegen-units = 1
 lto = true
 opt-level = 3
 strip = true
+
+# Smaller debug builds: line tables are enough for backtraces, and the full
+# debug info of the driver crates filled the disk.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
