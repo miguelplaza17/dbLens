@@ -12,6 +12,7 @@ pub mod import_swift;
 pub mod menu;
 pub mod pool;
 pub mod session;
+pub mod settings;
 pub mod sql_script;
 pub mod ssh;
 pub mod store;
@@ -39,6 +40,7 @@ pub fn run() {
         .manage(commands::AppState::default())
         .manage(windows::PendingOpen::default())
         .manage(close_guard::CloseGuard::default())
+        .manage(settings::SettingsState::from_env())
         .setup(|app| {
             menu::install(app.handle())?;
             windows::queue_launch_args(app.handle());
@@ -118,6 +120,12 @@ pub fn run() {
             commands::delete_folder,
             commands::set_folder_expanded,
             import_swift::import_swift_connections,
+            settings::get_settings,
+            settings::set_settings,
+            settings::settings_info,
+            settings::open_settings,
+            settings::fit_settings,
+            settings::show_data_folder,
         ])
         .build(tauri::generate_context!())
         .expect("error while building dbLens");

@@ -60,6 +60,8 @@ plist = "1"
 # Open SQLite File, and one running app on Windows and Linux.
 tauri-plugin-window-state = "2"
 tauri-plugin-dialog = "2"
+# Settings > Data & Privacy > Show Data Folder (src/settings.rs).
+tauri-plugin-opener = "2"
 
 # ssh children die with the app: PR_SET_PDEATHSIG on Linux, a kill-on-close
 # Job Object on Windows (both already in the dependency tree).

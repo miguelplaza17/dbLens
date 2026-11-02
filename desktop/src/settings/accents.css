@@ -1,0 +1,215 @@
+/* Part of the theme: the accent colors people pick in Settings > Appearance,
+   from Theme.all in Sources/dbLens/UI/Theme.swift (light, base and deep shades).
+   The accent is html.accent-<id> (src/settings/accents.ts); without one the
+   accent in theme.css stays ("System"). Like Theme.swift: --accent is the base
+   shade; --accent-text is the light shade on dark and the deep shade on light,
+   so accent-colored text reads on both; --on-accent is dark ink for the bright
+   accents (yellow, mint, teal), white for the rest. Generated from the Swift
+   table; keep the ids in step with src-tauri/src/settings.rs (ACCENTS). */
+:root {
+  --on-accent-dark-ink: #16161c;
+}
+html.accent-elephant {
+  --accent: #3d7dca;
+  --on-accent: #ffffff;
+  --accent-text: #8dbdf0;
+  --accent-soft: rgba(61, 125, 202, 0.22);
+  --accent-faint: rgba(61, 125, 202, 0.12);
+}
+html.accent-elephant[data-theme="light"] {
+  --accent: #3d7dca;
+  --on-accent: #ffffff;
+  --accent-text: #336791;
+  --accent-soft: rgba(61, 125, 202, 0.18);
+  --accent-faint: rgba(61, 125, 202, 0.08);
+}
+html.accent-blue {
+  --accent: #0a84ff;
+  --on-accent: #ffffff;
+  --accent-text: #7cc0ff;
+  --accent-soft: rgba(10, 132, 255, 0.22);
+  --accent-faint: rgba(10, 132, 255, 0.12);
+}
+html.accent-blue[data-theme="light"] {
+  --accent: #0a84ff;
+  --on-accent: #ffffff;
+  --accent-text: #0064d2;
+  --accent-soft: rgba(10, 132, 255, 0.18);
+  --accent-faint: rgba(10, 132, 255, 0.08);
+}
+html.accent-indigo {
+  --accent: #5e6ad2;
+  --on-accent: #ffffff;
+  --accent-text: #a5adff;
+  --accent-soft: rgba(94, 106, 210, 0.22);
+  --accent-faint: rgba(94, 106, 210, 0.12);
+}
+html.accent-indigo[data-theme="light"] {
+  --accent: #5e6ad2;
+  --on-accent: #ffffff;
+  --accent-text: #4650b8;
+  --accent-soft: rgba(94, 106, 210, 0.18);
+  --accent-faint: rgba(94, 106, 210, 0.08);
+}
+html.accent-violet {
+  --accent: #7b5cff;
+  --on-accent: #ffffff;
+  --accent-text: #b9a6ff;
+  --accent-soft: rgba(123, 92, 255, 0.22);
+  --accent-faint: rgba(123, 92, 255, 0.12);
+}
+html.accent-violet[data-theme="light"] {
+  --accent: #7b5cff;
+  --on-accent: #ffffff;
+  --accent-text: #6342e6;
+  --accent-soft: rgba(123, 92, 255, 0.18);
+  --accent-faint: rgba(123, 92, 255, 0.08);
+}
+html.accent-pink {
+  --accent: #e84a93;
+  --on-accent: #ffffff;
+  --accent-text: #ff9ccb;
+  --accent-soft: rgba(232, 74, 147, 0.22);
+  --accent-faint: rgba(232, 74, 147, 0.12);
+}
+html.accent-pink[data-theme="light"] {
+  --accent: #e84a93;
+  --on-accent: #ffffff;
+  --accent-text: #c0306f;
+  --accent-soft: rgba(232, 74, 147, 0.18);
+  --accent-faint: rgba(232, 74, 147, 0.08);
+}
+html.accent-red {
+  --accent: #e11d48;
+  --on-accent: #ffffff;
+  --accent-text: #ff8a9a;
+  --accent-soft: rgba(225, 29, 72, 0.22);
+  --accent-faint: rgba(225, 29, 72, 0.12);
+}
+html.accent-red[data-theme="light"] {
+  --accent: #e11d48;
+  --on-accent: #ffffff;
+  --accent-text: #be123c;
+  --accent-soft: rgba(225, 29, 72, 0.18);
+  --accent-faint: rgba(225, 29, 72, 0.08);
+}
+html.accent-orange {
+  --accent: #f97316;
+  --on-accent: #ffffff;
+  --accent-text: #ffb87a;
+  --accent-soft: rgba(249, 115, 22, 0.22);
+  --accent-faint: rgba(249, 115, 22, 0.12);
+}
+html.accent-orange[data-theme="light"] {
+  --accent: #f97316;
+  --on-accent: #ffffff;
+  --accent-text: #c2410c;
+  --accent-soft: rgba(249, 115, 22, 0.18);
+  --accent-faint: rgba(249, 115, 22, 0.08);
+}
+html.accent-yellow {
+  --accent: #f5b800;
+  --on-accent: var(--on-accent-dark-ink);
+  --accent-text: #ffe17a;
+  --accent-soft: rgba(245, 184, 0, 0.22);
+  --accent-faint: rgba(245, 184, 0, 0.12);
+}
+html.accent-yellow[data-theme="light"] {
+  --accent: #f5b800;
+  --on-accent: var(--on-accent-dark-ink);
+  --accent-text: #946800;
+  --accent-soft: rgba(245, 184, 0, 0.18);
+  --accent-faint: rgba(245, 184, 0, 0.08);
+}
+html.accent-mint {
+  --accent: #2bc48a;
+  --on-accent: var(--on-accent-dark-ink);
+  --accent-text: #8eebc4;
+  --accent-soft: rgba(43, 196, 138, 0.22);
+  --accent-faint: rgba(43, 196, 138, 0.12);
+}
+html.accent-mint[data-theme="light"] {
+  --accent: #2bc48a;
+  --on-accent: var(--on-accent-dark-ink);
+  --accent-text: #0f7a55;
+  --accent-soft: rgba(43, 196, 138, 0.18);
+  --accent-faint: rgba(43, 196, 138, 0.08);
+}
+html.accent-teal {
+  --accent: #06b6d4;
+  --on-accent: var(--on-accent-dark-ink);
+  --accent-text: #8be9f5;
+  --accent-soft: rgba(6, 182, 212, 0.22);
+  --accent-faint: rgba(6, 182, 212, 0.12);
+}
+html.accent-teal[data-theme="light"] {
+  --accent: #06b6d4;
+  --on-accent: var(--on-accent-dark-ink);
+  --accent-text: #0e7490;
+  --accent-soft: rgba(6, 182, 212, 0.18);
+  --accent-faint: rgba(6, 182, 212, 0.08);
+}
+html.accent-graphite {
+  --accent: #7c7c84;
+  --on-accent: #ffffff;
+  --accent-text: #c7c7cc;
+  --accent-soft: rgba(124, 124, 132, 0.22);
+  --accent-faint: rgba(124, 124, 132, 0.12);
+}
+html.accent-graphite[data-theme="light"] {
+  --accent: #7c7c84;
+  --on-accent: #ffffff;
+  --accent-text: #55555c;
+  --accent-soft: rgba(124, 124, 132, 0.18);
+  --accent-faint: rgba(124, 124, 132, 0.08);
+}
+
+/* The picker's dots (src/settings/SettingsApp.tsx). */
+.swatch-system {
+  --swatch: conic-gradient(#ff453a, #ff9f0a, #ffd60a, #32d74b, #0a84ff, #bf5af2, #ff375f, #ff453a);
+  --swatch-mark: #ffffff;
+}
+.swatch-elephant {
+  --swatch: #3d7dca;
+  --swatch-mark: #ffffff;
+}
+.swatch-blue {
+  --swatch: #0a84ff;
+  --swatch-mark: #ffffff;
+}
+.swatch-indigo {
+  --swatch: #5e6ad2;
+  --swatch-mark: #ffffff;
+}
+.swatch-violet {
+  --swatch: #7b5cff;
+  --swatch-mark: #ffffff;
+}
+.swatch-pink {
+  --swatch: #e84a93;
+  --swatch-mark: #ffffff;
+}
+.swatch-red {
+  --swatch: #e11d48;
+  --swatch-mark: #ffffff;
+}
+.swatch-orange {
+  --swatch: #f97316;
+  --swatch-mark: #ffffff;
+}
+.swatch-yellow {
+  --swatch: #f5b800;
+  --swatch-mark: var(--on-accent-dark-ink);
+}
+.swatch-mint {
+  --swatch: #2bc48a;
+  --swatch-mark: var(--on-accent-dark-ink);
+}
+.swatch-teal {
+  --swatch: #06b6d4;
+  --swatch-mark: var(--on-accent-dark-ink);
+}
+.swatch-graphite {
+  --swatch: #7c7c84;
+  --swatch-mark: #ffffff;
+}
