@@ -1,10 +1,11 @@
-# dbLens
+# dbLens for Windows and Linux
 
-A fast, minimal database client for Windows, Linux and macOS: paste a connection
+A fast, minimal database client: paste a connection
 string, click a table, see and edit the rows, run SQL. PostgreSQL, MySQL/MariaDB,
-SQLite, Redis/Valkey and MongoDB. Built with Tauri 2 (Rust + React). This is the
-only dbLens from now on: the Swift macOS app in the repo root is discontinued
-(see [docs/MIGRATION.md](docs/MIGRATION.md)).
+SQLite, Redis/Valkey and MongoDB. Built with Tauri 2 (Rust + React). On the Mac,
+dbLens is the native SwiftUI app in the repository root; this app also builds
+on macOS (for development and checks) but is released for Windows and Linux.
+[docs/MIGRATION.md](docs/MIGRATION.md) compares the two.
 
 Every engine works against real servers; the app is built and run on Linux. See
 "Status" below, and [CONTRACT.md](CONTRACT.md) for the architecture.

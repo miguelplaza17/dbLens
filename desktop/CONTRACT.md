@@ -1,7 +1,7 @@
 # dbLens desktop: the contract
 
-dbLens in Tauri 2, for Windows, Linux and macOS: the only dbLens from now on
-(the Swift app in the repo root is discontinued). Paste a connection string,
+dbLens in Tauri 2, released for Windows and Linux (it also builds on macOS,
+where the Swift app in the repo root is the released one). Paste a connection string,
 click a table, see and edit rows, run SQL. Fast, minimal: per window, sidebar |
 grid | foldable SQL panel; as many windows as you like.
 

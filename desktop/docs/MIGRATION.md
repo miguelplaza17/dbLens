@@ -1,5 +1,9 @@
 # Migration: discontinuing the Swift app
 
+> **Superseded (2026-11-02):** the Swift app stays the dbLens for the Mac, and this
+> Tauri app is released for Windows and Linux only. The lists below still show what
+> the Tauri app lacks compared with the Swift app.
+
 Checklist for replacing the macOS Swift app (`Sources/`, `build.sh`, `tools/release.sh`)
 with the Tauri app in `desktop/`, which becomes the only dbLens on Windows, Linux and macOS.
 

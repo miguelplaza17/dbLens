@@ -5,7 +5,7 @@
 <h1 align="center">dbLens</h1>
 
 <p align="center">
-  A fast, minimal database client for the Mac.<br>
+  A fast, minimal database client for the Mac, Windows and Linux.<br>
   Paste a URL, click a table, see the rows. That's it.
 </p>
 
@@ -74,6 +74,23 @@ Download the latest `dbLens-x.y.z.dmg` from [Releases](../../releases), open it,
 **dbLens** to Applications. It is signed and notarized by Apple.
 
 Requirements: macOS 26 or later on Apple silicon.
+
+## Windows and Linux
+
+dbLens for Windows and Linux is its own app, built with [Tauri 2](https://tauri.app)
+(Rust + React) in [`desktop/`](desktop/): the same idea, the same five databases, the
+grid, the SQL panel with Rehearse and All or Nothing, the schema board, SSH tunnels and
+the MCP server (`dblens --mcp`). Download it from the
+[Releases](../../releases) tagged `desktop-v…`:
+
+| System | File |
+| --- | --- |
+| Windows 10 and 11 | `dbLens_x.y.z_x64-setup.exe` or `dbLens_x.y.z_x64_en-US.msi` |
+| Linux (x86_64) | `.deb` (Debian, Ubuntu), `.rpm` (Fedora), or `.AppImage` (any) |
+
+Build it with Rust and Node.js: `cd desktop && npm install && npm run tauri build`.
+Requirements, tests and status are in [desktop/README.md](desktop/README.md); what it
+still lacks compared with the Mac app is in [desktop/docs/MIGRATION.md](desktop/docs/MIGRATION.md).
 
 ## Build from source
 
