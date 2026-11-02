@@ -1,7 +1,10 @@
-//! The JSON the frontend receives. `src/api.ts` mirrors these keys and enum
-//! spellings; when this test changes, change api.ts with it.
+//! What the frontend receives: MessagePack for table data (`wire.rs`), JSON
+//! for the rest. `src/api.ts` mirrors these keys and enum spellings; when this
+//! test changes, change api.ts with it.
 
-use dblens_lib::commands::{AtomicOutcome, ConnectInfo};
+use std::sync::{Arc, Mutex};
+
+use dblens_lib::commands::ConnectInfo;
 use dblens_lib::connector::Summary;
 use dblens_lib::engine::Engine;
 use dblens_lib::session::{
@@ -10,6 +13,7 @@ use dblens_lib::session::{
 };
 use dblens_lib::ssh::SshConfig;
 use dblens_lib::store::{ConnectionFolder, SavedConnection, StoreSnapshot};
+use dblens_lib::wire::{self, StreamSink};
 use serde_json::{json, Value};
 
 fn keys(value: &Value) -> Vec<String> {
@@ -40,11 +44,80 @@ fn result() -> QueryResult {
     }
 }
 
+/// MessagePack bytes as a JSON value, the way @msgpack/msgpack decodes them.
+fn decode(bytes: &[u8]) -> Value {
+    rmp_serde::from_slice(bytes).expect("valid MessagePack")
+}
+
 #[test]
-fn query_result_and_execution() {
-    let v = serde_json::to_value(result()).unwrap();
+fn result_blocks_are_messagepack_and_column_major() {
+    // `page`, `page_block`: a block (api.ts `ResultBlock`).
+    let v = decode(&wire::block(&result(), 400));
     assert_eq!(
         keys(&v),
+        sorted(&[
+            "columns",
+            "data",
+            "rowCount",
+            "offset",
+            "command",
+            "truncated",
+            "totalRows",
+            "keys",
+            "note"
+        ])
+    );
+    assert_eq!(v["columns"][0], json!({"name": "id", "type": "int4"}));
+    // One array per column; integers that JS holds exactly arrive as numbers.
+    assert_eq!(v["data"], json!([[1, null]]));
+    assert_eq!(v["rowCount"], 2);
+    assert_eq!(v["offset"], 400);
+    assert_eq!(v["totalRows"], 2);
+    assert_eq!(v["note"], Value::Null);
+    // Keys: column-major too, always strings (sent back exactly as they came).
+    assert_eq!(
+        v["keys"],
+        json!({"columns": ["id"], "kind": "primaryKey", "data": [["1"]]})
+    );
+    // Text that only looks like a number stays text.
+    let mut text = result();
+    text.rows = vec![
+        vec![Some("007".into())],
+        vec![Some("9007199254740993".into())],
+    ];
+    assert_eq!(
+        decode(&wire::block(&text, 0))["data"],
+        json!([["007", "9007199254740993"]])
+    );
+
+    // `execute`, `read_only`, `rehearse`: an execution of blocks.
+    let e = decode(&wire::execution(&Execution {
+        results: vec![result(), QueryResult::command("UPDATE 1", 1)],
+        duration_ms: 1.5,
+    }));
+    assert_eq!(keys(&e), sorted(&["results", "durationMs"]));
+    assert_eq!(e["durationMs"], 1.5);
+    assert_eq!(e["results"][1]["columns"], json!([]));
+    assert_eq!(e["results"][1]["data"], json!([]));
+    assert_eq!(e["results"][1]["totalRows"], 1);
+    assert_eq!(e["results"][1]["keys"], Value::Null);
+
+    // `execute_atomically`.
+    let ran = decode(&wire::atomic_ran(&Execution {
+        results: vec![],
+        duration_ms: 0.0,
+    }));
+    assert_eq!(ran["kind"], "ran");
+    assert_eq!(keys(&ran["execution"]), sorted(&["results", "durationMs"]));
+    assert_eq!(
+        decode(&wire::atomic_refused("no")),
+        json!({"kind": "notAtomic", "message": "no"})
+    );
+
+    // `export_result` still takes a QueryResult as JSON (row-major).
+    let j = serde_json::to_value(result()).unwrap();
+    assert_eq!(
+        keys(&j),
         sorted(&[
             "columns",
             "rows",
@@ -55,34 +128,51 @@ fn query_result_and_execution() {
             "note"
         ])
     );
-    assert_eq!(v["columns"][0], json!({"name": "id", "type": "int4"}));
-    assert_eq!(v["rows"][1][0], Value::Null);
-    assert_eq!(v["keys"]["kind"], "primaryKey");
+    assert_eq!(j["rows"][1][0], Value::Null);
     for (kind, text) in [(RowKeyKind::Ctid, "ctid"), (RowKeyKind::Rowid, "rowid")] {
         assert_eq!(serde_json::to_value(kind).unwrap(), text);
     }
+}
 
-    let e = serde_json::to_value(Execution {
-        results: vec![result()],
-        duration_ms: 1.5,
-    })
-    .unwrap();
-    assert_eq!(keys(&e), sorted(&["results", "durationMs"]));
-
-    let ran = serde_json::to_value(AtomicOutcome::Ran {
-        execution: Execution {
-            results: vec![],
-            duration_ms: 0.0,
-        },
-    })
-    .unwrap();
-    assert_eq!(ran["kind"], "ran");
-    assert!(ran.get("execution").is_some());
-    let not = serde_json::to_value(AtomicOutcome::NotAtomic {
-        message: "no".into(),
-    })
-    .unwrap();
-    assert_eq!(not, json!({"kind": "notAtomic", "message": "no"}));
+#[test]
+fn stream_messages() {
+    let messages = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let kept = messages.clone();
+    let mut sink = StreamSink::new(
+        Arc::new(move |m| {
+            kept.lock().unwrap().push(m);
+            true
+        }),
+        wire::STREAM_ROW_CAP,
+    );
+    sink.send_result(&result());
+    sink.command("UPDATE 3", 3);
+    sink.done(2.5, Some(&DbError::Cancelled));
+    let all: Vec<Value> = messages.lock().unwrap().iter().map(|m| decode(m)).collect();
+    assert_eq!(keys(&all[0]), sorted(&["type", "result", "columns"]));
+    assert_eq!(all[0]["type"], "columns");
+    assert_eq!(all[0]["columns"][0], json!({"name": "id", "type": "int4"}));
+    assert_eq!(
+        keys(&all[1]),
+        sorted(&["type", "result", "offset", "rowCount", "data"])
+    );
+    assert_eq!(all[1]["type"], "rows");
+    assert_eq!(all[1]["data"], json!([[1, null]]));
+    assert_eq!(
+        keys(&all[2]),
+        sorted(&["type", "result", "command", "totalRows", "truncated"])
+    );
+    assert_eq!(all[2]["type"], "end");
+    assert_eq!(all[2]["result"], 0);
+    assert_eq!(all[3]["type"], "end");
+    assert_eq!(all[3]["result"], 1);
+    assert_eq!(all[3]["totalRows"], 3);
+    assert_eq!(
+        keys(&all[4]),
+        sorted(&["type", "durationMs", "error", "cancelled"])
+    );
+    assert_eq!(all[4]["error"], "The query was canceled.");
+    assert_eq!(all[4]["cancelled"], true);
 }
 
 #[test]
@@ -261,4 +351,50 @@ fn connections() {
         keys(&snap["folders"][0]),
         sorted(&["id", "name", "expanded"])
     );
+}
+
+/// With `DBLENS_WIRE_FIXTURES=<dir>`, writes the bytes the front end receives
+/// (a block, an execution, a stream) so `@msgpack/msgpack` can be checked
+/// against them from Node (desktop/docs/PERF.md, "Contract check").
+#[test]
+fn writes_fixtures_for_the_front_end() {
+    let Some(dir) = std::env::var_os("DBLENS_WIRE_FIXTURES") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut wide = result();
+    wide.columns.push(Column::new("t", "text"));
+    for row in &mut wide.rows {
+        row.push(Some("ünï \"q\" 007".into()));
+    }
+    wide.rows.push(vec![Some("9007199254740993".into()), None]);
+    wide.rows
+        .push(vec![Some("-42".into()), Some(String::new())]);
+    wide.total_rows = 4;
+    wide.keys = None;
+    std::fs::write(dir.join("block.msgpack"), wire::block(&wide, 400)).unwrap();
+    std::fs::write(
+        dir.join("execution.msgpack"),
+        wire::execution(&Execution {
+            results: vec![wide.clone(), QueryResult::command("UPDATE 1", 1)],
+            duration_ms: 1.5,
+        }),
+    )
+    .unwrap();
+    let messages = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let kept = messages.clone();
+    let mut sink = StreamSink::new(
+        Arc::new(move |m| {
+            kept.lock().unwrap().push(m);
+            true
+        }),
+        wire::STREAM_ROW_CAP,
+    );
+    sink.send_result(&wide);
+    sink.command("UPDATE 3", 3);
+    sink.done(2.5, None);
+    for (i, m) in messages.lock().unwrap().iter().enumerate() {
+        std::fs::write(dir.join(format!("stream-{i}.msgpack")), m).unwrap();
+    }
 }

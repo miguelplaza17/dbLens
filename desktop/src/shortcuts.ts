@@ -1,12 +1,18 @@
 // Every action's keyboard shortcut, in one table. The window's key handler
-// (App.tsx) and the button tooltips read it; the native menu (a later step)
-// will be built from it too. "Mod" is Ctrl on Windows and Linux, Cmd on macOS.
+// (App.tsx) and the button tooltips read it; the native menu
+// is built from it too (shortcuts.json). "Mod" is Ctrl on Windows and Linux, Cmd on macOS.
 
 import { t } from "./i18n";
+import table from "./shortcuts.json";
 
 export type Action =
   | "newConnection"
+  | "newWindow"
+  | "openFile"
+  | "importSwift"
+  | "closeWindow"
   | "disconnect"
+  | "settings"
   | "refresh"
   | "toggleSidebar"
   | "toggleSQLPanel"
@@ -16,49 +22,44 @@ export type Action =
   | "nextPage"
   | "newRow"
   | "deleteRows"
+  | "saveChanges"
+  | "revertChanges"
+  | "setNull"
+  | "copySelection"
   | "copyRows"
   | "run"
   | "rehearse"
   | "runAtomically"
   | "cancel"
-  | "toggleTheme";
+  | "freezeFirstColumn"
+  | "toggleTheme"
+  | "perfHud"
+  | "showShortcuts";
 
 export interface Shortcut {
   action: Action;
-  /** Like "Mod+Shift+N"; keys are KeyboardEvent.key values, letters upper case. */
+  /** Like "Mod+Shift+N"; keys are KeyboardEvent.key values, letters upper case. Empty: menu only. */
   keys: string;
   /** English source text; show it through t(). */
   title: string;
+  /** The native menu's wording when it differs from the title. */
+  menu?: string;
   /** True when the key works while typing in a text field or the editor. */
   inFields?: boolean;
+  /** Only on this OS (the menu leaves it out elsewhere). */
+  os?: "mac";
 }
 
-export const shortcuts: Shortcut[] = [
-  { action: "newConnection", keys: "Mod+N", title: "New Connection…", inFields: true },
-  { action: "disconnect", keys: "Mod+Shift+W", title: "Disconnect", inFields: true },
-  { action: "refresh", keys: "Mod+R", title: "Reload", inFields: true },
-  { action: "toggleSidebar", keys: "Mod+B", title: "Show or Hide the Sidebar", inFields: true },
-  { action: "toggleSQLPanel", keys: "Mod+Shift+Y", title: "Show or Hide the SQL Panel", inFields: true },
-  { action: "filterTables", keys: "Mod+Shift+F", title: "Filter Tables", inFields: true },
-  { action: "searchRows", keys: "Mod+F", title: "Search rows", inFields: true },
-  { action: "previousPage", keys: "Mod+Alt+[", title: "Previous page", inFields: true },
-  { action: "nextPage", keys: "Mod+Alt+]", title: "Next page", inFields: true },
-  { action: "newRow", keys: "Mod+Shift+N", title: "New Row", inFields: true },
-  { action: "deleteRows", keys: "Delete", title: "Delete Row…" },
-  { action: "copyRows", keys: "Mod+Shift+C", title: "Copy All", inFields: true },
-  { action: "run", keys: "Mod+Enter", title: "Run", inFields: true },
-  { action: "rehearse", keys: "Mod+Alt+Enter", title: "Rehearse", inFields: true },
-  { action: "runAtomically", keys: "Mod+Shift+Enter", title: "Run All or Nothing", inFields: true },
-  { action: "cancel", keys: "Mod+.", title: "Cancel", inFields: true },
-  { action: "toggleTheme", keys: "Mod+Shift+L", title: "Light or Dark", inFields: true },
-];
-
+// shortcuts.json is also compiled into the Rust side (src-tauri/src/menu.rs),
+// which builds the native menu's accelerators from the same rows.
 export const isMac = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+
+export const shortcuts: Shortcut[] = (table as Shortcut[]).filter((s) => !s.os || (s.os === "mac" && isMac));
 
 /** The keys as the person sees them: "Ctrl+Shift+N", or "⇧⌘N" on a Mac. */
 export function keyLabel(action: Action): string {
   const shortcut = shortcuts.find((s) => s.action === action);
-  if (!shortcut) return "";
+  if (!shortcut?.keys) return "";
   const parts = shortcut.keys.split("+");
   if (isMac) {
     const symbols: Record<string, string> = { Mod: "⌘", Shift: "⇧", Alt: "⌥", Enter: "↩", Delete: "⌫" };
@@ -72,14 +73,15 @@ export function keyLabel(action: Action): string {
 
 /** "Run (Ctrl+Enter)": a tooltip with the shortcut. */
 export function withKeys(text: string, action: Action): string {
-  return `${text} (${keyLabel(action)})`;
+  const label = keyLabel(action);
+  return label ? `${text} (${label})` : text;
 }
 
 /** The action a key press is for, or null. `typing` is true in a text field or the editor. */
 export function actionFor(event: KeyboardEvent, typing: boolean): Action | null {
   const mod = isMac ? event.metaKey : event.ctrlKey;
   for (const s of shortcuts) {
-    if (typing && !s.inFields) continue;
+    if (!s.keys || (typing && !s.inFields)) continue;
     const parts = s.keys.split("+");
     const key = parts[parts.length - 1];
     if (parts.includes("Mod") !== mod) continue;
@@ -100,5 +102,5 @@ function sameKey(event: KeyboardEvent, key: string): boolean {
 
 /** The table of shortcuts, translated, for a help sheet. */
 export function shortcutList(): Array<{ title: string; keys: string }> {
-  return shortcuts.map((s) => ({ title: t(s.title), keys: keyLabel(s.action) }));
+  return shortcuts.filter((s) => s.keys).map((s) => ({ title: t(s.title), keys: keyLabel(s.action) }));
 }

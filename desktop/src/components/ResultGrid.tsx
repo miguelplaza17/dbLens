@@ -1,376 +1,658 @@
-// The grid: any number of rows, drawn only where they are on screen. Click a
-// row to select it (Shift and Ctrl/Cmd extend), click a header to sort,
-// drag a header's edge to resize, double-click a cell to edit it in place,
-// double-click a row number to open the row (ResultGrid.swift).
+// The grid: a canvas (Glide Data Grid) that draws only the cells on screen.
+// A table's rows come a block at a time from src/grid/blocks.ts as the grid
+// scrolls; a query result is the block the run streamed in. Click a header to
+// sort, drag its edge to resize; type or double-click on a cell to edit it
+// (the change waits, highlighted, until the row is saved: moving to another
+// row or Ctrl/Cmd+S); Escape reverts the row (ResultGrid.swift).
 
+import "@glideapps/glide-data-grid/dist/index.css";
+import "../grid/grid.css";
+import {
+  CompactSelection,
+  DataEditorCore,
+  GridCellKind,
+  ImageWindowLoaderImpl,
+  loadingCellRenderer,
+  markerCellRenderer,
+  newRowCellRenderer,
+  textCellRenderer,
+  type DataEditorCoreProps,
+  type DataEditorRef,
+  type DrawHeaderCallback,
+  type EditableGridCell,
+  type GridCell,
+  type GridColumn,
+  type GridSelection,
+  type Item,
+  type Rectangle,
+  type Theme,
+} from "@glideapps/glide-data-grid";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { Cell, ColumnSort, QueryResult } from "../api";
+import type { ColumnSort } from "../api";
 import { copyText, tsv } from "../format";
-import { formatNumber, t } from "../i18n";
+import { t } from "../i18n";
 import { isMac } from "../shortcuts";
-import { Icon } from "./Icon";
+import { CellEditor, isDbCell, typeAhead, type DbCell } from "../grid/CellEditor";
+import type { Change, GridData } from "../grid/blocks";
+import { registerGrid, SET_NULL_EVENT, type GridCommand } from "../grid/commands";
+import { dispatch } from "../native/actions";
+import { markFirstRows, recordScroll } from "../grid/perf";
+import { readGridColors, type GridColors } from "../grid/theme";
 
 /** Matches --row-height in theme.css. */
 const ROW = 24;
-/** Rows drawn above and below the visible ones, so fast scrolling stays filled in. */
-const OVERSCAN = 12;
+const HEADER = 28;
 const MIN_WIDTH = 56;
 const MAX_WIDTH = 420;
-/** Characters of a value drawn in a cell; the rest shows in the row editor. */
+/** Characters of a value drawn in a cell; the rest shows in the editor. */
 const SHOWN_CHARS = 300;
+/** Most cells Set NULL changes at once. */
+const MAX_NULL_CELLS = 10_000;
+const FREEZE_KEY = "grid.freezeFirstColumn";
+
+// Only the cell kinds the grid draws (the full set pulls in markdown and images).
+const renderers = [textCellRenderer, loadingCellRenderer, markerCellRenderer, newRowCellRenderer] as unknown as DataEditorCoreProps["renderers"];
+
+// The overlay editor renders into #portal.
+if (typeof document !== "undefined" && !document.getElementById("portal")) {
+  const portal = document.createElement("div");
+  portal.id = "portal";
+  portal.className = "grid-portal";
+  document.body.appendChild(portal);
+}
+
+export interface MenuEvent {
+  clientX: number;
+  clientY: number;
+  preventDefault(): void;
+}
 
 export interface GridProps {
-  result: QueryResult;
-  /** Changes when the rows are new: drops the edit in progress and scrolls to the top. */
+  data: GridData;
+  /** Changes when the rows are new: drops the selection and scrolls to the top. */
   version: number;
-  /** The first row's number minus one (the page offset). */
-  startIndex: number;
   sort: ColumnSort | null;
   onSort: (sort: ColumnSort | null) => void;
   selection: Set<number>;
   onSelectionChange: (rows: Set<number>) => void;
-  /** Set when cells can be edited. Rejects with the message to show. */
-  onEditCell?: (row: number, column: number, value: Cell) => Promise<void>;
+  /** Saves the row's pending edits (only the changed columns). Set when cells can be edited. */
+  onSaveRow?: (row: number) => Promise<void>;
   onOpenRow?: (row: number) => void;
-  onContextMenu?: (event: React.MouseEvent, row: number, column: number) => void;
-  onCopied?: (rows: number) => void;
+  onContextMenu?: (event: MenuEvent, row: number, column: number) => void;
+  onHeaderMenu?: (event: MenuEvent, column: number) => void;
+  onCopied?: (rows: number, cut: boolean) => void;
+  /** Rows on screen, for the status line. */
+  onRowsShown?: (first: number, last: number) => void;
 }
 
-interface Editing {
-  row: number;
-  column: number;
-  value: string;
-  /** The cell's value when the editor opened (NULL shows as an empty field). */
-  original: Cell;
-  /** Something was typed. An untouched editor changes nothing, so a NULL stays NULL. */
-  touched: boolean;
-  error?: string;
-  saving?: boolean;
+function stored(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
 }
 
-let measureCanvas: HTMLCanvasElement | null = null;
+function store(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Private windows: lasts until the window closes.
+  }
+}
 
-/** Column widths from the header and the first rows' text. */
-function measure(result: QueryResult): number[] {
-  measureCanvas ??= document.createElement("canvas");
-  const context = measureCanvas.getContext("2d");
-  const style = getComputedStyle(document.documentElement);
-  const mono = `${style.getPropertyValue("--font-size-mono").trim() || "12px"} ${style.getPropertyValue("--font-mono").trim() || "monospace"}`;
-  const ui = `600 ${style.getPropertyValue("--font-size-caption").trim() || "11px"} ${style.getPropertyValue("--font-ui").trim() || "sans-serif"}`;
+let measureContext: CanvasRenderingContext2D | null = null;
+
+/** Column widths from the header and the first loaded rows' text. */
+function measure(data: GridData, colors: GridColors): number[] {
+  measureContext ??= document.createElement("canvas").getContext("2d");
+  const context = measureContext;
+  const mono = `${colors.monoSize} ${colors.fontMono}`;
+  const ui = `600 ${colors.captionSize} ${colors.fontUI}`;
   const width = (text: string, font: string) => {
     if (!context) return text.length * 7.2;
     context.font = font;
     return context.measureText(text).width;
   };
-  const sample = result.rows.slice(0, 120);
-  return result.columns.map((column, i) => {
-    let widest = width(column.name, ui) + width(column.type, ui) + 28;
-    for (const row of sample) {
-      const value = row[i];
-      widest = Math.max(widest, width(value === null ? "NULL" : value.slice(0, 80), mono) + 20);
+  const sample = Math.min(120, data.rows);
+  return data.columns.map((column, c) => {
+    let widest = width(column.name, ui) + width(column.type, ui) + 32;
+    for (let row = 0; row < sample; row++) {
+      const value = data.value(row, c);
+      if (value === undefined) break;
+      const text = value === null ? "NULL" : String(value).slice(0, 80);
+      widest = Math.max(widest, width(text, mono) + 18);
       if (widest >= MAX_WIDTH) break;
     }
     return Math.round(Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, widest)));
   });
 }
 
-function display(value: Cell): string {
-  if (value === null) return "NULL";
-  const short = value.length > SHOWN_CHARS ? `${value.slice(0, SHOWN_CHARS)}…` : value;
-  return short.replace(/[\r\n\t]+/g, " ");
+function display(text: string): string {
+  const short = text.length > SHOWN_CHARS ? `${text.slice(0, SHOWN_CHARS)}…` : text;
+  return /[\r\n\t]/.test(short) ? short.replace(/[\r\n\t]+/g, " ") : short;
+}
+
+/** The rows a selection covers: picked rows, else the cell ranges' rows. */
+function selectedRows(selection: GridSelection): number[] {
+  if (selection.rows.length > 0) return selection.rows.toArray();
+  const current = selection.current;
+  if (!current) return [];
+  const rows = new Set<number>();
+  for (const range of [current.range, ...current.rangeStack]) {
+    for (let r = range.y; r < range.y + range.height; r++) rows.add(r);
+  }
+  return [...rows].sort((a, b) => a - b);
+}
+
+const emptySelection: GridSelection = { columns: CompactSelection.empty(), rows: CompactSelection.empty() };
+
+/** Watches html[data-theme] so the canvas recolors with the window. */
+function useGridColors(): GridColors {
+  const [colors, setColors] = useState(readGridColors);
+  useEffect(() => {
+    const observer = new MutationObserver(() => setColors(readGridColors()));
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "style", "class"] });
+    return () => observer.disconnect();
+  }, []);
+  return colors;
 }
 
 export const ResultGrid = memo(function ResultGrid(props: GridProps) {
-  const { result, version, startIndex, sort, onSort, selection, onSelectionChange, onEditCell, onOpenRow, onContextMenu } = props;
-  const scroller = useRef<HTMLDivElement>(null);
-  const [scrollTop, setScrollTop] = useState(0);
-  const [viewport, setViewport] = useState(600);
-  const columnKey = result.columns.map((c) => `${c.name}:${c.type}`).join("|");
-  const [widths, setWidths] = useState<number[]>(() => measure(result));
-  const [editing, setEditing] = useState<Editing | null>(null);
-  /** A save is on its way: blur and Tab wait instead of saving twice. */
-  const saving = useRef(false);
-  /** Escape closed the editor: the blur that follows must not save. */
-  const discarded = useRef(false);
-  const anchor = useRef<number | null>(null);
+  const { data, version, sort, onSort, onSelectionChange, onSaveRow, onOpenRow, onContextMenu, onHeaderMenu, onCopied, onRowsShown } = props;
+  const editor = useRef<DataEditorRef>(null);
+  const container = useRef<HTMLDivElement>(null);
+  const colors = useGridColors();
+  const [tick, redraw] = useState(0);
+  const [selection, setSelection] = useState<GridSelection>(emptySelection);
+  const [freeze, setFreeze] = useState(() => stored(FREEZE_KEY) === "1");
+  const visible = useRef<Rectangle>({ x: 0, y: 0, width: 0, height: 0 });
+  const columnKey = data.columns.map((c) => `${c.name}:${c.type}`).join("|");
+  const [widths, setWidths] = useState<number[]>(() => measure(data, colors));
+  /** The row the cursor is on; leaving it saves its pending edits. */
+  const editRow = useRef<number | null>(null);
+  const editable = data.editable && !!onSaveRow;
+  const imageWindowLoader = useMemo(() => new ImageWindowLoaderImpl(), []);
 
-  // New columns: measure again. New rows: start at the top, nothing in edit.
-  useLayoutEffect(() => setWidths(measure(result)), [columnKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  // New columns: measure again.
+  useLayoutEffect(() => setWidths(measure(data, colors)), [columnKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // New rows: back to the top, nothing selected.
   useLayoutEffect(() => {
-    setEditing(null);
-    anchor.current = null;
-    if (scroller.current) scroller.current.scrollTop = 0;
-    setScrollTop(0);
+    setSelection(emptySelection);
+    editRow.current = null;
+    editor.current?.scrollTo(0, 0, "vertical");
   }, [version, columnKey]);
 
+  // Blocks arriving redraw just their cells on screen; a new row count redraws all.
   useEffect(() => {
-    const element = scroller.current;
-    if (!element) return;
-    const observer = new ResizeObserver(() => setViewport(element.clientHeight));
-    observer.observe(element);
-    setViewport(element.clientHeight);
-    return () => observer.disconnect();
+    return data.subscribe((change: Change) => {
+      if (!change) {
+        redraw((n) => n + 1);
+        return;
+      }
+      const v = visible.current;
+      const from = Math.max(change.from, v.y);
+      const to = Math.min(change.to, v.y + v.height + 1);
+      if (from >= to) return;
+      const cells: { cell: Item }[] = [];
+      for (let r = from; r < to; r++) for (let c = 0; c < data.columns.length; c++) cells.push({ cell: [c, r] });
+      editor.current?.updateCells(cells);
+      if (data.value(v.y, 0) !== undefined || data.columns.length === 0) markFirstRows();
+    });
+  }, [data]);
+
+  useEffect(() => {
+    if (data.rows > 0 && data.value(visible.current.y, 0) !== undefined) markFirstRows();
+  }, [data, version]);
+
+  // MARK: Cells
+
+  const themes = useMemo(() => {
+    const nullTheme: Partial<Theme> = { textDark: colors.null };
+    return {
+      null: nullTheme,
+      pending: { bgCell: colors.pending } as Partial<Theme>,
+      pendingNull: { bgCell: colors.pending, textDark: colors.null } as Partial<Theme>,
+      stripe: { bgCell: colors.stripe } as Partial<Theme>,
+      failed: { bgCell: colors.failed } as Partial<Theme>,
+    };
+  }, [colors]);
+
+  const loading = useMemo<GridCell>(() => ({ kind: GridCellKind.Loading, allowOverlay: false }), []);
+
+  const getCellContent = useCallback(
+    ([col, row]: Item): GridCell => {
+      const value = data.shown(row, col);
+      if (value === undefined) return loading;
+      const pending = data.pending(row, col) !== undefined;
+      if (value === null) {
+        const cell: DbCell = {
+          kind: GridCellKind.Text,
+          data: "",
+          displayData: "NULL",
+          dbNull: true,
+          allowOverlay: true,
+          readonly: !editable,
+          copyData: "",
+          themeOverride: pending ? themes.pendingNull : themes.null,
+        };
+        return cell;
+      }
+      const text = typeof value === "string" ? value : String(value);
+      const cell: DbCell = {
+        kind: GridCellKind.Text,
+        data: text,
+        displayData: display(text),
+        dbNull: false,
+        allowOverlay: true,
+        readonly: !editable,
+        contentAlign: typeof value === "number" ? "right" : undefined,
+        themeOverride: pending ? themes.pending : undefined,
+      };
+      return cell;
+    },
+    // A new `tick` re-creates this, so the grid repaints everything.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [data, editable, themes, loading, data.rows, tick],
+  );
+
+  const getRowThemeOverride = useCallback(
+    (row: number): Partial<Theme> | undefined => (data.failure(row) !== undefined ? themes.failed : row % 2 ? themes.stripe : undefined),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [data, themes, tick],
+  );
+
+  const columns = useMemo<GridColumn[]>(
+    () => data.columns.map((c, i) => ({ id: `${i}`, title: c.name, width: widths[i] ?? 120 })),
+    [data.columns, widths],
+  );
+
+  // MARK: Header
+
+  const drawHeader = useCallback<DrawHeaderCallback>(
+    ({ ctx, rect, columnIndex }) => {
+      const column = data.columns[columnIndex];
+      if (!column) return;
+      const sorted = sort?.column === column.name ? (sort.ascending ? "asc" : "desc") : null;
+      const pad = 8;
+      const arrow = sorted ? 12 : 0;
+      const mid = rect.y + rect.height / 2;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(rect.x, rect.y, rect.width - 1, rect.height);
+      ctx.clip();
+      ctx.textBaseline = "middle";
+      ctx.font = `600 ${colors.captionSize} ${colors.fontUI}`;
+      ctx.fillStyle = colors.text;
+      let x = rect.x + pad;
+      const room = rect.width - pad * 2 - arrow;
+      const name = fit(ctx, column.name, room);
+      ctx.fillText(name, x, mid);
+      x += ctx.measureText(name).width + 6;
+      if (column.type && x < rect.x + rect.width - pad - arrow - 12) {
+        ctx.font = `${colors.captionSize} ${colors.fontUI}`;
+        ctx.fillStyle = colors.textTertiary;
+        ctx.fillText(fit(ctx, column.type, rect.x + rect.width - pad - arrow - x), x, mid);
+      }
+      if (sorted) {
+        const ax = rect.x + rect.width - pad - 4;
+        ctx.fillStyle = colors.accentText;
+        ctx.beginPath();
+        if (sorted === "asc") {
+          ctx.moveTo(ax - 4, mid + 2);
+          ctx.lineTo(ax + 4, mid + 2);
+          ctx.lineTo(ax, mid - 3);
+        } else {
+          ctx.moveTo(ax - 4, mid - 2);
+          ctx.lineTo(ax + 4, mid - 2);
+          ctx.lineTo(ax, mid + 3);
+        }
+        ctx.fill();
+      }
+      ctx.restore();
+    },
+    [data.columns, sort, colors],
+  );
+
+  const onHeaderClicked = useCallback(
+    (col: number) => {
+      const name = data.columns[col]?.name;
+      if (!name) return;
+      if (sort?.column !== name) onSort({ column: name, ascending: true });
+      else if (sort.ascending) onSort({ column: name, ascending: false });
+      else onSort(null);
+    },
+    [data.columns, sort, onSort],
+  );
+
+  const onColumnResize = useCallback((_column: GridColumn, size: number, index: number) => {
+    setWidths((old) => old.map((w, i) => (i === index ? Math.max(MIN_WIDTH, Math.round(size)) : w)));
   }, []);
 
-  const count = result.rows.length;
-  const lastNumber = startIndex + count;
-  const numberWidth = Math.max(44, String(lastNumber).length * 8 + 24);
-  const template = useMemo(
-    () => `${numberWidth}px ${widths.map((w) => `${w}px`).join(" ")} minmax(0, 1fr)`,
-    [numberWidth, widths],
-  );
-  const total = numberWidth + widths.reduce((a, b) => a + b, 0);
+  // MARK: Selection and saving
 
-  const first = Math.max(0, Math.floor(scrollTop / ROW) - OVERSCAN);
-  const last = Math.min(count, Math.ceil((scrollTop + viewport) / ROW) + OVERSCAN);
-
-  // MARK: Selection
-
-  const select = useCallback(
-    (row: number, event: { shiftKey: boolean; metaKey: boolean; ctrlKey: boolean }) => {
-      const toggle = isMac ? event.metaKey : event.ctrlKey;
-      let next: Set<number>;
-      if (event.shiftKey && anchor.current !== null) {
-        next = new Set(toggle ? selection : []);
-        const [a, b] = [Math.min(anchor.current, row), Math.max(anchor.current, row)];
-        for (let i = a; i <= b; i++) next.add(i);
-      } else if (toggle) {
-        next = new Set(selection);
-        if (next.has(row)) next.delete(row);
-        else next.add(row);
-        anchor.current = row;
-      } else {
-        next = new Set([row]);
-        anchor.current = row;
-      }
-      onSelectionChange(next);
+  const saveRow = useCallback(
+    (row: number | null) => {
+      if (row === null || !onSaveRow || !data.editable) return;
+      if (data.changes(row).length > 0) void onSaveRow(row);
     },
-    [selection, onSelectionChange],
+    [data, onSaveRow],
   );
 
-  const reveal = (row: number) => {
-    const element = scroller.current;
-    if (!element) return;
-    const top = (row + 1) * ROW;
-    if (top - ROW < element.scrollTop) element.scrollTop = top - ROW;
-    else if (top + ROW > element.scrollTop + element.clientHeight) element.scrollTop = top + ROW - element.clientHeight;
-  };
+  const onGridSelectionChange = useCallback(
+    (next: GridSelection) => {
+      setSelection(next);
+      const row = next.current?.cell[1] ?? null;
+      if (editRow.current !== null && row !== editRow.current) saveRow(editRow.current);
+      editRow.current = row;
+      onSelectionChange(new Set(selectedRows(next)));
+    },
+    [onSelectionChange, saveRow],
+  );
 
-  const onKeyDown = (event: React.KeyboardEvent) => {
-    if (editing) return;
+  // Rows deselected from outside (a delete, the Escape key in the window): clear here too.
+  useEffect(() => {
+    if (props.selection.size === 0 && (selection.current || selection.rows.length > 0)) setSelection(emptySelection);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.selection]);
+
+  const onCellEdited = useCallback(
+    ([col, row]: Item, value: EditableGridCell) => {
+      if (!isDbCell(value) || !data.editable) return;
+      data.edit(row, col, value.dbNull ? null : value.data);
+    },
+    [data],
+  );
+
+  const provideEditor = useCallback((cell: GridCell) => {
+    if (!isDbCell(cell) || cell.readonly) return undefined;
+    return { editor: CellEditor, disablePadding: true, disableStyling: true };
+  }, []);
+
+  // MARK: Copy
+
+  /** The selection as TSV: picked rows whole, a cell range as its rectangle. */
+  const copySelection = useCallback(async () => {
+    const current = selection.current;
+    if (selection.rows.length > 0) {
+      const rows = selection.rows.toArray();
+      const { block, cut } = await data.collect(rows);
+      await copyText(tsv(block, undefined, false));
+      onCopied?.(block.rowCount, cut);
+      return;
+    }
+    if (!current) return;
+    const { x, y, width, height } = current.range;
+    const rows = Array.from({ length: height }, (_, i) => y + i);
+    const { block, cut } = await data.collect(rows);
+    const lines = block.data[0]
+      ? Array.from({ length: block.rowCount }, (_, r) =>
+          Array.from({ length: width }, (_, c) => (block.data[x + c]?.[r] ?? "").toString().replace(/[\t\r\n]+/g, " ")).join("\t"),
+        )
+      : [];
+    await copyText(lines.join("\n"));
+    onCopied?.(block.rowCount, cut);
+  }, [data, selection, onCopied]);
+
+  const copyAll = useCallback(async () => {
+    const { block, cut } = await data.collect(null);
+    await copyText(tsv(block, undefined, true));
+    onCopied?.(block.rowCount, cut);
+  }, [data, onCopied]);
+
+  // MARK: Commands (shortcuts and menus)
+
+  const setNull = useCallback(() => {
+    const current = selection.current;
+    if (!current || !editable) return false;
+    const { x, y, width, height } = current.range;
+    if (width * height > MAX_NULL_CELLS) return false;
+    for (let r = y; r < y + height; r++) for (let c = x; c < x + width; c++) if (data.value(r, c) !== undefined) data.edit(r, c, null);
+    return true;
+  }, [data, editable, selection]);
+
+  const saveAll = useCallback(async () => {
+    if (!onSaveRow) return;
+    for (const row of data.pendingRows()) await onSaveRow(row);
+  }, [data, onSaveRow]);
+
+  const revert = useCallback(
+    (row?: number) => {
+      if (!data.hasPending) return false;
+      if (row !== undefined && data.changes(row).length === 0) return false;
+      data.revert(row);
+      return true;
+    },
+    [data],
+  );
+
+  const page = useCallback((direction: 1 | -1) => {
+    const v = visible.current;
+    const target = Math.max(0, Math.min(data.rows - 1, v.y + direction * Math.max(1, v.height - 1)));
+    editor.current?.scrollTo(0, target, "vertical", 0, 0, { vAlign: "start" });
+  }, [data.rows]);
+
+  const toggleFreeze = useCallback(() => {
+    setFreeze((f) => {
+      store(FREEZE_KEY, f ? "0" : "1");
+      return !f;
+    });
+  }, []);
+
+  useEffect(
+    () =>
+      registerGrid((command: GridCommand) => {
+        switch (command) {
+          case "saveChanges":
+            void saveAll();
+            return true;
+          case "revertChanges":
+            return revert();
+          case "setNull":
+            return setNull();
+          case "copySelection":
+            void copySelection();
+            return true;
+          case "copyAll":
+            void copyAll();
+            return true;
+          case "freezeFirstColumn":
+            toggleFreeze();
+            return true;
+          case "pageUp":
+            page(-1);
+            return true;
+          case "pageDown":
+            page(1);
+            return true;
+        }
+      }),
+    [saveAll, revert, setNull, copySelection, copyAll, toggleFreeze, page],
+  );
+
+  // The menu's Set NULL.
+  useEffect(() => {
+    const onSetNull = () => void setNull();
+    window.addEventListener(SET_NULL_EVENT, onSetNull);
+    return () => window.removeEventListener(SET_NULL_EVENT, onSetNull);
+  }, [setNull]);
+
+  // Keys the canvas doesn't handle itself (it keeps arrows, typing, Enter, Tab).
+  const onKeyDownCapture = (event: React.KeyboardEvent) => {
+    const target = event.target as HTMLElement;
+    if (target.closest(".cell-editor")) return;
     const mod = isMac ? event.metaKey : event.ctrlKey;
-    const current = anchor.current ?? (selection.size ? Math.max(...selection) : -1);
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    if (typeAhead.opening && ["Enter", "Tab", "Escape"].includes(event.key) && performance.now() - typeAhead.since < 1000) {
+      // The editor is still opening: it does this key once it shows.
+      typeAhead.finish = event.key === "Tab" && event.shiftKey ? "ShiftTab" : (event.key as "Enter" | "Tab" | "Escape");
       event.preventDefault();
-      const row = Math.min(count - 1, Math.max(0, current + (event.key === "ArrowDown" ? 1 : -1)));
-      if (row < 0) return;
-      if (event.shiftKey) {
-        const next = new Set(selection);
-        next.add(row);
-        onSelectionChange(next);
-        anchor.current = row;
+      event.stopPropagation();
+      return;
+    }
+    if (editable && !event.ctrlKey && !event.metaKey && !event.altKey && event.key.length === 1 && selection.current) {
+      // The first key opens the editor; keys typed before it shows are kept for it.
+      const now = performance.now();
+      if (typeAhead.opening && now - typeAhead.since < 1000) {
+        typeAhead.keys += event.key;
+        event.preventDefault();
+        event.stopPropagation();
       } else {
-        select(row, { shiftKey: false, metaKey: false, ctrlKey: false });
+        typeAhead.opening = true;
+        typeAhead.keys = "";
+        typeAhead.finish = "";
+        typeAhead.since = now;
       }
-      reveal(row);
-    } else if (mod && event.key.toLowerCase() === "a") {
+      return;
+    }
+    if (mod && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "c") {
       event.preventDefault();
-      onSelectionChange(new Set(result.rows.map((_, i) => i)));
-    } else if (mod && event.key.toLowerCase() === "c" && selection.size > 0 && !event.shiftKey) {
+      event.stopPropagation();
+      void copySelection();
+    } else if (mod && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "s") {
       event.preventDefault();
-      void copyText(tsv(result, [...selection], false)).then(() => props.onCopied?.(selection.size));
-    } else if (event.key === "Enter" && onOpenRow && selection.size === 1) {
+      event.stopPropagation();
+      // Through the dispatcher, so the menu's Ctrl/Cmd+S accelerator firing too saves once.
+      dispatch("saveChanges");
+    } else if (event.key === "Escape") {
+      const row = selection.current?.cell[1];
+      if (revert(row)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    } else if (mod && !event.altKey && event.key.toLowerCase() === "a") {
+      // Every row: rows selected as a range of the first column through the last.
       event.preventDefault();
-      onOpenRow([...selection][0]);
-    } else if (event.key === "F2" && onEditCell && selection.size === 1) {
-      event.preventDefault();
-      startEdit([...selection][0], 0);
-    } else if (event.key === "Escape" && selection.size > 0) {
-      onSelectionChange(new Set());
+      event.stopPropagation();
+      if (data.rows === 0 || data.columns.length === 0) return;
+      onGridSelectionChange({
+        columns: CompactSelection.empty(),
+        rows: CompactSelection.fromSingleSelection([0, data.rows]),
+        current: undefined,
+      });
     }
   };
 
-  // MARK: Editing
+  // MARK: Mouse
 
-  function startEdit(row: number, column: number) {
-    const original = result.rows[row]?.[column] ?? null;
-    discarded.current = false;
-    setEditing({ row, column, value: original ?? "", original, touched: false });
-  }
+  const onCellContextMenu = useCallback(
+    ([col, row]: Item, event: { bounds: Rectangle; localEventX: number; localEventY: number; preventDefault(): void }) => {
+      event.preventDefault();
+      if (!onContextMenu) return;
+      const inside = selection.rows.hasIndex(row) || (selection.current && rectHas(selection.current.range, col, row));
+      if (!inside) {
+        onGridSelectionChange({
+          columns: CompactSelection.empty(),
+          rows: CompactSelection.empty(),
+          current: { cell: [col, row], range: { x: col, y: row, width: 1, height: 1 }, rangeStack: [] },
+        });
+      }
+      onContextMenu({ clientX: event.bounds.x + event.localEventX, clientY: event.bounds.y + event.localEventY, preventDefault: () => undefined }, row, col);
+    },
+    [onContextMenu, selection, onGridSelectionChange],
+  );
 
-  /** Saves the editor's text. True when it is saved or nothing changed; false
-   *  when the save failed (the editor stays open with the error) or is busy. */
-  const commit = async (target: Editing | null, refocus = true): Promise<boolean> => {
-    if (!target || !onEditCell || saving.current) return false;
-    const close = () => {
-      setEditing(null);
-      if (refocus) scroller.current?.focus();
-    };
-    // Untouched (Enter right away on a NULL cell, say): no change at all.
-    if (!target.touched || target.value === target.original) {
-      close();
-      return true;
-    }
-    saving.current = true;
-    setEditing({ ...target, saving: true, error: undefined });
-    try {
-      await onEditCell(target.row, target.column, target.value);
-      close();
-      return true;
-    } catch (error) {
-      setEditing({ ...target, saving: false, error: typeof error === "string" ? error : String(error) });
-      return false;
-    } finally {
-      saving.current = false;
-    }
-  };
+  const onHeaderContextMenu = useCallback(
+    (col: number, event: { bounds: Rectangle; localEventX: number; localEventY: number; preventDefault(): void }) => {
+      event.preventDefault();
+      onHeaderMenu?.({ clientX: event.bounds.x + event.localEventX, clientY: event.bounds.y + event.localEventY, preventDefault: () => undefined }, col);
+    },
+    [onHeaderMenu],
+  );
 
-  // MARK: Resizing
+  const onCellActivated = useCallback(
+    ([, row]: Item) => {
+      if (!editable) onOpenRow?.(row);
+    },
+    [editable, onOpenRow],
+  );
 
-  const startResize = (index: number, event: React.MouseEvent) => {
-    event.preventDefault();
-    event.stopPropagation();
-    const startX = event.clientX;
-    const startWidth = widths[index];
-    const move = (e: MouseEvent) => {
-      const width = Math.max(MIN_WIDTH, Math.min(1200, startWidth + e.clientX - startX));
-      setWidths((old) => old.map((w, i) => (i === index ? width : w)));
-    };
-    const up = () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-      document.body.classList.remove("resizing-columns");
-    };
-    document.body.classList.add("resizing-columns");
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-  };
+  const onVisibleRegionChanged = useCallback(
+    (range: Rectangle) => {
+      const previous = visible.current;
+      visible.current = range;
+      if (previous.y !== range.y || previous.height !== range.height) {
+        recordScroll();
+        data.view(range.y, range.y + range.height);
+        onRowsShown?.(range.y, Math.min(data.rows, range.y + range.height));
+      }
+    },
+    [data, onRowsShown],
+  );
 
-  const sortBy = (column: string) => {
-    if (sort?.column !== column) onSort({ column, ascending: true });
-    else if (sort.ascending) onSort({ column, ascending: false });
-    else onSort(null);
-  };
+  // A new source: tell it what is on screen.
+  useEffect(() => {
+    const v = visible.current;
+    data.view(v.y, v.y + Math.max(v.height, 40));
+  }, [data]);
 
-  const rows = [];
-  for (let i = first; i < last; i++) {
-    const row = result.rows[i];
-    const selected = selection.has(i);
-    rows.push(
-      <div
-        key={i}
-        className={`grid-row${i % 2 ? " odd" : ""}${selected ? " selected" : ""}`}
-        style={{ top: (i + 1) * ROW, gridTemplateColumns: template }}
-        role="row"
-        aria-rowindex={i + 2}
-        aria-selected={selected}
-        onMouseDown={(e) => {
-          if (e.button === 0 && !(e.target as HTMLElement).closest("input")) select(i, e);
-        }}
-        onContextMenu={(e) => {
-          if (!selection.has(i)) select(i, { shiftKey: false, metaKey: false, ctrlKey: false });
-          const cell = (e.target as HTMLElement).closest("[data-col]") as HTMLElement | null;
-          onContextMenu?.(e, i, cell ? Number(cell.dataset.col) : -1);
-        }}
-      >
-        <div className="grid-number" role="rowheader" onDoubleClick={() => onOpenRow?.(i)} title={onOpenRow ? t("Double-click to open the row") : undefined}>
-          {formatNumber(startIndex + i + 1)}
-        </div>
-        {row.map((value, c) =>
-          editing && editing.row === i && editing.column === c ? (
-            <div key={c} className="grid-cell editing" data-col={c} role="gridcell">
-              <input
-                autoFocus
-                className={editing.error ? "invalid" : ""}
-                value={editing.value}
-                placeholder={editing.original === null ? "NULL" : undefined}
-                disabled={editing.saving}
-                title={editing.error}
-                spellCheck={false}
-                onFocus={(e) => e.currentTarget.select()}
-                onChange={(e) => setEditing({ ...editing, value: e.target.value, touched: true, error: undefined })}
-                onKeyDown={(e) => {
-                  e.stopPropagation();
-                  if (e.key === "Enter") void commit(editing);
-                  if (e.key === "Escape") {
-                    discarded.current = true;
-                    setEditing(null);
-                    scroller.current?.focus();
-                  }
-                  if (e.key === "Tab") {
-                    e.preventDefault();
-                    const next = c + (e.shiftKey ? -1 : 1);
-                    // Save what was typed first; move on only when that worked.
-                    void commit(editing, false).then((saved) => {
-                      if (saved && next >= 0 && next < row.length) startEdit(i, next);
-                      else if (saved) scroller.current?.focus();
-                    });
-                  }
-                }}
-                onBlur={() => {
-                  // Clicking away saves what was typed, like Enter; an untouched editor just closes.
-                  if (discarded.current || saving.current || editing.saving || editing.error) return;
-                  void commit(editing, false);
-                }}
-              />
-              {editing.error && <div className="grid-cell-error selectable">{editing.error}</div>}
-            </div>
-          ) : (
-            <div
-              key={c}
-              className={`grid-cell${value === null ? " null" : ""}`}
-              data-col={c}
-              role="gridcell"
-              onDoubleClick={() => {
-                if (onEditCell) startEdit(i, c);
-                else onOpenRow?.(i);
-              }}
-            >
-              {display(value)}
-            </div>
-          ),
-        )}
-        <div />
-      </div>,
-    );
-  }
+  const lastNumber = data.rows;
+  const markerWidth = Math.max(44, String(lastNumber).length * 8 + 20);
 
   return (
-    <div
-      className="grid-scroller"
-      ref={scroller}
-      tabIndex={0}
-      role="grid"
-      aria-rowcount={count + 1}
-      aria-colcount={result.columns.length + 1}
-      onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
-      onKeyDown={onKeyDown}
-    >
-      <div className="grid-canvas" style={{ height: (count + 1) * ROW, minWidth: total }}>
-        <div className="grid-header" style={{ gridTemplateColumns: template }} role="row">
-          <div className="grid-number header">#</div>
-          {result.columns.map((column, i) => {
-            const sorted = sort?.column === column.name ? (sort.ascending ? "ascending" : "descending") : undefined;
-            return (
-              <div
-                key={`${column.name}-${i}`}
-                className="grid-header-cell"
-                role="columnheader"
-                aria-sort={sorted ?? "none"}
-                title={`${column.name}${column.type ? ` ${column.type}` : ""}`}
-                onClick={() => sortBy(column.name)}
-              >
-                <span className="grid-header-name">{column.name}</span>
-                {column.type && <span className="grid-header-type">{column.type}</span>}
-                {sorted && <Icon name={sorted === "ascending" ? "sortUp" : "sortDown"} size={10} />}
-                <span className="grid-resize" onMouseDown={(e) => startResize(i, e)} onClick={(e) => e.stopPropagation()} />
-              </div>
-            );
-          })}
-          <div />
+    <div className="glide-grid" ref={container} onKeyDownCapture={onKeyDownCapture}>
+      <DataEditorCore
+        ref={editor}
+        width="100%"
+        height="100%"
+        columns={columns}
+        rows={data.rows}
+        getCellContent={getCellContent}
+        getRowThemeOverride={getRowThemeOverride}
+        renderers={renderers}
+        imageWindowLoader={imageWindowLoader}
+        theme={colors.theme}
+        rowHeight={ROW}
+        headerHeight={HEADER}
+        rowMarkers={{ kind: "clickable-number", startIndex: 1, width: markerWidth, theme: { textLight: colors.textTertiary, textMedium: colors.textSecondary } }}
+        freezeColumns={freeze && columns.length > 1 ? 1 : 0}
+        smoothScrollX
+        smoothScrollY
+        minColumnWidth={MIN_WIDTH}
+        maxColumnWidth={1200}
+        drawHeader={drawHeader}
+        onHeaderClicked={onHeaderClicked}
+        onHeaderContextMenu={onHeaderContextMenu}
+        onColumnResize={onColumnResize}
+        gridSelection={selection}
+        onGridSelectionChange={onGridSelectionChange}
+        rowSelect="multi"
+        columnSelect="none"
+        rangeSelect="rect"
+        rowSelectionMode="auto"
+        onCellEdited={onCellEdited}
+        provideEditor={provideEditor as never}
+        onCellContextMenu={onCellContextMenu}
+        onCellActivated={onCellActivated}
+        cellActivationBehavior="double-click"
+        editOnType={editable}
+        onVisibleRegionChanged={onVisibleRegionChanged}
+        keybindings={{ copy: false, paste: false, cut: false, delete: false, search: false, clear: false, downFill: false, rightFill: false }}
+        fixedShadowX
+        fixedShadowY={false}
+      />
+      {data.error && (
+        <div className="grid-error selectable" role="alert">
+          {t("Couldn't Read the Table")}: {data.error}
         </div>
-        {rows}
-      </div>
+      )}
     </div>
   );
 });
+
+function rectHas(r: Rectangle, col: number, row: number): boolean {
+  return col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height;
+}
+
+/** The text cut with … to fit `room` pixels. */
+function fit(ctx: CanvasRenderingContext2D, text: string, room: number): string {
+  if (ctx.measureText(text).width <= room) return text;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (ctx.measureText(`${text.slice(0, mid)}…`).width <= room) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo > 0 ? `${text.slice(0, lo)}…` : "";
+}

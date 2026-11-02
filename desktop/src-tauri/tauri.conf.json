@@ -27,7 +27,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "appimage", "rpm", "msi", "nsis"],
+    "targets": ["deb", "appimage", "rpm", "msi", "nsis", "app", "dmg"],
     "category": "DeveloperTool",
     "shortDescription": "A fast, minimal database client",
     "longDescription": "Paste a connection string, click a table, see and edit the rows, run SQL. PostgreSQL, MySQL/MariaDB, SQLite, Redis/Valkey and MongoDB.",
@@ -44,6 +44,17 @@
     },
     "windows": {
       "webviewInstallMode": { "type": "downloadBootstrapper" }
+    },
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "hardenedRuntime": true,
+      "signingIdentity": null,
+      "entitlements": null,
+      "dmg": {
+        "windowSize": { "width": 540, "height": 380 },
+        "appPosition": { "x": 140, "y": 190 },
+        "applicationFolderPosition": { "x": 400, "y": 190 }
+      }
     }
   }
 }

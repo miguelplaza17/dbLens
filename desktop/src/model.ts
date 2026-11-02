@@ -8,19 +8,21 @@ import {
   errorText,
   mainResult,
   relationId,
-  rowKey,
+  StreamCollector,
   type CellValue,
   type ColumnSort,
   type ConnectInfo,
   type Engine,
   type Execution,
-  type QueryResult,
   type Relation,
+  type ResultBlock,
   type SavedConnection,
   type SshConfig,
   type StoreSnapshot,
 } from "./api";
 import type { MenuItem, MenuState } from "./components/Sheet";
+import { TableSource } from "./grid/blocks";
+import { markStart } from "./grid/perf";
 import { duration, executionSummary } from "./format";
 import { t } from "./i18n";
 
@@ -87,7 +89,10 @@ export class AppModel {
   // The center pane
   shown: "table" | "query" = "table";
   relation: Relation | null = null;
-  tableResult: QueryResult | null = null;
+  /** The table's first block (columns, keys, note). */
+  tableResult: ResultBlock | null = null;
+  /** The table's rows, read in blocks as the grid scrolls; holds pending edits. */
+  tableSource: TableSource | null = null;
   tableError: string | null = null;
   tableLoading = false;
   /** Rows with the search; undefined while counting, null when too slow to count. */
@@ -155,7 +160,7 @@ export class AppModel {
   get panelTitle(): string {
     return this.usesCommands ? t("Commands") : this.usesQueries ? t("Query") : "SQL";
   }
-  get shownResult(): QueryResult | null {
+  get shownResult(): ResultBlock | null {
     if (this.shown === "table") return this.tableResult;
     return this.execution ? mainResult(this.execution) ?? null : null;
   }
@@ -170,9 +175,9 @@ export class AppModel {
   }
   get canGoForward(): boolean {
     if (this.shown !== "table" || !this.tableResult || this.tableLoading) return false;
-    const end = this.offset + this.tableResult.rows.length;
+    const end = this.offset + this.tableResult.rowCount;
     if (typeof this.tableCount === "number") return end < this.tableCount;
-    return this.tableResult.rows.length >= this.pageSize;
+    return this.tableResult.rowCount >= this.pageSize;
   }
   get activeSavedId(): string | null {
     return this.session?.savedId ?? null;
@@ -293,11 +298,15 @@ export class AppModel {
   }
 
   private async closeSession() {
+    // Pending grid edits are saved first, as when leaving their row.
+    await this.flushEdits();
     const info = this.session;
     this.session = null;
     this.relations = [];
     this.relation = null;
     this.tableResult = null;
+    this.tableSource?.close();
+    this.tableSource = null;
     this.tableError = null;
     this.tableCount = undefined;
     this.execution = null;
@@ -383,6 +392,8 @@ export class AppModel {
       this.changed();
       return;
     }
+    // Save pending edits while their table is still the open one.
+    await this.flushEdits();
     this.relation = relation;
     this.offset = 0;
     this.tableSearch = "";
@@ -402,15 +413,17 @@ export class AppModel {
     const request = ++this.pageRequest;
     this.tableLoading = true;
     this.changed();
+    await this.flushEdits();
     try {
-      const result = await api.page(info.sessionId, relation, {
-        limit: this.pageSize,
-        offset: this.offset,
-        search: this.tableSearch,
-        sort: this.tableSort,
-      });
-      if (request !== this.pageRequest) return;
-      this.tableResult = result;
+      markStart();
+      const source = await TableSource.open(info.sessionId, relation, this.tableSearch, this.tableSort);
+      if (request !== this.pageRequest) {
+        source.close();
+        return;
+      }
+      this.tableSource?.close();
+      this.tableSource = source;
+      this.tableResult = source.head ?? null;
       this.tableError = null;
       this.tableVersion++;
       // The selection belongs to the grid on screen; a reload behind a query result keeps it.
@@ -419,21 +432,26 @@ export class AppModel {
       if (request !== this.pageRequest) return;
       this.tableError = errorText(e);
       this.tableResult = null;
+      this.tableSource?.close();
+      this.tableSource = null;
     }
     this.tableLoading = false;
     this.changed();
+    const source = this.tableSource;
+    if (source && !recount && typeof this.tableCount === "number") source.setCount(this.tableCount);
+    if (source && source.exact) {
+      this.tableCount = source.rows;
+      this.changed();
+      return;
+    }
     if (recount && !this.tableError) {
-      if (this.offset === 0 && this.tableResult && this.tableResult.rows.length < this.pageSize) {
-        this.tableCount = this.tableResult.rows.length;
-        this.changed();
-        return;
-      }
       this.tableCount = undefined;
       const search = this.tableSearch;
       try {
         const count = await api.count(info.sessionId, relation, search);
         if (request === this.pageRequest || (this.relation === relation && this.tableSearch === search)) {
           this.tableCount = count;
+          this.tableSource?.setCount(count);
           this.changed();
         }
       } catch {
@@ -503,48 +521,71 @@ export class AppModel {
     return { info, relation, result };
   }
 
-  /** Saves one cell of the page; the row keeps its place. Row keys are the
-   *  backend's own exact form, so when an edit can change the key (a key column,
-   *  or Postgres's ctid and xmin, which every update renews) the page is reloaded
-   *  for fresh keys instead of patched. */
+  /** Saves one cell right away (Set to NULL in the menu, the row editor). */
   async updateCell(row: number, column: number, value: string | null) {
-    const { info, relation, result } = this.requireTable();
-    if (!result.keys) throw t("Read Only");
-    const name = result.columns[column].name;
-    const keys = result.keys;
-    const outcome = await api.updateRow(info.sessionId, relation, rowKey(keys, row), [{ column: name, value }]);
+    const { result } = this.requireTable();
+    await this.updateRow(row, [{ column: result.columns[column].name, value }]);
+  }
+
+  /** Sends only these changes for the row. Row keys are the backend's own exact
+   *  form; when an edit can change the key (a key column, or Postgres's ctid and
+   *  xmin, which every update renews) the row's block is read again. */
+  async updateRow(row: number, changes: CellValue[]) {
+    const { info, relation } = this.requireTable();
+    const source = this.tableSource;
+    if (!source?.editable) throw t("Read Only");
+    if (changes.length === 0) return;
+    const key = source.key(row) ?? (await source.keys([row]))[0];
+    if (!key) throw t("Read Only");
+    const outcome = await api.updateRow(info.sessionId, relation, key, changes);
     this.logOutcome(outcome.sql, outcome.command);
-    if (keys.kind === "ctid" || keys.columns.includes(name)) {
-      await this.loadPage();
-      return;
-    }
-    const rows = result.rows.slice();
-    rows[row] = rows[row].slice();
-    rows[row][column] = value;
-    this.tableResult = { ...result, rows };
+    // Other pending cells of the row stay pending; the saved ones are patched in.
+    const rest = source.changes(row).filter((c) => !changes.some((d) => d.column === c.column && d.value === c.value));
+    source.saved(row, changes);
+    for (const c of rest) source.edit(row, source.columns.findIndex((col) => col.name === c.column), c.value);
     this.changed();
   }
 
-  async updateRow(row: number, changes: CellValue[]) {
-    const { info, relation, result } = this.requireTable();
-    if (!result.keys) throw t("Read Only");
+  /** Saves the grid's pending edits of one row (one UPDATE with the changed columns). */
+  async saveRow(row: number) {
+    const source = this.tableSource;
+    if (!source) return;
+    const changes = source.changes(row);
     if (changes.length === 0) return;
-    const outcome = await api.updateRow(info.sessionId, relation, rowKey(result.keys, row), changes);
-    this.logOutcome(outcome.sql, outcome.command);
-    await this.loadPage();
+    try {
+      await this.updateRow(row, changes);
+    } catch (e) {
+      const message = errorText(e);
+      source.failed(row, message);
+      this.logError(message, "");
+      this.showToast(message);
+    }
+  }
+
+  /** Saves every row with pending edits, before the rows are read anew. */
+  private async flushEdits() {
+    const source = this.tableSource;
+    if (!source?.hasPending) return;
+    for (const row of source.pendingRows()) await this.saveRow(row);
+  }
+
+  /** A row's cells (null when its block isn't loaded), for the row editor. */
+  tableRow(row: number) {
+    return this.tableSource?.rowCells(row) ?? null;
   }
 
   async insertRow(values: CellValue[]) {
     const { info, relation } = this.requireTable();
     const outcome = await api.insertRow(info.sessionId, relation, values);
     this.logOutcome(outcome.sql, outcome.command);
-    await this.loadPage(true);
+    await this.recount();
   }
 
   async deleteRows(rows: number[]) {
-    const { info, relation, result } = this.requireTable();
-    if (!result.keys) throw t("Read Only");
-    const keys = rows.map((row) => rowKey(result.keys!, row));
+    const { info, relation } = this.requireTable();
+    const source = this.tableSource;
+    if (!source?.editable) throw t("Read Only");
+    const keys = await source.keys(rows);
     const statements: string[] = [];
     try {
       for (const key of keys) {
@@ -555,7 +596,30 @@ export class AppModel {
     } catch (e) {
       this.logError(errorText(e), statements.join(";\n"));
     }
-    await this.loadPage(true);
+    this.selection = new Set();
+    await this.recount();
+  }
+
+  /** Rows were added or removed: read the blocks on screen again and count anew. */
+  private async recount() {
+    const info = this.session;
+    const relation = this.relation;
+    const source = this.tableSource;
+    if (!info || !relation || !source) return this.loadPage(true);
+    await this.flushEdits();
+    source.revert();
+    source.invalidate();
+    this.tableCount = undefined;
+    this.changed();
+    try {
+      const count = await api.count(info.sessionId, relation, this.tableSearch);
+      if (this.tableSource !== source) return;
+      this.tableCount = count;
+      source.setCount(count);
+    } catch {
+      this.tableCount = null;
+    }
+    this.changed();
   }
 
   private logOutcome(sql: string, command: string) {
@@ -586,7 +650,10 @@ export class AppModel {
     if ((this.usesCommands || this.usesQueries) && mode !== "plain") return;
     this.running = true;
     this.changed();
+    markStart();
     const started = new Date();
+    /** A streamed run already showed its first rows (and reset the grid). */
+    let shownEarly = false;
     try {
       let execution: Execution;
       let note = "";
@@ -604,17 +671,43 @@ export class AppModel {
         execution = outcome.execution;
         note = t("All statements committed together.");
       } else {
-        execution = await api.execute(info.sessionId, text);
+        // Streamed: the first rows show while the rest arrive.
+        const collector = new StreamCollector();
+
+        const done = await api.executeStream(info.sessionId, text, (message) => {
+          collector.add(message);
+          if (message.type === "rows" && !shownEarly && this.session?.sessionId === info.sessionId) {
+            shownEarly = true;
+            this.execution = collector.execution();
+            this.querySort = null;
+            this.runVersion++;
+            this.shown = "query";
+            this.selection = new Set();
+            this.changed();
+          } else if (shownEarly && (message.type === "rows" || message.type === "end")) {
+            // New block objects (the column arrays are shared) so the grid redraws.
+            const soFar = collector.execution();
+            this.execution = { ...soFar, results: soFar.results.map((r) => ({ ...r })) };
+            this.changed();
+          }
+        });
+        if (done.error !== null) throw done.error;
+        execution = collector.execution();
       }
       if (this.session?.sessionId !== info.sessionId) return;
       this.log = { date: started, isError: false, message: [executionSummary(execution), note].filter(Boolean).join(" · "), sql: text };
       const main = mainResult(execution);
       this.execution = execution;
-      this.querySort = null;
-      this.runVersion++;
+      if (!shownEarly) {
+        // Streamed rows are on screen already: keep the scroll position.
+        this.querySort = null;
+        this.runVersion++;
+      }
       if (main && main.columns.length > 0) {
-        this.shown = "query";
-        this.selection = new Set();
+        if (!shownEarly) {
+          this.shown = "query";
+          this.selection = new Set();
+        }
       } else if (mode !== "rehearse") {
         // A write: the open table and the list of tables may have changed.
         // Reload the open table even while a query result is shown, so the

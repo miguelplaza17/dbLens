@@ -32,6 +32,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 percent-encoding = "2"
 futures-util = "0.3"
 bytes = "1"
+# Table data crosses the IPC as MessagePack (src/wire.rs), never JSON.
+rmp = "0.8"
+rmp-serde = "1.3"
 
 # Drivers: pure Rust (or bundled C), so nothing has to be installed on Windows or Linux.
 # TLS is rustls with the ring provider everywhere (no OpenSSL, no aws-lc build).
@@ -44,15 +47,25 @@ mysql_async = { version = "0.37", default-features = false, features = ["default
 rusqlite = { version = "0.41", default-features = false, features = ["bundled", "hooks", "column_decltype"] }
 mongodb = { version = "3.9", default-features = false, features = ["compat-3-0-0", "rustls-tls", "dns-resolver"] }
 
-# Saved connections: AES-GCM sealed URLs, key in the OS keyring (Windows Credential
-# Manager, Linux Secret Service over zbus) or a 0600 key file when there is none.
+# Saved connections: AES-GCM sealed URLs, key in the OS keyring (macOS Keychain,
+# Windows Credential Manager, Linux Secret Service over zbus) or a 0600 key file when there is none.
 aes-gcm = "0.10"
 base64 = "0.22"
-keyring = { version = "3.6", default-features = false, features = ["windows-native", "async-secret-service", "async-io", "crypto-rust"] }
+keyring = { version = "3.6", default-features = false, features = ["apple-native", "windows-native", "async-secret-service", "async-io", "crypto-rust"] }
 directories = "6"
+# Import from dbLens for Mac (src/import_swift.rs): its folders are in a plist.
+plist = "1"
+
+# Native behavior: window size and position per window, a file dialog for
+# Open SQLite File, and one running app on Windows and Linux.
+tauri-plugin-window-state = "2"
+tauri-plugin-dialog = "2"
 
 # ssh children die with the app: PR_SET_PDEATHSIG on Linux, a kill-on-close
 # Job Object on Windows (both already in the dependency tree).
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+tauri-plugin-single-instance = "2"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 
@@ -60,6 +73,7 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [dev-dependencies]
+muda = "0.20"
 tempfile = "3"
 
 [profile.release]

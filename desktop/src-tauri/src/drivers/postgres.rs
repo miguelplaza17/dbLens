@@ -7,6 +7,7 @@
 //! transaction spans several calls; `cancel` never waits for it.
 
 use std::error::Error as StdError;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
@@ -24,12 +25,13 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use crate::connector::Summary;
 use crate::engine::Engine;
 use crate::session::{
-    like_pattern, Activity, CellValue, Column, ColumnSort, DatabaseSession, DbError, DbResult,
-    EditOutcome, Execution, QueryResult, Relation, RelationKind, RowKey, RowKeyKind, RowKeys,
-    SchemaGraph, ROW_LIMIT,
+    keyset_direction, like_pattern, Activity, CellValue, Column, ColumnSort, DatabaseSession,
+    DbError, DbResult, EditOutcome, Execution, KeyHint, QueryResult, Relation, RelationKind,
+    RowKey, RowKeyKind, RowKeys, SchemaGraph, DEEP_OFFSET, ROW_LIMIT,
 };
 use crate::sql_script::{self, Dialect};
 use crate::url::{quote_ident, ConnectionUrl};
+use crate::wire::StreamSink;
 
 /// Host, database, user and TLS mode for the connection sheet.
 pub fn summary(text: &str) -> Option<Summary> {
@@ -379,6 +381,7 @@ pub async fn connect(url: &str, local_port: Option<u16>) -> DbResult<Box<dyn Dat
         activity: Arc::new(Activity::default()),
         connection: StdMutex::new(Some(task)),
         server_version: version,
+        in_transaction: AtomicBool::new(false),
     }))
 }
 
@@ -580,6 +583,15 @@ pub struct PostgresSession {
     activity: Arc<Activity>,
     connection: StdMutex<Option<JoinHandle<()>>>,
     server_version: String,
+    /// The user's transaction is open, as of the last SQL run.
+    in_transaction: AtomicBool,
+}
+
+/// Whether a run may have opened a transaction block (or changed one already open).
+fn may_open_transaction(statements: &[String]) -> bool {
+    statements
+        .iter()
+        .any(|s| matches!(sql_script::verb(s, 1).as_str(), "BEGIN" | "START"))
 }
 
 /// The session's turn for one cancellable operation; it ends when dropped.
@@ -740,6 +752,71 @@ impl PostgresSession {
         Ok(results)
     }
 
+    /// Remembers whether the user's transaction is open after a run, asking
+    /// the server only when the run could have changed it.
+    async fn note_transaction(&self, statements: &[String]) {
+        if self.in_transaction.load(Ordering::SeqCst) || may_open_transaction(statements) {
+            let open = self.transaction_state().await.map(|s| s != TxState::Idle);
+            self.in_transaction
+                .store(open.unwrap_or(false), Ordering::SeqCst);
+        }
+    }
+
+    /// `simple`, sending rows to `sink` as they arrive instead of keeping them.
+    async fn simple_stream(
+        &self,
+        sql: &str,
+        statements: &[String],
+        sink: &mut StreamSink,
+    ) -> DbResult<()> {
+        let stream = self
+            .client
+            .simple_query_raw(sql)
+            .await
+            .map_err(|e| self.fail(e))?;
+        let mut stream = std::pin::pin!(stream);
+        let mut index = 0usize;
+        let mut has_columns = false;
+        while let Some(message) = stream.try_next().await.map_err(|e| self.fail(e))? {
+            match message {
+                SimpleQueryMessage::RowDescription(described) => {
+                    let columns: Vec<Column> = described
+                        .iter()
+                        .map(|c| Column::new(c.name(), ""))
+                        .collect();
+                    sink.begin(&columns);
+                    has_columns = true;
+                }
+                SimpleQueryMessage::Row(row) => {
+                    if sink.keeping() {
+                        for i in 0..row.len() {
+                            sink.cell(row.get(i));
+                        }
+                    }
+                    sink.end_row();
+                    if !sink.is_open() {
+                        // Nobody reads any more: stop the query on the server.
+                        self.cancel();
+                        return Err(DbError::Cancelled);
+                    }
+                }
+                SimpleQueryMessage::CommandComplete(count) => {
+                    let statement = statements.get(index).map(String::as_str).unwrap_or("");
+                    if has_columns {
+                        let seen = sink.seen();
+                        sink.end(&command_tag(statement, seen, true));
+                    } else {
+                        sink.command(&command_tag(statement, count, false), count);
+                    }
+                    has_columns = false;
+                    index += 1;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// One statement's result.
     async fn one(&self, statement: String) -> DbResult<QueryResult> {
         let list = [statement];
@@ -869,6 +946,253 @@ impl PostgresSession {
     }
 }
 
+impl PostgresSession {
+    /// A failed run that left the transaction failed rolls it back.
+    async fn after_run<T>(&self, outcome: DbResult<T>) -> DbResult<T> {
+        match outcome {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                // `begin; select 1/0` leaves the transaction failed, and every later
+                // call (the sidebar, the grid) would be refused until a ROLLBACK.
+                // Its work can only be rolled back anyway, so roll it back now.
+                if self.transaction_state().await.ok() == Some(TxState::Failed) {
+                    self.rollback().await;
+                    return Err(match error {
+                        DbError::Message(text) => DbError::Message(format!(
+                            "{text}\n\nThe transaction failed and was rolled back."
+                        )),
+                        other => other,
+                    });
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// `page`, starting from `hint` (keyset pagination) or from a key found by a
+    /// key-only scan for deep offsets, when the order is the key's.
+    async fn page_in(
+        &self,
+        relation: &Relation,
+        limit: u32,
+        offset: u64,
+        search: &str,
+        sort: Option<&ColumnSort>,
+        hint: Option<&KeyHint>,
+    ) -> DbResult<QueryResult> {
+        let primary_key = self.primary_key(relation).await?;
+        let uses_ctid = primary_key.is_empty() && relation.kind == RelationKind::Table;
+        let keys: Vec<String> = if !primary_key.is_empty() {
+            primary_key.iter().map(|k| quote_ident(k)).collect()
+        } else if uses_ctid {
+            vec!["t.ctid".into()]
+        } else {
+            vec![]
+        };
+        let mut terms: Vec<String> = sort
+            .map(|s| {
+                vec![format!(
+                    "{} {} nulls last",
+                    quote_ident(&s.column),
+                    s.direction()
+                )]
+            })
+            .unwrap_or_default();
+        terms.extend(keys.iter().cloned());
+        let order = if terms.is_empty() {
+            String::new()
+        } else {
+            format!(" order by {}", terms.join(", "))
+        };
+        let (where_, skip) = self
+            .keyset(
+                relation,
+                &primary_key,
+                uses_ctid,
+                search,
+                sort,
+                &order,
+                offset,
+                hint,
+            )
+            .await?;
+        // Without a primary key, a row is found by ctid, checked with xmin: if another
+        // session changed or vacuumed it since, the ctid may point to another row.
+        let mut result = self
+            .query(&format!(
+                "select {}* from {} as t{}{} limit {} offset {}",
+                if uses_ctid {
+                    "ctid::text, xmin::text, "
+                } else {
+                    ""
+                },
+                self.qualified(relation),
+                where_,
+                order,
+                limit,
+                skip
+            ))
+            .await?;
+        if uses_ctid && result.columns.len() >= 2 {
+            let keys: Vec<Vec<Option<String>>> = result
+                .rows
+                .iter()
+                .map(|row| row.iter().take(2).cloned().collect())
+                .collect();
+            result.columns.drain(..2);
+            for row in &mut result.rows {
+                row.drain(..2);
+            }
+            result.keys = Some(RowKeys {
+                columns: vec!["ctid".into(), "xmin".into()],
+                kind: RowKeyKind::Ctid,
+                values: keys,
+            });
+        } else if !primary_key.is_empty() {
+            let indexes: Vec<usize> = primary_key
+                .iter()
+                .filter_map(|name| result.columns.iter().position(|c| &c.name == name))
+                .collect();
+            if indexes.len() == primary_key.len() {
+                let values = result
+                    .rows
+                    .iter()
+                    .map(|row| indexes.iter().map(|&i| row[i].clone()).collect())
+                    .collect();
+                result.keys = Some(RowKeys {
+                    columns: primary_key.clone(),
+                    kind: RowKeyKind::PrimaryKey,
+                    values,
+                });
+            }
+        }
+        let types = self
+            .query(&format!(
+                "select a.attname, format_type(a.atttypid, a.atttypmod)
+                 from pg_attribute a
+                 where a.attrelid = {}::regclass and a.attnum > 0 and not a.attisdropped",
+                literal(&self.qualified(relation))
+            ))
+            .await?;
+        let mut by_name = std::collections::HashMap::<String, String>::new();
+        for row in types.rows {
+            if let (Some(Some(name)), Some(Some(kind))) = (row.first(), row.get(1)) {
+                by_name.entry(name.clone()).or_insert_with(|| kind.clone());
+            }
+        }
+        for column in &mut result.columns {
+            column.type_name = by_name.get(&column.name).cloned().unwrap_or_default();
+        }
+        Ok(result)
+    }
+
+    /// The `where` text for a block and the rows still to skip. With the order
+    /// on the key, a `hint` turns into `key > hint` (only the rows between it
+    /// and `offset` are skipped); a deep skip without search first finds its
+    /// key with a key-only query (an index-only scan), then starts there.
+    #[allow(clippy::too_many_arguments)]
+    async fn keyset(
+        &self,
+        relation: &Relation,
+        primary_key: &[String],
+        uses_ctid: bool,
+        search: &str,
+        sort: Option<&ColumnSort>,
+        order: &str,
+        offset: u64,
+        hint: Option<&KeyHint>,
+    ) -> DbResult<(String, u64)> {
+        let searched = Self::filter(search);
+        let mut conditions: Vec<String> = searched
+            .strip_prefix(" where ")
+            .map(|c| vec![c.to_string()])
+            .unwrap_or_default();
+        let joined = |conditions: &[String]| {
+            if conditions.is_empty() {
+                String::new()
+            } else {
+                format!(" where {}", conditions.join(" and "))
+            }
+        };
+        let direction = if uses_ctid {
+            sort.is_none().then_some(true)
+        } else {
+            keyset_direction(primary_key, sort)
+        };
+        let Some(ascending) = direction else {
+            return Ok((joined(&conditions), offset));
+        };
+        let (tuple, width) = if uses_ctid {
+            ("t.ctid".to_string(), 1)
+        } else {
+            let names: Vec<String> = primary_key.iter().map(|k| quote_ident(k)).collect();
+            if names.len() == 1 {
+                (names[0].clone(), 1)
+            } else {
+                (format!("({})", names.join(", ")), names.len())
+            }
+        };
+        let literals = |values: &[Option<String>]| -> Option<String> {
+            let parts: Option<Vec<String>> = values
+                .iter()
+                .take(width)
+                .map(|v| v.as_deref().map(literal))
+                .collect();
+            let parts = parts?;
+            if parts.len() != width {
+                return None;
+            }
+            Some(if uses_ctid {
+                format!("{}::tid", parts[0])
+            } else if width == 1 {
+                parts[0].clone()
+            } else {
+                format!("({})", parts.join(", "))
+            })
+        };
+        let mut skip = offset;
+        let mut bound: Option<(String, bool)> = None;
+        if let Some(hint) = hint.filter(|h| h.offset < offset) {
+            if let Some(value) = literals(&hint.values) {
+                bound = Some((value, false));
+                skip = offset - hint.offset - 1;
+            }
+        }
+        let op = |inclusive: bool| match (ascending, inclusive) {
+            (true, false) => ">",
+            (true, true) => ">=",
+            (false, false) => "<",
+            (false, true) => "<=",
+        };
+        if skip >= DEEP_OFFSET && search.is_empty() && !uses_ctid {
+            let mut seek = Vec::new();
+            if let Some((value, _)) = &bound {
+                seek.push(format!("{tuple} {} {value}", op(false)));
+            }
+            let found = self
+                .query(&format!(
+                    "select {} from {} as t{}{order} limit 1 offset {skip}",
+                    primary_key
+                        .iter()
+                        .map(|k| quote_ident(k))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    self.qualified(relation),
+                    joined(&seek),
+                ))
+                .await?;
+            if let Some(value) = found.rows.first().and_then(|row| literals(row)) {
+                bound = Some((value, true));
+                skip = 0;
+            }
+        }
+        if let Some((value, inclusive)) = bound {
+            conditions.push(format!("{tuple} {} {value}", op(inclusive)));
+        }
+        Ok((joined(&conditions), skip))
+    }
+}
+
 impl Drop for PostgresSession {
     fn drop(&mut self) {
         // The client going away ends the connection task by itself; this is for a stuck one.
@@ -915,24 +1239,37 @@ impl DatabaseSession for PostgresSession {
         let _turn = self.turn().await;
         let start = Instant::now();
         let statements = sql_script::statements(sql, Dialect::Postgres);
-        match self.simple(sql, &statements).await {
-            Ok(results) => Ok(Execution::new(results, start.elapsed())),
-            Err(error) => {
-                // `begin; select 1/0` leaves the transaction failed, and every later
-                // call (the sidebar, the grid) would be refused until a ROLLBACK.
-                // Its work can only be rolled back anyway, so roll it back now.
-                if self.transaction_state().await.ok() == Some(TxState::Failed) {
-                    self.rollback().await;
-                    return Err(match error {
-                        DbError::Message(text) => DbError::Message(format!(
-                            "{text}\n\nThe transaction failed and was rolled back."
-                        )),
-                        other => other,
-                    });
-                }
-                Err(error)
-            }
-        }
+        let outcome = self.simple(sql, &statements).await;
+        let outcome = self.after_run(outcome).await;
+        self.note_transaction(&statements).await;
+        outcome.map(|results| Execution::new(results, start.elapsed()))
+    }
+
+    async fn execute_stream(&self, sql: &str, sink: &mut StreamSink) -> DbResult<()> {
+        let _turn = self.turn().await;
+        let statements = sql_script::statements(sql, Dialect::Postgres);
+        let outcome = self.simple_stream(sql, &statements, sink).await;
+        let outcome = self.after_run(outcome).await;
+        self.note_transaction(&statements).await;
+        outcome
+    }
+
+    fn transaction_open(&self) -> bool {
+        self.in_transaction.load(Ordering::SeqCst)
+    }
+
+    async fn page_block(
+        &self,
+        relation: &Relation,
+        offset: u64,
+        limit: u32,
+        search: &str,
+        sort: Option<&ColumnSort>,
+        hint: Option<&KeyHint>,
+    ) -> DbResult<QueryResult> {
+        let _turn = self.turn().await;
+        self.page_in(relation, limit, offset, search, sort, hint)
+            .await
     }
 
     /// One statement (a prepared statement refuses several, so a COMMIT can't
@@ -1025,98 +1362,8 @@ impl DatabaseSession for PostgresSession {
         sort: Option<&ColumnSort>,
     ) -> DbResult<QueryResult> {
         let _turn = self.turn().await;
-        let primary_key = self.primary_key(relation).await?;
-        let uses_ctid = primary_key.is_empty() && relation.kind == RelationKind::Table;
-        let keys: Vec<String> = if !primary_key.is_empty() {
-            primary_key.iter().map(|k| quote_ident(k)).collect()
-        } else if uses_ctid {
-            vec!["t.ctid".into()]
-        } else {
-            vec![]
-        };
-        let mut terms: Vec<String> = sort
-            .map(|s| {
-                vec![format!(
-                    "{} {} nulls last",
-                    quote_ident(&s.column),
-                    s.direction()
-                )]
-            })
-            .unwrap_or_default();
-        terms.extend(keys);
-        let order = if terms.is_empty() {
-            String::new()
-        } else {
-            format!(" order by {}", terms.join(", "))
-        };
-        // Without a primary key, a row is found by ctid, checked with xmin: if another
-        // session changed or vacuumed it since, the ctid may point to another row.
-        let mut result = self
-            .query(&format!(
-                "select {}* from {} as t{}{} limit {} offset {}",
-                if uses_ctid {
-                    "ctid::text, xmin::text, "
-                } else {
-                    ""
-                },
-                self.qualified(relation),
-                Self::filter(search),
-                order,
-                limit,
-                offset
-            ))
-            .await?;
-        if uses_ctid && result.columns.len() >= 2 {
-            let keys: Vec<Vec<Option<String>>> = result
-                .rows
-                .iter()
-                .map(|row| row.iter().take(2).cloned().collect())
-                .collect();
-            result.columns.drain(..2);
-            for row in &mut result.rows {
-                row.drain(..2);
-            }
-            result.keys = Some(RowKeys {
-                columns: vec!["ctid".into(), "xmin".into()],
-                kind: RowKeyKind::Ctid,
-                values: keys,
-            });
-        } else if !primary_key.is_empty() {
-            let indexes: Vec<usize> = primary_key
-                .iter()
-                .filter_map(|name| result.columns.iter().position(|c| &c.name == name))
-                .collect();
-            if indexes.len() == primary_key.len() {
-                let values = result
-                    .rows
-                    .iter()
-                    .map(|row| indexes.iter().map(|&i| row[i].clone()).collect())
-                    .collect();
-                result.keys = Some(RowKeys {
-                    columns: primary_key.clone(),
-                    kind: RowKeyKind::PrimaryKey,
-                    values,
-                });
-            }
-        }
-        let types = self
-            .query(&format!(
-                "select a.attname, format_type(a.atttypid, a.atttypmod)
-                 from pg_attribute a
-                 where a.attrelid = {}::regclass and a.attnum > 0 and not a.attisdropped",
-                literal(&self.qualified(relation))
-            ))
-            .await?;
-        let mut by_name = std::collections::HashMap::<String, String>::new();
-        for row in types.rows {
-            if let (Some(Some(name)), Some(Some(kind))) = (row.first(), row.get(1)) {
-                by_name.entry(name.clone()).or_insert_with(|| kind.clone());
-            }
-        }
-        for column in &mut result.columns {
-            column.type_name = by_name.get(&column.name).cloned().unwrap_or_default();
-        }
-        Ok(result)
+        self.page_in(relation, limit, offset, search, sort, None)
+            .await
     }
 
     /// Exact row count, or None when the table is big enough that counting is slow.

@@ -21,7 +21,8 @@ export function RowEditor({ row }: { row: number | null }) {
   const model = useModel();
   const result = model.tableResult;
   const isNew = row === null;
-  const original = useMemo(() => (row === null ? null : result?.rows[row] ?? null), [row, result]);
+  // The row's cells from the grid's block cache (any row of the table, not just the first block).
+  const original = useMemo(() => (row === null ? null : model.tableRow(row)), [row, model]);
   const [fields, setFields] = useState<Field[]>(() =>
     (result?.columns ?? []).map((_, i) => {
       const value = original?.[i] ?? null;

@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::connection_problem;
 use crate::drivers;
 use crate::engine::Engine;
+use crate::pool::{Opener, Policy, PooledSession};
 use crate::session::{DatabaseSession, DbError, DbResult};
 use crate::ssh::{SshConfig, SshTunnel};
 
@@ -42,9 +43,10 @@ pub fn summary(text: &str) -> Option<Summary> {
     }
 }
 
-/// An open session and the tunnel it goes through. The session drops first.
+/// An open session (a small pool, see `pool.rs`) and the tunnel it goes
+/// through. The session drops first.
 pub struct Connection {
-    pub session: Arc<dyn DatabaseSession>,
+    pub session: Arc<PooledSession>,
     pub tunnel: Option<SshTunnel>,
 }
 
@@ -78,17 +80,49 @@ async fn open(text: &str, ssh: Option<&SshConfig>) -> DbResult<Connection> {
         }
     };
     let local_port = tunnel.as_ref().map(|t| t.local_port);
-    let session = match engine {
-        Engine::Postgres => drivers::postgres::connect(&url, local_port).await?,
-        Engine::Mysql => drivers::mysql::connect(&url, local_port).await?,
-        Engine::Sqlite => drivers::sqlite::connect(&url, local_port).await?,
-        Engine::Redis => drivers::redis::connect(&url, local_port).await?,
-        Engine::Mongodb => drivers::mongo::connect(&url, local_port).await?,
-    };
+    let session = open_driver(engine, &url, local_port).await?;
+    let pool = pooled(Arc::from(session), url, local_port);
+    pool.warm_up();
     Ok(Connection {
-        session: Arc::from(session),
+        session: Arc::new(pool),
         tunnel,
     })
+}
+
+async fn open_driver(
+    engine: Engine,
+    url: &str,
+    local_port: Option<u16>,
+) -> DbResult<Box<dyn DatabaseSession>> {
+    match engine {
+        Engine::Postgres => drivers::postgres::connect(url, local_port).await,
+        Engine::Mysql => drivers::mysql::connect(url, local_port).await,
+        Engine::Sqlite => drivers::sqlite::connect(url, local_port).await,
+        Engine::Redis => drivers::redis::connect(url, local_port).await,
+        Engine::Mongodb => drivers::mongo::connect(url, local_port).await,
+    }
+}
+
+/// Wraps an open driver session in its engine's pool: more connections to the
+/// same `url` (cleaned) and tunnel port, opened when browsing needs them.
+/// SQLite's extra connections are read-only.
+pub fn pooled(
+    pinned: Arc<dyn DatabaseSession>,
+    url: String,
+    local_port: Option<u16>,
+) -> PooledSession {
+    let engine = pinned.engine();
+    let policy = Policy::for_engine(engine);
+    let open: Opener = Arc::new(move || {
+        let url = url.clone();
+        Box::pin(async move {
+            match engine {
+                Engine::Sqlite => drivers::sqlite::connect_reader(&url).await,
+                other => open_driver(other, &url, local_port).await,
+            }
+        })
+    });
+    PooledSession::new(pinned, policy, Some(open))
 }
 
 #[cfg(test)]

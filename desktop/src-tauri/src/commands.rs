@@ -10,19 +10,21 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
+use tauri::ipc::{Channel, InvokeResponseBody, Response};
 use tauri::State;
 
 use crate::connector::{self, Connection, Summary};
 use crate::engine::Engine;
 use crate::export;
 use crate::session::{
-    CellValue, ColumnSort, DbError, DbResult, EditOutcome, Execution, QueryResult, Relation,
+    CellValue, ColumnSort, DatabaseSession, DbError, DbResult, EditOutcome, QueryResult, Relation,
     RowKey, SchemaGraph,
 };
 use crate::ssh::SshConfig;
 use crate::store::{
     ConnectionDraft, ConnectionFolder, KeySource, SavedConnection, Store, StoreSnapshot,
 };
+use crate::wire::{self, StreamSink};
 
 /// One open connection.
 struct Open {
@@ -35,7 +37,7 @@ struct Open {
 impl Open {
     /// Stops what runs, closes the session (a few seconds at most), then the tunnel.
     async fn close(&self) {
-        self.connection.session.cancel();
+        self.connection.session.cancel_all();
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(3),
             self.connection.session.close(),
@@ -110,7 +112,10 @@ impl AppState {
 
     /// Runs `body` on the store, opening it first if needed.
     /// `DBLENS_STORE=memory` keeps everything in memory (snapshots, demos).
-    async fn with_store<T>(&self, body: impl FnOnce(&mut Store) -> DbResult<T>) -> DbResult<T> {
+    pub(crate) async fn with_store<T>(
+        &self,
+        body: impl FnOnce(&mut Store) -> DbResult<T>,
+    ) -> DbResult<T> {
         let mut guard = self.store.lock().await;
         if guard.is_none() {
             let store = if std::env::var("DBLENS_STORE").as_deref() == Ok("memory") {
@@ -253,11 +258,31 @@ pub async fn disconnect(state: State<'_, AppState>, session_id: String) -> DbRes
     Ok(())
 }
 
-/// Stops the running query of that session. Never waits for it.
+/// Stops the SQL panel's running query (or stream) of that session; with
+/// `scope` "all", browsing queries too. Never waits for them.
 #[tauri::command]
-pub fn cancel(state: State<'_, AppState>, session_id: String) -> DbResult<()> {
-    state.session(&session_id)?.connection.session.cancel();
+pub fn cancel(
+    state: State<'_, AppState>,
+    session_id: String,
+    scope: Option<String>,
+) -> DbResult<()> {
+    let open = state.session(&session_id)?;
+    if scope.as_deref() == Some("all") {
+        open.connection.session.cancel_all();
+    } else {
+        open.connection.session.cancel_sql();
+    }
     Ok(())
+}
+
+/// Whether the user's transaction is open on the SQL panel's connection.
+#[tauri::command]
+pub fn transaction_open(state: State<'_, AppState>, session_id: String) -> DbResult<bool> {
+    Ok(state
+        .session(&session_id)?
+        .connection
+        .session
+        .transaction_open())
 }
 
 #[tauri::command]
@@ -270,6 +295,7 @@ pub async fn relations(state: State<'_, AppState>, session_id: String) -> DbResu
         .await
 }
 
+/// One page as a MessagePack result block (`wire::block`).
 #[tauri::command]
 pub async fn page(
     state: State<'_, AppState>,
@@ -279,12 +305,36 @@ pub async fn page(
     offset: u64,
     search: String,
     sort: Option<ColumnSort>,
-) -> DbResult<QueryResult> {
+) -> DbResult<Response> {
     let open = state.session(&session_id)?;
-    open.connection
+    let result = open
+        .connection
         .session
         .page(&relation, limit, offset, &search, sort.as_ref())
-        .await
+        .await?;
+    Ok(Response::new(wire::block(&result, offset)))
+}
+
+/// A block of rows for the grid, as MessagePack. Stable order (sort, then the
+/// key); keyset pagination where the driver can (see `pool.rs`).
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn page_block(
+    state: State<'_, AppState>,
+    session_id: String,
+    relation: Relation,
+    offset: u64,
+    limit: u32,
+    search: String,
+    sort: Option<ColumnSort>,
+) -> DbResult<Response> {
+    let open = state.session(&session_id)?;
+    let result = open
+        .connection
+        .session
+        .page_block(&relation, offset, limit, &search, sort.as_ref(), None)
+        .await?;
+    Ok(Response::new(wire::block(&result, offset)))
 }
 
 #[tauri::command]
@@ -307,13 +357,14 @@ pub async fn execute(
     state: State<'_, AppState>,
     session_id: String,
     sql: String,
-) -> DbResult<Execution> {
-    state
+) -> DbResult<Response> {
+    let execution = state
         .session(&session_id)?
         .connection
         .session
         .execute(&sql)
-        .await
+        .await?;
+    Ok(Response::new(wire::execution(&execution)))
 }
 
 #[tauri::command]
@@ -321,13 +372,14 @@ pub async fn read_only(
     state: State<'_, AppState>,
     session_id: String,
     text: String,
-) -> DbResult<Execution> {
-    state
+) -> DbResult<Response> {
+    let execution = state
         .session(&session_id)?
         .connection
         .session
         .read_only(&text)
-        .await
+        .await?;
+    Ok(Response::new(wire::execution(&execution)))
 }
 
 #[tauri::command]
@@ -335,30 +387,25 @@ pub async fn rehearse(
     state: State<'_, AppState>,
     session_id: String,
     text: String,
-) -> DbResult<Execution> {
-    state
+) -> DbResult<Response> {
+    let execution = state
         .session(&session_id)?
         .connection
         .session
         .rehearse(&text)
-        .await
+        .await?;
+    Ok(Response::new(wire::execution(&execution)))
 }
 
-/// An all-or-nothing run, or why this database can't do one (the frontend may
-/// then offer to run the script plainly with `execute`).
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum AtomicOutcome {
-    Ran { execution: Execution },
-    NotAtomic { message: String },
-}
-
+/// An all-or-nothing run (`{kind: "ran", execution}`), or why this database
+/// can't do one (`{kind: "notAtomic", message}`; the frontend may then offer
+/// to run the script plainly), as MessagePack.
 #[tauri::command]
 pub async fn execute_atomically(
     state: State<'_, AppState>,
     session_id: String,
     text: String,
-) -> DbResult<AtomicOutcome> {
+) -> DbResult<Response> {
     match state
         .session(&session_id)?
         .connection
@@ -366,10 +413,41 @@ pub async fn execute_atomically(
         .execute_atomically(&text)
         .await
     {
-        Ok(execution) => Ok(AtomicOutcome::Ran { execution }),
-        Err(DbError::NotAtomic(message)) => Ok(AtomicOutcome::NotAtomic { message }),
+        Ok(execution) => Ok(Response::new(wire::atomic_ran(&execution))),
+        Err(DbError::NotAtomic(message)) => Ok(Response::new(wire::atomic_refused(&message))),
         Err(other) => Err(other),
     }
+}
+
+/// Runs statements on the SQL panel's connection and streams their rows over
+/// `channel` as MessagePack messages (see `wire::StreamSink`): the first block
+/// after 500 rows, then bigger ones, up to `row_cap` rows per result (default
+/// 100,000; more are counted). The last message is always `done`, with the
+/// error if the run failed; the command itself resolves once it is sent.
+#[tauri::command]
+pub async fn execute_stream(
+    state: State<'_, AppState>,
+    session_id: String,
+    sql: String,
+    channel: Channel<InvokeResponseBody>,
+    row_cap: Option<usize>,
+) -> DbResult<()> {
+    let open = state.session(&session_id)?;
+    let start = std::time::Instant::now();
+    let mut sink = StreamSink::new(
+        std::sync::Arc::new(move |bytes| channel.send(InvokeResponseBody::Raw(bytes)).is_ok()),
+        row_cap.unwrap_or(wire::STREAM_ROW_CAP),
+    );
+    let outcome = open
+        .connection
+        .session
+        .execute_stream(&sql, &mut sink)
+        .await;
+    sink.done(
+        start.elapsed().as_secs_f64() * 1000.0,
+        outcome.as_ref().err(),
+    );
+    Ok(())
 }
 
 #[tauri::command]

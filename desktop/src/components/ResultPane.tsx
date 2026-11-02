@@ -1,32 +1,39 @@
 // The center: the picked table a page at a time, or the last query's result,
 // with the status line, paging, search, and row actions below (ResultPane.swift).
 
-import { forwardRef, useCallback, useMemo } from "react";
-import { api, errorText, type Cell, type ColumnSort, type QueryResult } from "../api";
+import { forwardRef, useCallback, useMemo, useState } from "react";
+import { api, cellText, errorText, permuted, type ColumnSort, type ResultBlock } from "../api";
 import { copyText, tsv } from "../format";
 import { formatNumber, t } from "../i18n";
-import { pageSizes, useModel } from "../model";
-import { keyLabel, withKeys } from "../shortcuts";
+import { useModel } from "../model";
+import { BlockData, COLLECT_CAP, type GridData } from "../grid/blocks";
+import { gridCommand } from "../grid/commands";
+import { isMac, keyLabel, withKeys } from "../shortcuts";
+
+/** Saves the pending edits while the grid has the focus. */
+const saveKey = isMac ? "⌘S" : "Ctrl+S";
 import { Empty } from "./Empty";
 import { Icon } from "./Icon";
-import { ResultGrid } from "./ResultGrid";
+import { canImportFromMac, importFromMac } from "../native/importSwift";
+import { ResultGrid, type MenuEvent } from "./ResultGrid";
 
 /** Sorts a query result on screen (a table page is sorted by the database). */
-function sorted(result: QueryResult, sort: ColumnSort | null): QueryResult {
+function sorted(result: ResultBlock, sort: ColumnSort | null): ResultBlock {
   if (!sort) return result;
   const i = result.columns.findIndex((c) => c.name === sort.column);
   if (i < 0) return result;
-  const numeric = result.rows.every((r) => r[i] === null || r[i] === "" || !Number.isNaN(Number(r[i])));
-  const rows = [...result.rows].sort((a, b) => {
-    const x = a[i];
-    const y = b[i];
+  const values = Array.from({ length: result.rowCount }, (_, r) => cellText(result, r, i));
+  const numeric = values.every((v) => v === null || v === "" || !Number.isNaN(Number(v)));
+  const order = values.map((_, r) => r).sort((a, b) => {
+    const x = values[a];
+    const y = values[b];
     if (x === y) return 0;
     if (x === null) return 1;
     if (y === null) return -1;
-    const order = numeric ? Number(x) - Number(y) : x.localeCompare(y, undefined, { numeric: true });
-    return sort.ascending ? order : -order;
+    const by = numeric ? Number(x) - Number(y) : x.localeCompare(y, undefined, { numeric: true });
+    return sort.ascending ? by : -by;
   });
-  return { ...result, rows };
+  return permuted(result, order);
 }
 
 export const ResultPane = forwardRef<HTMLInputElement>(function ResultPane(_props, searchRef) {
@@ -55,6 +62,11 @@ export const ResultPane = forwardRef<HTMLInputElement>(function ResultPane(_prop
           {t("New Connection…")}
           <kbd>{keyLabel("newConnection")}</kbd>
         </button>
+        {canImportFromMac && model.store.connections.length === 0 && (
+          <button className="button" onClick={() => void importFromMac(model)}>
+            {t("Import Connections from dbLens for Mac…")}
+          </button>
+        )}
       </Empty>
     );
   }
@@ -102,35 +114,42 @@ export const ResultPane = forwardRef<HTMLInputElement>(function ResultPane(_prop
   return <Grid result={model.tableResult} ref={searchRef} />;
 });
 
-const Grid = forwardRef<HTMLInputElement, { result: QueryResult }>(function Grid({ result }, searchRef) {
+const Grid = forwardRef<HTMLInputElement, { result: ResultBlock }>(function Grid({ result }, searchRef) {
   const model = useModel();
   const isTable = model.shown === "table";
   const shown = useMemo(() => (isTable ? result : sorted(result, model.querySort)), [isTable, result, model.querySort]);
-  const editable = model.canEditRows;
+  const source = isTable ? model.tableSource : null;
+  // A table reads its rows in blocks; a query result is one block, growing while it streams.
+  const data: GridData = useMemo(() => source ?? new BlockData(shown), [source, shown]);
+  const editable = model.canEditRows && !!source?.editable;
+  const [shownRows, setShownRows] = useState<[number, number]>([0, 0]);
 
-  const onEditCell = useCallback(async (row: number, column: number, value: Cell) => {
-    try {
-      await model.updateCell(row, column, value);
-    } catch (e) {
-      throw errorText(e);
-    }
-  }, [model]);
+  const onSaveRow = useCallback((row: number) => model.saveRow(row), [model]);
   const onOpenRow = useCallback((row: number) => model.open({ kind: "row", row }), [model]);
   const onSort = useCallback((sort: ColumnSort | null) => void model.sort(sort), [model]);
   const onSelectionChange = useCallback((rows: Set<number>) => model.setSelection(rows), [model]);
-  const onCopied = useCallback((n: number) => model.showToast(n === 1 ? t("Copied 1 row") : t("Copied %@ rows", n)), [model]);
+  const onCopied = useCallback(
+    (n: number, cut: boolean) => {
+      const copied = n === 1 ? t("Copied 1 row") : t("Copied %@ rows", n);
+      model.showToast(cut ? `${copied} · ${t("the first %@ only", formatNumber(COLLECT_CAP))}` : copied);
+    },
+    [model],
+  );
+  const onRowsShown = useCallback((first: number, last: number) => setShownRows([first, last]), []);
 
-  const selected = [...model.selection].filter((i) => i < shown.rows.length);
+  const selected = [...model.selection].filter((i) => i < data.rows);
 
   const copy = async (rows?: number[]) => {
-    await copyText(tsv(shown, rows, true));
-    const n = rows?.length ?? shown.rows.length;
-    onCopied(n);
+    const { block, cut } = await data.collect(rows ?? null);
+    await copyText(tsv(block, undefined, true));
+    onCopied(block.rowCount, cut);
   };
 
-  const onContextMenu = (event: React.MouseEvent, row: number, column: number) => {
+  const onContextMenu = (event: MenuEvent, row: number, column: number) => {
     const rows = model.selection.has(row) ? [...model.selection] : [row];
-    const value = column >= 0 ? shown.rows[row]?.[column] : undefined;
+    const raw = column >= 0 ? data.shown(row, column) : undefined;
+    const value = raw === undefined || raw === null ? raw : String(raw);
+    const pending = data.hasPending;
     model.showMenu(event, [
       ...(column >= 0
         ? [{ title: t("Copy Value"), icon: "copy" as const, action: () => void copyText(value ?? "").then(() => model.showToast(t("Copied"))) }]
@@ -139,8 +158,12 @@ const Grid = forwardRef<HTMLInputElement, { result: QueryResult }>(function Grid
       ...(editable
         ? [
             { separator: true, title: "" },
-            ...(column >= 0
-              ? [{ title: t("Set to NULL"), disabled: value === null, action: () => void onEditCell(row, column, null).catch((e) => model.showToast(String(e))) }]
+            ...(column >= 0 ? [{ title: withKeys(t("Set to NULL"), "setNull"), disabled: value === null, action: () => void gridCommand("setNull") }] : []),
+            ...(pending
+              ? [
+                  { title: `${t("Save Changes")} (${saveKey})`, action: () => void gridCommand("saveChanges") },
+                  { title: t("Revert Changes"), action: () => void gridCommand("revertChanges") },
+                ]
               : []),
             { title: t("Edit Row…"), icon: "edit" as const, action: () => onOpenRow(row) },
             { title: rows.length === 1 ? t("Delete Row…") : t("Delete %@ Rows…", rows.length), icon: "trash" as const, destructive: true, action: () => confirmDelete(rows) },
@@ -149,27 +172,36 @@ const Grid = forwardRef<HTMLInputElement, { result: QueryResult }>(function Grid
     ]);
   };
 
+  const onHeaderMenu = (event: MenuEvent, column: number) => {
+    const name = data.columns[column]?.name;
+    if (!name) return;
+    const sort = isTable ? model.tableSort : model.querySort;
+    model.showMenu(event, [
+      { title: t("Sort Ascending"), disabled: sort?.column === name && sort.ascending, action: () => void model.sort({ column: name, ascending: true }) },
+      { title: t("Sort Descending"), disabled: sort?.column === name && !sort.ascending, action: () => void model.sort({ column: name, ascending: false }) },
+      { title: t("Clear Sort"), disabled: !sort, action: () => void model.sort(null) },
+      { separator: true, title: "" },
+      { title: t("Freeze First Column"), action: () => void gridCommand("freezeFirstColumn") },
+    ]);
+  };
+
   const confirmDelete = (rows: number[]) => confirmDeleteRows(model, rows);
 
   const status = (() => {
     if (!isTable) return model.runSummary;
     const searching = model.tableSearch.trim() !== "";
-    if (result.rows.length === 0) return searching ? t("No rows match") : result.note ?? t("Empty table");
-    const first = model.offset + 1;
-    const last = model.offset + result.rows.length;
-    const total =
-      typeof model.tableCount === "number"
-        ? formatNumber(model.tableCount)
-        : !searching && model.relation && model.relation.estimate >= 0
-          ? `~${formatNumber(model.relation.estimate)}`
-          : "?";
-    const rows = t("Rows %@–%@ of %@", formatNumber(first), formatNumber(last), total);
+    if (result.rowCount === 0) return searching ? t("No rows match") : result.note ?? t("Empty table");
+    const exact = typeof model.tableCount === "number" || data.exact;
+    const total = `${exact ? "" : "~"}${formatNumber(data.rows)}`;
+    const [first, last] = shownRows;
+    const rows = last > first ? t("Rows %@–%@ of %@", formatNumber(first + 1), formatNumber(Math.min(last, data.rows)), total) : t("%@ rows", total);
     return result.note ? `${rows} · ${result.note}` : rows;
   })();
 
   const exportAs = async (format: "csv" | "json") => {
     try {
-      const text = await api.exportResult(shown, format);
+      const { block } = await data.collect(null);
+      const text = await api.exportResult(block, format);
       await copyText(text);
       model.showToast(format === "csv" ? t("Copied as CSV") : t("Copied as JSON"));
     } catch (e) {
@@ -180,45 +212,24 @@ const Grid = forwardRef<HTMLInputElement, { result: QueryResult }>(function Grid
   return (
     <div className="result">
       <ResultGrid
-        result={shown}
+        data={data}
         version={isTable ? model.tableVersion : model.runVersion}
-        startIndex={isTable ? model.offset : 0}
         sort={isTable ? model.tableSort : model.querySort}
         onSort={onSort}
         selection={model.selection}
         onSelectionChange={onSelectionChange}
-        onEditCell={editable ? onEditCell : undefined}
+        onSaveRow={editable ? onSaveRow : undefined}
         onOpenRow={editable ? onOpenRow : undefined}
         onContextMenu={onContextMenu}
+        onHeaderMenu={onHeaderMenu}
         onCopied={onCopied}
+        onRowsShown={onRowsShown}
       />
       <footer className="result-footer">
-        {isTable && (
-          <div className="control-group">
-            <button className="button icon-only" disabled={!model.canGoBack} onClick={() => void model.previousPage()} title={withKeys(t("Previous page"), "previousPage")} aria-label={t("Previous")}>
-              <Icon name="chevronLeft" size={14} />
-            </button>
-            <button className="button icon-only" disabled={!model.canGoForward} onClick={() => void model.nextPage()} title={withKeys(t("Next page"), "nextPage")} aria-label={t("Next")}>
-              <Icon name="chevronRight" size={14} />
-            </button>
-          </div>
-        )}
         <span className="status">{status}</span>
-        {isTable && (
-          <select
-            className="button compact"
-            value={model.pageSize}
-            title={t("How many rows each page shows")}
-            onChange={(e) => void model.setPageSize(Number(e.target.value))}
-          >
-            {pageSizes.map((size) => (
-              <option key={size} value={size}>
-                {t("%@ per page", formatNumber(size))}
-              </option>
-            ))}
-          </select>
+        {isTable && (model.tableLoading || (typeof model.tableCount !== "number" && !data.exact && model.tableCount !== null)) && (
+          <span className="spinner small" title={t("Counting rows…")} />
         )}
-        {isTable && model.tableLoading && <span className="spinner small" />}
         <span className="spacer" />
         {isTable && (
           <div className="search-field">
@@ -239,6 +250,16 @@ const Grid = forwardRef<HTMLInputElement, { result: QueryResult }>(function Grid
           <span className="tertiary" title={t("Views and tables without a primary key can't be edited here.")}>
             {t("Read Only")}
           </span>
+        )}
+        {editable && data.hasPending && (
+          <>
+            <button className="button" onClick={() => void gridCommand("revertChanges")} title={t("Drop the edits not saved yet")}>
+              {t("Revert")}
+            </button>
+            <button className="button prominent" onClick={() => void gridCommand("saveChanges")} title={`${t("Save the edited rows")} (${saveKey})`}>
+              {t("Save Changes")}
+            </button>
+          </>
         )}
         {model.canInsertRows && (
           <button className="button" onClick={() => model.open({ kind: "row", row: null })} title={withKeys(t("Add a row"), "newRow")}>
@@ -261,7 +282,7 @@ const Grid = forwardRef<HTMLInputElement, { result: QueryResult }>(function Grid
           <button
             className="button"
             onClick={() => void copy()}
-            title={withKeys(t("Copy all rows on screen, with the header, to paste into a spreadsheet"), "copyRows")}
+            title={withKeys(t("Copy all rows, with the header, to paste into a spreadsheet"), "copyRows")}
           >
             <Icon name="copy" size={14} />
             {t("Copy All")}

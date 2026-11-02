@@ -7,11 +7,16 @@ pub mod connector;
 pub mod drivers;
 pub mod engine;
 pub mod export;
+pub mod import_swift;
+pub mod menu;
+pub mod pool;
 pub mod session;
 pub mod sql_script;
 pub mod ssh;
 pub mod store;
 pub mod url;
+pub mod windows;
+pub mod wire;
 
 use tauri::webview::PageLoadEvent;
 use tauri::{Manager, RunEvent, WindowEvent};
@@ -20,8 +25,24 @@ use tauri::{Manager, RunEvent, WindowEvent};
 pub fn run() {
     // rustls needs one crypto provider for the process; every driver uses ring.
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // A second launch raises the running app (or opens a database file in a new
+    // window) instead of starting another process. It must be the first plugin.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        windows::second_launch(app, &args)
+    }));
+    let app = builder
+        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_dialog::init())
         .manage(commands::AppState::default())
+        .manage(windows::PendingOpen::default())
+        .setup(|app| {
+            menu::install(app.handle())?;
+            windows::queue_launch_args(app.handle());
+            Ok(())
+        })
+        .on_menu_event(|app, event| menu::on_event(app, event.id().as_ref()))
         // A reload (or HMR) forgets every session id: close what that page opened.
         .on_page_load(|webview, payload| {
             if payload.event() == PageLoadEvent::Started {
@@ -44,6 +65,9 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            menu::set_menu_state,
+            windows::new_window,
+            windows::take_pending_open,
             commands::detect_engine,
             commands::summarize_url,
             commands::mask_url,
@@ -52,6 +76,9 @@ pub fn run() {
             commands::cancel,
             commands::relations,
             commands::page,
+            commands::page_block,
+            commands::execute_stream,
+            commands::transaction_open,
             commands::count,
             commands::execute,
             commands::read_only,
@@ -73,6 +100,7 @@ pub fn run() {
             commands::rename_folder,
             commands::delete_folder,
             commands::set_folder_expanded,
+            import_swift::import_swift_connections,
         ])
         .build(tauri::generate_context!())
         .expect("error while building dbLens");

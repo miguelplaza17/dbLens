@@ -290,6 +290,26 @@ impl Store {
         Ok(c)
     }
 
+    /// Keeps the dates a connection brought from another app (the dbLens for
+    /// Mac importer); None leaves that date as it is.
+    pub fn set_dates(
+        &mut self,
+        id: &str,
+        created_at: Option<String>,
+        last_used: Option<String>,
+    ) -> DbResult<()> {
+        if let Some(c) = self.meta.connections.iter_mut().find(|c| c.id == id) {
+            if let Some(created_at) = created_at {
+                c.created_at = created_at;
+            }
+            if last_used.is_some() {
+                c.last_used = last_used;
+            }
+            self.persist()?;
+        }
+        Ok(())
+    }
+
     /// Marks a connection as just used.
     pub fn touch(&mut self, id: &str) -> DbResult<()> {
         if let Some(c) = self.meta.connections.iter_mut().find(|c| c.id == id) {

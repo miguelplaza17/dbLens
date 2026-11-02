@@ -1,6 +1,6 @@
 // Text the UI builds from results: the status line, durations, TSV for the clipboard.
 
-import { mainResult, type Execution, type QueryResult } from "./api";
+import { cellText, mainResult, type Execution, type ResultBlock } from "./api";
 import { formatNumber, t } from "./i18n";
 
 /** "12 ms" or "1.40 s". */
@@ -14,7 +14,7 @@ export function executionSummary(execution: Execution): string {
   const main = mainResult(execution);
   if (main) {
     if (main.columns.length > 0) {
-      if (main.truncated) parts.push(t("%@ of %@ rows (truncated)", main.rows.length, main.totalRows));
+      if (main.truncated) parts.push(t("%@ of %@ rows (truncated)", main.rowCount, main.totalRows));
       else parts.push(main.totalRows === 1 ? t("%@ row", main.totalRows) : t("%@ rows", main.totalRows));
     } else if (main.command) {
       parts.push(main.command);
@@ -26,10 +26,12 @@ export function executionSummary(execution: Execution): string {
 }
 
 /** Rows as tab-separated text for a spreadsheet; NULL is empty. `rows` undefined = all. */
-export function tsv(result: QueryResult, rows?: number[], header = true): string {
-  const picked = rows ? [...rows].sort((a, b) => a - b) : result.rows.map((_, i) => i);
+export function tsv(result: ResultBlock, rows?: number[], header = true): string {
+  const picked = rows ? [...rows].sort((a, b) => a - b) : Array.from({ length: result.rowCount }, (_, i) => i);
   const clean = (v: string | null) => (v ?? "").replace(/[\t\r\n]+/g, " ");
-  const lines = picked.filter((i) => i < result.rows.length).map((i) => result.rows[i].map(clean).join("\t"));
+  const lines = picked
+    .filter((i) => i < result.rowCount)
+    .map((i) => result.columns.map((_, c) => clean(cellText(result, i, c))).join("\t"));
   if (header) lines.unshift(result.columns.map((c) => clean(c.name)).join("\t"));
   return lines.join("\n");
 }

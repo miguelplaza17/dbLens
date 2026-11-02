@@ -13,6 +13,30 @@ use crate::engine::Engine;
 /// Results bigger than this are cut, so the grid stays fast.
 pub const ROW_LIMIT: usize = 5_000;
 
+/// Where a block of a table page starts again cheaply: the key of the row at
+/// `offset` (0-based, in the same order, search and sort) from an earlier
+/// block. Drivers that can turn it into `where key > …` (keyset pagination)
+/// do; the others ignore it. See `DatabaseSession::page_block`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyHint {
+    pub offset: u64,
+    pub values: Vec<Option<String>>,
+}
+
+/// Blocks deeper than this find their first key with a key-only query (an
+/// index-only scan) instead of reading and skipping whole rows with OFFSET.
+pub const DEEP_OFFSET: u64 = 10_000;
+
+/// Whether `page_block` can seek by key: no sort, or the sort is on the one key column.
+/// Returns the direction (true = ascending).
+pub fn keyset_direction(keys: &[String], sort: Option<&ColumnSort>) -> Option<bool> {
+    match sort {
+        None if !keys.is_empty() => Some(true),
+        Some(s) if keys.len() == 1 && keys[0] == s.column => Some(s.ascending),
+        _ => None,
+    }
+}
+
 /// Which cancellable operation is running, so a cancel reaches only the
 /// statement it was meant for: one that has already finished, or the next one
 /// in line, is left alone. Ids start at 1; 0 means nothing is running.
@@ -630,6 +654,40 @@ pub trait DatabaseSession: Send + Sync {
 
     /// Closes the connection. Called once by `disconnect`; dropping must also be safe.
     async fn close(&self) {}
+
+    /// Whether a transaction the user opened in the SQL panel is open on this
+    /// connection, as last seen (no round trip). The pool sends browsing and
+    /// edits to this connection while it is, so they see the user's own work.
+    fn transaction_open(&self) -> bool {
+        false
+    }
+
+    /// One block of a table for the grid, like `page`. `hint`, when given, is the
+    /// key of an earlier row in the same order; drivers with keyset pagination
+    /// start from it (`where key > hint`) instead of skipping `offset` rows.
+    async fn page_block(
+        &self,
+        relation: &Relation,
+        offset: u64,
+        limit: u32,
+        search: &str,
+        sort: Option<&ColumnSort>,
+        hint: Option<&KeyHint>,
+    ) -> DbResult<QueryResult> {
+        let _ = hint;
+        self.page(relation, limit, offset, search, sort).await
+    }
+
+    /// Runs statements like `execute`, sending rows to `sink` as they arrive
+    /// (column-major MessagePack blocks, see `wire::StreamSink`). Drivers that
+    /// can't stream run `execute` and send its results whole.
+    async fn execute_stream(&self, sql: &str, sink: &mut crate::wire::StreamSink) -> DbResult<()> {
+        let execution = self.execute(sql).await?;
+        for result in &execution.results {
+            sink.send_result(result);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

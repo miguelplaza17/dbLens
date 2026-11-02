@@ -7,6 +7,7 @@ import { t } from "../i18n";
 import { useModel } from "../model";
 import { withKeys } from "../shortcuts";
 import { copyText } from "../format";
+import { beginConnectionDrag } from "../native/dragConnections";
 import { Icon, type IconName } from "./Icon";
 
 const relationIcon: Record<Relation["kind"], IconName> = {
@@ -121,6 +122,7 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
         tooltip={`${engineNames[c.engine]}${c.ssh ? ` · ${t("Via SSH %@", c.ssh.host)}` : ""}`}
         onClick={() => !active && !busy && void model.connect(c)}
         onContextMenu={(e) => connectionMenu(e, c)}
+        onMouseDown={(e) => beginConnectionDrag(e, (folderId) => folderId !== c.folderId && void model.moveConnection(c, folderId))}
         trailing={busy ? <span className="spinner small" /> : active ? <span className="dot-active" aria-label={t("Connected")} /> : null}
       />
     );
@@ -141,7 +143,7 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
         />
       </div>
       <div className="sidebar-scroll" onContextMenu={(e) => e.target === e.currentTarget && model.showMenu(e, [{ title: t("New Folder"), icon: "folderPlus", action: newFolder }])}>
-        <div className="sidebar-section-header">
+        <div className="sidebar-section-header" data-drop-folder="">
           <span>{t("Connections")}</span>
           <span className="sidebar-section-actions">
             <button className="icon-button" title={t("New Folder")} aria-label={t("New Folder")} onClick={newFolder}>
@@ -175,6 +177,7 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
                 }}
                 onClick={() => void model.toggleFolder(folder.id)}
                 onContextMenu={(e) => folderMenu(e, folder.id)}
+                dropFolder={folder.id}
                 trailing={!open && inside.length > 0 ? <span className="count">{inside.length}</span> : null}
               />
               {open && inside.map((c) => row(c, true))}
@@ -242,6 +245,9 @@ function SidebarRow(props: {
   onClick?: () => void;
   onDoubleClick?: () => void;
   onContextMenu?: (event: React.MouseEvent) => void;
+  onMouseDown?: (event: React.MouseEvent) => void;
+  /** Dropping a connection here moves it into this folder. */
+  dropFolder?: string;
 }) {
   const className = ["sidebar-row", props.nested && "nested", props.selected && "selected", props.muted && "muted"]
     .filter(Boolean)
@@ -271,6 +277,8 @@ function SidebarRow(props: {
       onClick={props.onClick}
       onDoubleClick={props.onDoubleClick}
       onContextMenu={props.onContextMenu}
+      onMouseDown={props.onMouseDown}
+      data-drop-folder={props.dropFolder}
       aria-current={props.selected ? "true" : undefined}
     >
       {props.disclosure && <Icon name={props.disclosure === "open" ? "chevronDown" : "chevronRight"} size={12} />}

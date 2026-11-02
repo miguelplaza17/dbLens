@@ -7,6 +7,11 @@ import { engineNames } from "./api";
 import { t } from "./i18n";
 import { useModel, type AppModel, type Sheet as SheetState } from "./model";
 import { actionFor, shortcutList, withKeys, type Action } from "./shortcuts";
+import { dispatch, setPerformer } from "./native/actions";
+import { installNative } from "./native/bridge";
+import { performNative } from "./native/perform";
+import { gridAction } from "./grid/commands";
+import { PerfHud } from "./grid/PerfHud";
 import { tsv, copyText } from "./format";
 import { ConnectionSheet } from "./components/ConnectionSheet";
 import { Icon } from "./components/Icon";
@@ -37,11 +42,18 @@ export default function App() {
       // The editor handles its own run keys (so a selection runs).
       if (target?.closest(".cm-editor") && ["run", "rehearse", "runAtomically"].includes(action)) return;
       event.preventDefault();
-      perform(model, action, { filter: filterRef.current, search: searchRef.current });
+      dispatch(action);
     };
+    // Keys and native menu clicks end up here: the same code runs for both.
+    setPerformer((action) => perform(model, action, { filter: filterRef.current, search: searchRef.current }));
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      setPerformer(null);
+    };
   }, [model]);
+
+  useEffect(() => installNative(model), [model]);
 
   const title = model.session?.name ?? "dbLens";
   const subtitle = !model.session
@@ -118,6 +130,7 @@ export default function App() {
         </header>
         <div className="content">
           <ResultPane ref={searchRef} />
+          <PerfHud />
         </div>
         {model.showSQLPanel && (
           <>
@@ -225,6 +238,9 @@ function SheetView({ sheet }: { sheet: SheetState }) {
 
 /** What each shortcut does. */
 function perform(model: AppModel, action: Action, fields: { filter: HTMLInputElement | null; search: HTMLInputElement | null }) {
+  // The grid on screen takes copy, paging and the perf HUD first.
+  if (gridAction(action)) return;
+  if (performNative(model, action)) return;
   switch (action) {
     case "newConnection":
       return model.open({ kind: "connection", editing: null });
@@ -252,7 +268,7 @@ function perform(model: AppModel, action: Action, fields: { filter: HTMLInputEle
     case "copyRows": {
       const result = model.shownResult;
       if (!result) return;
-      return void copyText(tsv(result)).then(() => model.showToast(t("Copied %@ rows", result.rows.length)));
+      return void copyText(tsv(result)).then(() => model.showToast(t("Copied %@ rows", result.rowCount)));
     }
     case "run":
       return void model.run();

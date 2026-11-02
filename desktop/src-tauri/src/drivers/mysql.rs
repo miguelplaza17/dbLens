@@ -14,12 +14,13 @@ use tokio::sync::Mutex;
 use crate::connector::Summary;
 use crate::engine::Engine;
 use crate::session::{
-    like_pattern, Activity, CellValue, Column, ColumnSort, DatabaseSession, DbError, DbResult,
-    EditOutcome, Execution, QueryResult, Relation, RelationKind, RowKey, RowKeyKind, RowKeys,
-    SchemaGraph, ROW_LIMIT,
+    keyset_direction, like_pattern, Activity, CellValue, Column, ColumnSort, DatabaseSession,
+    DbError, DbResult, EditOutcome, Execution, KeyHint, QueryResult, Relation, RelationKind,
+    RowKey, RowKeyKind, RowKeys, SchemaGraph, DEEP_OFFSET, ROW_LIMIT,
 };
 use crate::sql_script::{self, Dialect};
 use crate::url::UrlParts;
+use crate::wire::StreamSink;
 
 const SCHEMES: [&str; 3] = ["mysql", "mariadb", "mysqlx"];
 const SYSTEM_SCHEMAS: &str = "('mysql','information_schema','performance_schema','sys')";
@@ -253,6 +254,7 @@ pub async fn connect(url: &str, local_port: Option<u16>) -> DbResult<Box<dyn Dat
     let state = Arc::new(Shared {
         activity: Activity::default(),
         editing: AtomicBool::new(false),
+        in_transaction: AtomicBool::new(false),
         id: conn.id(),
         opts,
     });
@@ -281,6 +283,8 @@ struct Shared {
     /// An edit is running: its statements are not cancellable, so a cancel never
     /// lands between its own START TRANSACTION and COMMIT.
     editing: AtomicBool,
+    /// The user's transaction is open, as of the last SQL run.
+    in_transaction: AtomicBool,
     id: u32,
     opts: Opts,
 }
@@ -496,6 +500,24 @@ fn key_select(column: &str, form: KeyForm) -> String {
     }
 }
 
+/// A key value (as `key_select` read it) as a literal to compare the column with.
+fn key_literal(form: KeyForm, value: &str, backslash_off: bool) -> Option<String> {
+    match form {
+        KeyForm::Text => Some(literal(Some(value), backslash_off)),
+        KeyForm::Hex => {
+            let digits = value
+                .strip_prefix("0x")
+                .or_else(|| value.strip_prefix("0X"))
+                .unwrap_or(value);
+            (digits.len() % 2 == 0 && digits.chars().all(|c| c.is_ascii_hexdigit()))
+                .then(|| format!("x'{digits}'"))
+        }
+        KeyForm::Number => (!value.is_empty() && value.chars().all(|c| c.is_ascii_digit()))
+            .then(|| value.to_string()),
+        KeyForm::FloatText => None,
+    }
+}
+
 /// `col = value` for one key column, as sent and as logged.
 fn key_test(
     column: &str,
@@ -666,6 +688,224 @@ impl MySqlSession {
             return Err(DbError::Cancelled);
         }
         outcome
+    }
+
+    /// A page, starting from `hint` (keyset pagination) or a key found by a
+    /// key-only query for deep offsets, when the order is the key's.
+    #[allow(clippy::too_many_arguments)]
+    async fn page_in(
+        &self,
+        conn: &mut Conn,
+        relation: &Relation,
+        limit: u32,
+        offset: u64,
+        search: &str,
+        sort: Option<&ColumnSort>,
+        hint: Option<&KeyHint>,
+    ) -> DbResult<QueryResult> {
+        let primary_key = self.primary_key(conn, relation).await?;
+        // MySQL sorts NULL first going up; "x is null" puts it last either way.
+        let mut terms: Vec<String> = Vec::new();
+        if let Some(sort) = sort {
+            let name = quote_name(&sort.column);
+            terms.push(format!("{name} is null"));
+            terms.push(format!("{name} {}", sort.direction()));
+        }
+        terms.extend(primary_key.iter().map(|c| quote_name(c)));
+        let order = if terms.is_empty() {
+            String::new()
+        } else {
+            format!(" order by {}", terms.join(", "))
+        };
+        let types = self.column_types(conn, relation).await?;
+        let off = if search.is_empty() && hint.is_none() && offset < DEEP_OFFSET {
+            false
+        } else {
+            no_backslash_escapes(conn).await?
+        };
+        let mut conditions: Vec<String> = Vec::new();
+        if !search.is_empty() {
+            let names: Vec<String> = types.iter().map(|t| t.0.clone()).collect();
+            let filter = Self::filter(search, &names, off);
+            if let Some(rest) = filter.strip_prefix(" where ") {
+                conditions.push(rest.to_string());
+            }
+        }
+        let forms: Vec<KeyForm> = primary_key
+            .iter()
+            .map(|column| {
+                types
+                    .iter()
+                    .find(|(n, _)| n == column)
+                    .map(|(_, t)| key_form(t))
+                    .unwrap_or(KeyForm::Text)
+            })
+            .collect();
+        let skip = self
+            .keyset(
+                conn,
+                relation,
+                &primary_key,
+                &forms,
+                search,
+                sort,
+                &order,
+                offset,
+                hint,
+                off,
+                &mut conditions,
+            )
+            .await?;
+        let where_ = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!(" where {}", conditions.join(" and "))
+        };
+        // The key columns come first, read exactly (bytes as full hex, floats as
+        // the server's text), and are taken off before the rows are shown.
+        let hidden: Vec<String> = primary_key
+            .iter()
+            .enumerate()
+            .map(|(i, column)| {
+                let form = types
+                    .iter()
+                    .find(|(n, _)| n == column)
+                    .map(|(_, t)| key_form(t))
+                    .unwrap_or(KeyForm::Text);
+                format!("{} as `dblens_key_{i}`, ", key_select(column, form))
+            })
+            .collect();
+        let sql = format!(
+            "select {}t.* from {} as t{where_}{order} limit {limit} offset {skip}",
+            hidden.concat(),
+            self.qualified(relation)
+        );
+        let mut result = self.single(conn, &sql).await?;
+        let n = hidden.len();
+        if n > 0 && result.columns.len() >= n {
+            let values = result
+                .rows
+                .iter_mut()
+                .map(|row| row.drain(..n).collect())
+                .collect();
+            result.columns.drain(..n);
+            result.keys = Some(RowKeys {
+                columns: primary_key,
+                kind: RowKeyKind::PrimaryKey,
+                values,
+            });
+        }
+        for column in &mut result.columns {
+            if let Some((_, t)) = types.iter().find(|(n, _)| n == &column.name) {
+                column.type_name = t.clone();
+            }
+        }
+        Ok(result)
+    }
+
+    /// Adds `key > hint` (or `>=` a key found by a key-only seek) to
+    /// `conditions` and returns the rows still to skip.
+    #[allow(clippy::too_many_arguments)]
+    async fn keyset(
+        &self,
+        conn: &mut Conn,
+        relation: &Relation,
+        primary_key: &[String],
+        forms: &[KeyForm],
+        search: &str,
+        sort: Option<&ColumnSort>,
+        order: &str,
+        offset: u64,
+        hint: Option<&KeyHint>,
+        off: bool,
+        conditions: &mut Vec<String>,
+    ) -> DbResult<u64> {
+        let Some(ascending) = keyset_direction(primary_key, sort) else {
+            return Ok(offset);
+        };
+        if forms.contains(&KeyForm::FloatText) {
+            return Ok(offset);
+        }
+        let names: Vec<String> = primary_key
+            .iter()
+            .map(|k| format!("t.{}", quote_name(k)))
+            .collect();
+        let tuple = if names.len() == 1 {
+            names[0].clone()
+        } else {
+            format!("({})", names.join(", "))
+        };
+        let literals = |values: &[Option<String>]| -> Option<String> {
+            if values.len() != forms.len() {
+                return None;
+            }
+            let parts: Option<Vec<String>> = values
+                .iter()
+                .zip(forms)
+                .map(|(v, form)| key_literal(*form, v.as_deref()?, off))
+                .collect();
+            let parts = parts?;
+            Some(if parts.len() == 1 {
+                parts[0].clone()
+            } else {
+                format!("({})", parts.join(", "))
+            })
+        };
+        let op = |inclusive: bool| match (ascending, inclusive) {
+            (true, false) => ">",
+            (true, true) => ">=",
+            (false, false) => "<",
+            (false, true) => "<=",
+        };
+        let mut skip = offset;
+        let mut bound: Option<(String, bool)> = None;
+        if let Some(hint) = hint.filter(|h| h.offset < offset) {
+            if let Some(value) = literals(&hint.values) {
+                bound = Some((value, false));
+                skip = offset - hint.offset - 1;
+            }
+        }
+        if skip >= DEEP_OFFSET && search.is_empty() {
+            let seek = match &bound {
+                Some((value, _)) => format!(" where {tuple} {} {value}", op(false)),
+                None => String::new(),
+            };
+            let exprs: Vec<String> = primary_key
+                .iter()
+                .zip(forms)
+                .map(|(k, f)| key_select(k, *f))
+                .collect();
+            let found = self
+                .single(
+                    conn,
+                    &format!(
+                        "select {} from {} as t{seek}{order} limit 1 offset {skip}",
+                        exprs.join(", "),
+                        self.qualified(relation)
+                    ),
+                )
+                .await?;
+            if let Some(value) = found.rows.first().and_then(|row| literals(row)) {
+                bound = Some((value, true));
+                skip = 0;
+            }
+        }
+        if let Some((value, inclusive)) = bound {
+            conditions.push(format!("{tuple} {} {value}", op(inclusive)));
+        }
+        Ok(skip)
+    }
+
+    /// Remembers whether the user's transaction is open after a run, asking
+    /// the server only when the run could have changed it.
+    async fn note_transaction(&self, conn: &mut Conn, sql: &str) {
+        let changes = statement_verbs(sql)
+            .iter()
+            .any(|v| matches!(v.as_str(), "BEGIN" | "START" | "SET" | "XA"));
+        if changes || self.state.in_transaction.load(Ordering::SeqCst) {
+            let open = self.user_transaction(conn).await.unwrap_or(false);
+            self.state.in_transaction.store(open, Ordering::SeqCst);
+        }
     }
 
     /// Whether the user opened a transaction in the SQL panel (`@@in_transaction`,
@@ -937,6 +1177,65 @@ impl MySqlSession {
     }
 }
 
+/// Reads every result set of `sql` into `sink` as the rows arrive.
+async fn stream_all(conn: &mut Conn, sql: &str, sink: &mut StreamSink) -> DbResult<()> {
+    let verbs = statement_verbs(sql);
+    let mut result = conn.query_iter(sql).await.map_err(|e| to_error(&e))?;
+    let mut index = 0;
+    while result.columns().is_some() {
+        let verb = verbs
+            .get(index)
+            .or(verbs.last())
+            .cloned()
+            .unwrap_or_default();
+        match result.columns().filter(|c| !c.is_empty()) {
+            Some(columns) => {
+                let binary: Vec<bool> = columns.iter().map(is_binary).collect();
+                let names: Vec<Column> = columns
+                    .iter()
+                    .map(|c| Column::new(c.name_str().into_owned(), type_name(c)))
+                    .collect();
+                sink.begin(&names);
+                while let Some(row) = result.next().await.map_err(|e| to_error(&e))? {
+                    if sink.keeping() {
+                        for i in 0..row.len() {
+                            let text = cell(
+                                row.as_ref(i).unwrap_or(&Value::NULL),
+                                binary.get(i).copied().unwrap_or(false),
+                            );
+                            sink.cell(text.as_deref());
+                        }
+                    }
+                    sink.end_row();
+                    if !sink.is_open() {
+                        return Err(DbError::Cancelled);
+                    }
+                }
+                let seen = sink.seen();
+                sink.end(&format!("SELECT {seen}"));
+                if verb != "CALL" {
+                    index += 1;
+                }
+            }
+            None => {
+                let affected = result.affected_rows();
+                let done = status(&verb, affected);
+                sink.command(&done.command, done.total_rows);
+                index += 1;
+                result
+                    .reduce((), |_, _: Row| ())
+                    .await
+                    .map_err(|e| to_error(&e))?;
+            }
+        }
+        if result.columns().is_none() {
+            break;
+        }
+    }
+    result.drop_result().await.map_err(|e| to_error(&e))?;
+    Ok(())
+}
+
 /// Reads every result set of `sql`.
 async fn read_all(conn: &mut Conn, sql: &str) -> DbResult<Vec<QueryResult>> {
     let verbs = statement_verbs(sql);
@@ -1062,8 +1361,9 @@ impl DatabaseSession for MySqlSession {
     async fn execute(&self, sql: &str) -> DbResult<Execution> {
         let start = Instant::now();
         let mut conn = self.guard().await?;
-        let results = self.run_all(&mut conn, sql).await?;
-        Ok(Execution::new(results, start.elapsed()))
+        let results = self.run_all(&mut conn, sql).await;
+        self.note_transaction(&mut conn, sql).await;
+        Ok(Execution::new(results?, start.elapsed()))
     }
 
     /// One statement in a read-only session and transaction, rolled back. DDL
@@ -1147,68 +1447,41 @@ impl DatabaseSession for MySqlSession {
         sort: Option<&ColumnSort>,
     ) -> DbResult<QueryResult> {
         let mut conn = self.guard().await?;
-        let primary_key = self.primary_key(&mut conn, relation).await?;
-        // MySQL sorts NULL first going up; "x is null" puts it last either way.
-        let mut terms: Vec<String> = Vec::new();
-        if let Some(sort) = sort {
-            let name = quote_name(&sort.column);
-            terms.push(format!("{name} is null"));
-            terms.push(format!("{name} {}", sort.direction()));
+        self.page_in(&mut conn, relation, limit, offset, search, sort, None)
+            .await
+    }
+
+    async fn page_block(
+        &self,
+        relation: &Relation,
+        offset: u64,
+        limit: u32,
+        search: &str,
+        sort: Option<&ColumnSort>,
+        hint: Option<&KeyHint>,
+    ) -> DbResult<QueryResult> {
+        let mut conn = self.guard().await?;
+        self.page_in(&mut conn, relation, limit, offset, search, sort, hint)
+            .await
+    }
+
+    fn transaction_open(&self) -> bool {
+        self.state.in_transaction.load(Ordering::SeqCst)
+    }
+
+    async fn execute_stream(&self, sql: &str, sink: &mut StreamSink) -> DbResult<()> {
+        let mut conn = self.guard().await?;
+        let id = self.state.activity.start();
+        let outcome = stream_all(&mut conn, sql, sink).await;
+        let cancelled = self.state.activity.finish(id);
+        if !sink.is_open() {
+            self.cancel();
         }
-        terms.extend(primary_key.iter().map(|c| quote_name(c)));
-        let order = if terms.is_empty() {
-            String::new()
-        } else {
-            format!(" order by {}", terms.join(", "))
-        };
-        let types = self.column_types(&mut conn, relation).await?;
-        let where_ = if search.is_empty() {
-            String::new()
-        } else {
-            let names: Vec<String> = types.iter().map(|t| t.0.clone()).collect();
-            let off = no_backslash_escapes(&mut conn).await?;
-            Self::filter(search, &names, off)
-        };
-        // The key columns come first, read exactly (bytes as full hex, floats as
-        // the server's text), and are taken off before the rows are shown.
-        let hidden: Vec<String> = primary_key
-            .iter()
-            .enumerate()
-            .map(|(i, column)| {
-                let form = types
-                    .iter()
-                    .find(|(n, _)| n == column)
-                    .map(|(_, t)| key_form(t))
-                    .unwrap_or(KeyForm::Text);
-                format!("{} as `dblens_key_{i}`, ", key_select(column, form))
-            })
-            .collect();
-        let sql = format!(
-            "select {}t.* from {} as t{where_}{order} limit {limit} offset {offset}",
-            hidden.concat(),
-            self.qualified(relation)
-        );
-        let mut result = self.single(&mut conn, &sql).await?;
-        let n = hidden.len();
-        if n > 0 && result.columns.len() >= n {
-            let values = result
-                .rows
-                .iter_mut()
-                .map(|row| row.drain(..n).collect())
-                .collect();
-            result.columns.drain(..n);
-            result.keys = Some(RowKeys {
-                columns: primary_key,
-                kind: RowKeyKind::PrimaryKey,
-                values,
-            });
+        self.note_transaction(&mut conn, sql).await;
+        if cancelled {
+            return Err(DbError::Cancelled);
         }
-        for column in &mut result.columns {
-            if let Some((_, t)) = types.iter().find(|(n, _)| n == &column.name) {
-                column.type_name = t.clone();
-            }
-        }
-        Ok(result)
+        outcome
     }
 
     /// Exact row count, or None when the table is big enough that counting is slow.

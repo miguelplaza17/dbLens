@@ -41,6 +41,7 @@ jobs:
             libgtk-3-dev \
             librsvg2-dev \
             libayatana-appindicator3-dev \
+            libxdo-dev \
             patchelf
 
       - uses: actions/setup-node@v4
@@ -83,6 +84,112 @@ jobs:
         with:
           name: dblens-desktop-${{ matrix.os }}
           path: desktop/src-tauri/target/release/bundle/
+          if-no-files-found: error
+
+  macos:
+    # Apple silicon runner; the bundle is universal (arm64 + x86_64, joined by
+    # lipo). build.rs compiles swift/SecureEnclaveOpen.swift for each arch.
+    # Signing and notarization only happen when the repository has the
+    # secrets; otherwise the app is signed ad hoc ("-").
+    name: build (macos-14, universal)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - name: Swift toolchain
+        run: |
+          xcode-select -p
+          xcrun --sdk macosx swiftc --version
+
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: desktop
+        run: npm run build
+
+      - name: Format
+        working-directory: desktop/src-tauri
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: desktop/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Unit tests (arm64, links the Swift Secure Enclave helper)
+        working-directory: desktop/src-tauri
+        run: cargo test
+
+      - name: Check x86_64
+        working-directory: desktop/src-tauri
+        run: cargo check --target x86_64-apple-darwin
+
+      - name: Signing settings
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            {
+              echo "APPLE_CERTIFICATE=$APPLE_CERTIFICATE"
+              echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
+              echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY"
+            } >> "$GITHUB_ENV"
+            if [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+              {
+                echo "APPLE_ID=$APPLE_ID"
+                echo "APPLE_PASSWORD=$APPLE_PASSWORD"
+                echo "APPLE_TEAM_ID=$APPLE_TEAM_ID"
+              } >> "$GITHUB_ENV"
+              echo "Signing with Developer ID and notarizing."
+            else
+              echo "Signing with Developer ID; no notarization secrets."
+            fi
+          else
+            echo "APPLE_SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            echo "No signing secrets: signing ad hoc."
+          fi
+
+      - name: Build universal bundles
+        uses: tauri-apps/tauri-action@v0
+        with:
+          projectPath: desktop
+          args: --target universal-apple-darwin
+
+      - name: Check the universal binary
+        run: |
+          app=$(ls -d desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/*.app | head -1)
+          lipo -info "$app/Contents/MacOS/"*
+          lipo "$app/Contents/MacOS/"* -verify_arch arm64 x86_64
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+      - name: Upload bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: dblens-desktop-macos-universal
+          path: |
+            desktop/src-tauri/target/universal-apple-darwin/release/bundle/dmg/
+            desktop/src-tauri/target/universal-apple-darwin/release/bundle/macos/
           if-no-files-found: error
 
   integration:
@@ -165,6 +272,7 @@ jobs:
             libgtk-3-dev \
             librsvg2-dev \
             libayatana-appindicator3-dev \
+            libxdo-dev \
             patchelf
 
       - uses: dtolnay/rust-toolchain@stable

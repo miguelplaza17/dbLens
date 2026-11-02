@@ -11,7 +11,6 @@ import type {
   ConnectionDraft,
   ConnectionFolder,
   Engine,
-  Execution,
   QueryResult,
   Relation,
   RowKey,
@@ -29,6 +28,144 @@ interface Table {
   rows: Cell[][];
   /** Column names of the primary key; empty for views. */
   key: string[];
+  /** A generated table too big to keep as arrays (`rows` is empty then). */
+  big?: BigTable;
+}
+
+/** A million generated rows, made when read: ids in table order, edited rows kept aside.
+ *  Enough to scroll the grid through page_block like a real table. */
+class BigTable {
+  /** Live ids in table order; null while it is still 1…size. */
+  private ids: number[] | null = null;
+  private edited = new Map<number, Cell[]>();
+  private next: number;
+  private views = new Map<string, number[]>();
+
+  constructor(
+    private size: number,
+    private make: (id: number) => Cell[],
+  ) {
+    this.next = size + 1;
+  }
+
+  get length(): number {
+    return this.ids ? this.ids.length : this.size;
+  }
+
+  row(id: number): Cell[] {
+    return this.edited.get(id) ?? this.make(id);
+  }
+
+  private idAt(i: number): number {
+    return this.ids ? this.ids[i] : i + 1;
+  }
+
+  /** The rows for a search and sort, as a function from position to id. */
+  view(columns: Column[], search: string, sort: ColumnSort | null | undefined): { length: number; id: (i: number) => number } {
+    const needle = search.trim().toLowerCase();
+    const byId = !sort || sort.column === columns[0].name;
+    if (!needle && byId) {
+      const n = this.length;
+      return { length: n, id: sort && !sort.ascending ? (i) => this.idAt(n - 1 - i) : (i) => this.idAt(i) };
+    }
+    const cacheKey = `${needle}\u0000${sort?.column ?? ""}\u0000${sort?.ascending ?? ""}`;
+    let ids = this.views.get(cacheKey);
+    if (!ids) {
+      ids = [];
+      for (let i = 0; i < this.length; i++) {
+        const id = this.idAt(i);
+        if (!needle || this.row(id).some((c) => c?.toLowerCase().includes(needle))) ids.push(id);
+      }
+      const c = sort ? columns.findIndex((x) => x.name === sort.column) : -1;
+      if (sort && c > 0) {
+        const values = new Map(ids.map((id) => [id, this.row(id)[c]]));
+        const numeric = /int|numeric|real|double/.test(columns[c].type);
+        ids.sort((a, b) => {
+          const x = values.get(a) ?? null;
+          const y = values.get(b) ?? null;
+          if (x === y) return 0;
+          if (x === null) return 1;
+          if (y === null) return -1;
+          const order = numeric ? Number(x) - Number(y) : x < y ? -1 : 1;
+          return sort.ascending ? order : -order;
+        });
+      } else if (sort && !sort.ascending) {
+        ids.reverse();
+      }
+      this.views.set(cacheKey, ids);
+    }
+    const list = ids;
+    return { length: list.length, id: (i) => list[i] };
+  }
+
+  has(id: number): boolean {
+    return this.ids ? this.ids.includes(id) : id >= 1 && id <= this.size;
+  }
+
+  update(id: number, row: Cell[]) {
+    this.edited.set(id, row);
+    this.views.clear();
+  }
+
+  insert(row: Cell[]): number {
+    const id = this.next++;
+    this.ids ??= Array.from({ length: this.size }, (_, i) => i + 1);
+    this.ids.push(id);
+    this.edited.set(id, [String(id), ...row.slice(1)]);
+    this.views.clear();
+    return id;
+  }
+
+  remove(id: number) {
+    this.ids ??= Array.from({ length: this.size }, (_, i) => i + 1);
+    const at = this.ids.indexOf(id);
+    if (at >= 0) this.ids.splice(at, 1);
+    this.edited.delete(id);
+    this.views.clear();
+  }
+}
+
+const kinds = ["page_view", "click", "signup", "purchase", "refund", "logout"];
+const agents = ["Firefox/131", "Chrome/130", "Safari/18", "Edge/130"];
+const lorem =
+  "This note is long on purpose, so the grid has to cut it: it goes on about the order, the customer, the shipping address, the coupon, " +
+  "the second shipping address, the time the parcel was late, and the reply from support, which was polite and also rather long. ";
+
+/** One row of public.events, the same every time for the same id. */
+function eventRow(id: number): Cell[] {
+  // About half a minute apart, over a year.
+  const at = new Date(Date.UTC(2024, 0, 1) + id * 31_557)
+    .toISOString()
+    .replace("T", " ")
+    .slice(0, 19);
+  return [
+    String(id),
+    String(((id * 7919) % 50_000) + 1),
+    kinds[id % kinds.length],
+    `{"ip": "10.${(id >> 16) & 255}.${(id >> 8) & 255}.${id & 255}", "agent": "${agents[id % agents.length]}"}`,
+    ((id * 104_729) % 100_000 / 100).toFixed(2),
+    `${at}+00`,
+    id % 11 === 0 ? null : id % 97 === 0 ? `${lorem}${lorem}` : `${kinds[(id >> 3) % kinds.length]} #${id % 1000}`,
+  ];
+}
+
+function eventsTable(): Table {
+  const col = (name: string, type: string): Column => ({ name, type });
+  return {
+    relation: relation("public", "events", "table", 1_000_000),
+    columns: [
+      col("id", "bigint"),
+      col("user_id", "integer"),
+      col("kind", "text"),
+      col("payload", "jsonb"),
+      col("amount", "numeric(10,2)"),
+      col("created_at", "timestamp with time zone"),
+      col("note", "text"),
+    ],
+    rows: [],
+    key: ["id"],
+    big: new BigTable(1_000_000, eventRow),
+  };
 }
 
 const first = ["Ada", "Grace", "Linus", "Margaret", "Ken", "Barbara", "Dennis", "Frances", "Alan", "Radia"];
@@ -87,6 +224,7 @@ function postgresDemo(): Table[] {
   });
   const col = (name: string, type: string): Column => ({ name, type });
   return [
+    eventsTable(),
     {
       relation: relation("public", "addresses", "table", 320),
       columns: [col("id", "integer"), col("customer_id", "integer"), col("street", "text"), col("country", "text"), col("postcode", "text")],
@@ -302,6 +440,7 @@ function runStatement(s: MockSession, statement: string): QueryResult {
   }
   const t = findByName(s, from[1]);
   if (!t) throw `relation "${from[1]}" does not exist`;
+  if (t.big) return bigSelect(t, sql);
   const alias = from[2] ? `${from[2]}.` : "";
   const strip = (x: string) => x.trim().replace(alias, "").replace(/"/g, "");
   const group = sql.match(/\bgroup\s+by\s+([\w.]+)/i)?.[1];
@@ -341,6 +480,17 @@ function runStatement(s: MockSession, statement: string): QueryResult {
   });
 }
 
+/** `select … from events [limit n]`: the first rows, like the drivers' 5,000-row cut. */
+function bigSelect(t: Table, sql: string): QueryResult {
+  const big = t.big!;
+  const limit = Number(sql.match(/\blimit\s+(\d+)/i)?.[1] ?? big.length);
+  const kept = Math.min(limit, 5000, big.length);
+  const view = big.view(t.columns, "", null);
+  const rows = Array.from({ length: kept }, (_, i) => big.row(view.id(i)));
+  const total = Math.min(limit, big.length);
+  return result(t.columns, rows, `SELECT ${total}`, { truncated: total > kept, totalRows: total });
+}
+
 function redisCommand(s: MockSession, text: string): QueryResult {
   const [cmd = "", ...args] = text.split(/\s+/);
   const t = s.tables.find((x) => x.relation.name === args[0]);
@@ -371,6 +521,12 @@ function findByName(s: MockSession, name: string): Table | undefined {
 
 function statements(text: string): string[] {
   return text.split(/;\s*(?:\n|$)/).map((x) => x.trim()).filter(Boolean);
+}
+
+/** Row-major, like the JSON the backend used to send; api.ts turns it into blocks. */
+interface Execution {
+  results: QueryResult[];
+  durationMs: number;
 }
 
 function execution(s: MockSession, text: string): Execution {
@@ -426,10 +582,26 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   },
   disconnect: (a) => void sessions.delete(String(a.sessionId)),
   cancel: () => undefined,
+  transaction_open: () => false,
+  page_block: async (a) => {
+    const t = table(session(a), a.relation as Relation);
+    if (!t.big) return handlers.page(a);
+    // About what a local server and the IPC take for a block.
+    await pause(4 + Math.random() * 6);
+    const view = t.big.view(t.columns, String(a.search ?? ""), a.sort as ColumnSort | null);
+    const offset = Number(a.offset);
+    const end = Math.min(view.length, offset + Number(a.limit));
+    const rows: Cell[][] = [];
+    for (let i = offset; i < end; i++) rows.push(t.big.row(view.id(i)));
+    return result(t.columns, rows, `SELECT ${rows.length}`, {
+      keys: { columns: t.key, kind: "primaryKey", values: rows.map((r) => [r[0]]) },
+    });
+  },
   relations: (a) => session(a).tables.map((t) => ({ ...t.relation })),
   page: async (a) => {
     const s = session(a);
     const t = table(s, a.relation as Relation);
+    if (t.big) return handlers.page_block(a);
     await pause(40);
     const rows = filtered(t, String(a.search ?? ""), a.sort as ColumnSort | null);
     const offset = Number(a.offset);
@@ -440,9 +612,14 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
       note: t.relation.kind === "key" ? `${t.relation.subtype} · TTL none` : null,
     });
   },
-  count: (a) => {
+  count: async (a) => {
     const s = session(a);
     const t = table(s, a.relation as Relation);
+    if (t.big) {
+      // Counting a big table takes a moment: the grid shows the estimate meanwhile.
+      await pause(700);
+      return t.big.view(t.columns, String(a.search ?? ""), null).length;
+    }
     return filtered(t, String(a.search ?? ""), null).length;
   },
   execute: async (a) => {
@@ -469,12 +646,20 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     const r = a.relation as Relation;
     const t = table(s, r);
     const key = a.key as RowKey;
-    const index = keyIndex(t, key);
-    if (index < 0) throw "The row is gone: someone changed or deleted it. Reload the table.";
     const changes = a.changes as Array<{ column: string; value: Cell }>;
-    const row = [...t.rows[index]];
-    for (const c of changes) row[t.columns.findIndex((x) => x.name === c.column)] = c.value;
-    t.rows[index] = row;
+    if (t.big) {
+      const id = Number(key.values[0]);
+      if (!t.big.has(id)) throw "The row is gone: someone changed or deleted it. Reload the table.";
+      const row = [...t.big.row(id)];
+      for (const c of changes) row[t.columns.findIndex((x) => x.name === c.column)] = c.value;
+      t.big.update(id, row);
+    } else {
+      const index = keyIndex(t, key);
+      if (index < 0) throw "The row is gone: someone changed or deleted it. Reload the table.";
+      const row = [...t.rows[index]];
+      for (const c of changes) row[t.columns.findIndex((x) => x.name === c.column)] = c.value;
+      t.rows[index] = row;
+    }
     const set = changes.map((c) => `${quote(c.column)} = ${literal(c.value)}`).join(", ");
     const where = key.columns.map((c, i) => `${quote(c)} = ${literal(key.values[i])}`).join(" AND ");
     return { sql: `UPDATE ${quote(r.schema)}.${quote(r.name)} SET ${set} WHERE ${where}`, command: "UPDATE 1", affected: 1 };
@@ -485,8 +670,11 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     const t = table(s, r);
     const values = a.values as Array<{ column: string; value: Cell }>;
     const row: Cell[] = t.columns.map((c) => values.find((v) => v.column === c.name)?.value ?? null);
-    if (t.key.length === 1 && row[0] === null) row[0] = String(t.rows.length + 1);
-    t.rows.push(row);
+    if (t.big) t.big.insert(row);
+    else {
+      if (t.key.length === 1 && row[0] === null) row[0] = String(t.rows.length + 1);
+      t.rows.push(row);
+    }
     const cols = values.map((v) => quote(v.column)).join(", ");
     const vals = values.map((v) => literal(v.value)).join(", ");
     return { sql: `INSERT INTO ${quote(r.schema)}.${quote(r.name)} (${cols}) VALUES (${vals})`, command: "INSERT 0 1", affected: 1 };
@@ -496,9 +684,15 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     const r = a.relation as Relation;
     const t = table(s, r);
     const key = a.key as RowKey;
-    const index = keyIndex(t, key);
-    if (index < 0) throw "The row is gone: someone changed or deleted it. Reload the table.";
-    t.rows.splice(index, 1);
+    if (t.big) {
+      const id = Number(key.values[0]);
+      if (!t.big.has(id)) throw "The row is gone: someone changed or deleted it. Reload the table.";
+      t.big.remove(id);
+    } else {
+      const index = keyIndex(t, key);
+      if (index < 0) throw "The row is gone: someone changed or deleted it. Reload the table.";
+      t.rows.splice(index, 1);
+    }
     const where = key.columns.map((c, i) => `${quote(c)} = ${literal(key.values[i])}`).join(" AND ");
     return { sql: `DELETE FROM ${quote(r.schema)}.${quote(r.name)} WHERE ${where}`, command: "DELETE 1", affected: 1 };
   },
@@ -525,6 +719,9 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   },
 
   list_connections: () => snapshot(),
+  import_swift_connections: () => {
+    throw "Importing connections from dbLens for Mac works only on macOS.";
+  },
   save_connection: (a) => {
     const draft = a.draft as ConnectionDraft;
     const summary = summarize(draft.url);

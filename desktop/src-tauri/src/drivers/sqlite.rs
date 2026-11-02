@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -18,11 +19,13 @@ use crate::connector::Summary;
 use crate::engine::Engine;
 use crate::session::like_pattern;
 use crate::session::{
-    CellValue, Column, ColumnSort, DatabaseSession, DbError, DbResult, EditOutcome, Execution,
-    QueryResult, Relation, RelationKind, RowKey, RowKeyKind, RowKeys, SchemaGraph, ROW_LIMIT,
+    keyset_direction, CellValue, Column, ColumnSort, DatabaseSession, DbError, DbResult,
+    EditOutcome, Execution, KeyHint, QueryResult, Relation, RelationKind, RowKey, RowKeyKind,
+    RowKeys, SchemaGraph, DEEP_OFFSET, ROW_LIMIT,
 };
 use crate::sql_script::{self, Dialect};
 use crate::url::{quote_ident, SqliteLocation};
+use crate::wire::StreamSink;
 
 /// The file for the connection sheet.
 pub fn summary(text: &str) -> Option<Summary> {
@@ -43,7 +46,17 @@ pub fn summary(text: &str) -> Option<Summary> {
 pub async fn connect(url: &str, local_port: Option<u16>) -> DbResult<Box<dyn DatabaseSession>> {
     let _ = local_port;
     let location = SqliteLocation::new(url)?;
-    let session = tokio::task::spawn_blocking(move || SqliteSession::open(&location))
+    let session = tokio::task::spawn_blocking(move || SqliteSession::open(&location, false))
+        .await
+        .map_err(|e| DbError::msg(e.to_string()))??;
+    Ok(Box::new(session))
+}
+
+/// A second, read-only connection to the same file, for browsing beside the
+/// SQL panel's connection (see `pool.rs`).
+pub async fn connect_reader(url: &str) -> DbResult<Box<dyn DatabaseSession>> {
+    let location = SqliteLocation::new(url)?;
+    let session = tokio::task::spawn_blocking(move || SqliteSession::open(&location, true))
         .await
         .map_err(|e| DbError::msg(e.to_string()))??;
     Ok(Box::new(session))
@@ -55,6 +68,8 @@ pub struct SqliteSession {
     interrupt: InterruptHandle,
     read_only: bool,
     version: String,
+    /// A transaction is open (not in autocommit), as of the last operation.
+    in_transaction: Arc<AtomicBool>,
 }
 
 fn closed() -> DbError {
@@ -78,15 +93,15 @@ fn lock(conn: &Mutex<Option<Connection>>) -> MutexGuard<'_, Option<Connection>> 
 }
 
 impl SqliteSession {
-    fn open(location: &SqliteLocation) -> DbResult<Self> {
+    fn open(location: &SqliteLocation, reader: bool) -> DbResult<Self> {
         if !Path::new(&location.path).exists() {
             return Err(DbError::msg(format!("No SQLite file at {}", location.path)));
         }
         // No CREATE (a typo must not make an empty file) and no URI parsing (a path may hold '?').
         let write = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let (conn, mut read_only) = match Connection::open_with_flags(&location.path, write) {
-            Ok(conn) => (conn, false),
-            Err(_) => (
+            Ok(conn) if !reader => (conn, false),
+            _ => (
                 Connection::open_with_flags(
                     &location.path,
                     OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -115,6 +130,7 @@ impl SqliteSession {
             conn: Arc::new(Mutex::new(Some(conn))),
             read_only,
             version: rusqlite::version().to_string(),
+            in_transaction: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -130,9 +146,13 @@ impl SqliteSession {
         F: FnOnce(&Connection) -> DbResult<T> + Send + 'static,
     {
         let conn = Arc::clone(&self.conn);
+        let in_transaction = Arc::clone(&self.in_transaction);
         tokio::task::spawn_blocking(move || {
             let guard = lock(&conn);
-            work(guard.as_ref().ok_or_else(closed)?)
+            let conn = guard.as_ref().ok_or_else(closed)?;
+            let outcome = work(conn);
+            in_transaction.store(!conn.is_autocommit(), Ordering::SeqCst);
+            outcome
         })
         .await
         .map_err(|e| DbError::msg(e.to_string()))?
@@ -265,7 +285,9 @@ fn read(conn: &Connection, stmt: &mut Statement<'_>) -> DbResult<QueryResult> {
     } else {
         let keyword = first_keyword(&sql);
         if ["INSERT", "UPDATE", "DELETE"].contains(&keyword.as_str()) {
-            format!("{keyword} {}", conn.changes())
+            // A statement without rows reports the rows it changed, like the other drivers.
+            total = conn.changes();
+            format!("{keyword} {total}")
         } else {
             keyword
         }
@@ -279,6 +301,40 @@ fn read(conn: &Connection, stmt: &mut Statement<'_>) -> DbResult<QueryResult> {
         keys: None,
         note: None,
     })
+}
+
+/// Runs a script, streaming each statement's rows into `sink`.
+fn stream_script(conn: &Connection, sql: &str, sink: &mut StreamSink) -> DbResult<()> {
+    let mut batch = Batch::new(conn, sql);
+    while let Some(mut stmt) = batch.next().map_err(err)? {
+        let count = stmt.column_count();
+        if count == 0 {
+            let result = read(conn, &mut stmt)?;
+            sink.send_result(&result);
+            continue;
+        }
+        let columns: Vec<Column> = stmt
+            .columns()
+            .map(|c| Column::new(c.name(), c.decl_type().unwrap_or("")))
+            .collect();
+        sink.begin(&columns);
+        let mut cursor = stmt.query([]).map_err(err)?;
+        while let Some(row) = cursor.next().map_err(err)? {
+            if sink.keeping() {
+                for index in 0..count {
+                    let v = value(row.get_ref(index).map_err(err)?);
+                    sink.cell(v.as_deref());
+                }
+            }
+            sink.end_row();
+            if !sink.is_open() {
+                return Err(DbError::Cancelled);
+            }
+        }
+        let total = sink.seen();
+        sink.end(&format!("SELECT {total}"));
+    }
+    Ok(())
 }
 
 /// Prepares and reads one statement.
@@ -436,6 +492,29 @@ fn filter(search: &str, columns: &[String]) -> String {
     format!(" where ({joined}) like '{pattern}' escape '\\'")
 }
 
+/// A key value from `key_select` (or a rowid) as an SQL literal of its storage class.
+fn key_literal(text: &str, rowid: bool) -> DbResult<String> {
+    use rusqlite::types::Value;
+    if rowid {
+        let n: i64 = text.parse().map_err(|_| {
+            DbError::msg("The row key is not valid. Reload the table and try again.")
+        })?;
+        return Ok(n.to_string());
+    }
+    Ok(match key_value(text)? {
+        Value::Integer(n) => n.to_string(),
+        // quote() wrote it, so it reads back exactly.
+        Value::Real(_) => text[2..].to_string(),
+        Value::Blob(bytes) => {
+            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            format!("x'{hex}'")
+        }
+        Value::Text(t) => format!("'{}'", t.replace('\'', "''")),
+        Value::Null => "null".into(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn page_of(
     conn: &Connection,
     relation: &Relation,
@@ -443,6 +522,7 @@ fn page_of(
     offset: u64,
     search: &str,
     sort: Option<&ColumnSort>,
+    hint: Option<&KeyHint>,
 ) -> DbResult<QueryResult> {
     let info = table_info(conn, relation)?;
     let is_table = relation.kind == RelationKind::Table;
@@ -473,17 +553,105 @@ fn page_of(
         .map(|s| format!("{} {} nulls last", quote_ident(&s.column), s.direction()))
         .into_iter()
         .collect();
-    terms.extend(keys);
+    terms.extend(keys.iter().cloned());
     let order = if terms.is_empty() {
         String::new()
     } else {
         format!(" order by {}", terms.join(", "))
     };
+    // Keyset pagination: start after a known key instead of skipping rows.
+    let key_names: Vec<String> = if use_rowid {
+        vec!["rowid".into()]
+    } else {
+        info.primary_key.clone()
+    };
+    let mut conditions: Vec<String> = Vec::new();
+    let searched = filter(search, &info.columns);
+    if let Some(rest) = searched.strip_prefix(" where ") {
+        conditions.push(rest.to_string());
+    }
+    let mut skip = offset;
+    let direction = if is_table {
+        keyset_direction(&key_names, sort)
+    } else {
+        None
+    };
+    if let Some(ascending) = direction {
+        let tuple = |values: &[String]| {
+            if values.len() == 1 {
+                values[0].clone()
+            } else {
+                format!("({})", values.join(", "))
+            }
+        };
+        let key_tuple = tuple(&keys);
+        let mut bound: Option<(Vec<String>, bool)> = None;
+        if let Some(hint) = hint.filter(|h| h.offset < offset && h.values.len() == keys.len()) {
+            if hint.values.iter().all(Option::is_some) {
+                let literals = hint
+                    .values
+                    .iter()
+                    .map(|v| key_literal(v.as_deref().unwrap_or(""), use_rowid))
+                    .collect::<DbResult<Vec<_>>>()?;
+                bound = Some((literals, false));
+                skip = offset - hint.offset - 1;
+            }
+        }
+        if skip >= DEEP_OFFSET && search.is_empty() {
+            // Find the first key of the block with a key-only scan, then start there.
+            let mut seek_conditions = Vec::new();
+            if let Some((literals, _)) = &bound {
+                let op = if ascending { ">" } else { "<" };
+                seek_conditions.push(format!("{key_tuple} {op} {}", tuple(literals)));
+            }
+            let exprs: Vec<String> = if use_rowid {
+                vec!["t.rowid".into()]
+            } else {
+                info.primary_key.iter().map(|k| key_select(k)).collect()
+            };
+            let seek = format!(
+                "select {} from {} as t{}{order} limit 1 offset {skip}",
+                exprs.join(", "),
+                qualified(relation),
+                if seek_conditions.is_empty() {
+                    String::new()
+                } else {
+                    format!(" where {}", seek_conditions.join(" and "))
+                }
+            );
+            let found = single(conn, &seek)?;
+            match found.rows.into_iter().next() {
+                Some(row) if row.iter().all(Option::is_some) => {
+                    let literals = row
+                        .iter()
+                        .map(|v| key_literal(v.as_deref().unwrap_or(""), use_rowid))
+                        .collect::<DbResult<Vec<_>>>()?;
+                    bound = Some((literals, true));
+                    skip = 0;
+                }
+                // Past the end, or a NULL in the key: plain OFFSET finds nothing either way.
+                _ => {}
+            }
+        }
+        if let Some((literals, inclusive)) = bound {
+            let op = match (ascending, inclusive) {
+                (true, false) => ">",
+                (true, true) => ">=",
+                (false, false) => "<",
+                (false, true) => "<=",
+            };
+            conditions.push(format!("{key_tuple} {op} {}", tuple(&literals)));
+        }
+    }
+    let where_ = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" where {}", conditions.join(" and "))
+    };
     let sql = format!(
-        "select {}t.* from {} as t{}{order} limit {limit} offset {offset}",
+        "select {}t.* from {} as t{where_}{order} limit {limit} offset {skip}",
         hidden.concat(),
         qualified(relation),
-        filter(search, &info.columns),
     );
     let mut result = single(conn, &sql)?;
     let n = hidden.len();
@@ -726,8 +894,51 @@ impl DatabaseSession for SqliteSession {
         sort: Option<&ColumnSort>,
     ) -> DbResult<QueryResult> {
         let (relation, search, sort) = (relation.clone(), search.to_string(), sort.cloned());
-        self.with(move |conn| page_of(conn, &relation, limit, offset, &search, sort.as_ref()))
+        self.with(move |conn| page_of(conn, &relation, limit, offset, &search, sort.as_ref(), None))
             .await
+    }
+
+    async fn page_block(
+        &self,
+        relation: &Relation,
+        offset: u64,
+        limit: u32,
+        search: &str,
+        sort: Option<&ColumnSort>,
+        hint: Option<&KeyHint>,
+    ) -> DbResult<QueryResult> {
+        let (relation, search, sort) = (relation.clone(), search.to_string(), sort.cloned());
+        let hint = hint.cloned();
+        self.with(move |conn| {
+            page_of(
+                conn,
+                &relation,
+                limit,
+                offset,
+                &search,
+                sort.as_ref(),
+                hint.as_ref(),
+            )
+        })
+        .await
+    }
+
+    fn transaction_open(&self) -> bool {
+        self.in_transaction.load(Ordering::SeqCst)
+    }
+
+    /// Steps each statement and sends its rows as they come.
+    async fn execute_stream(&self, sql: &str, sink: &mut StreamSink) -> DbResult<()> {
+        let sql = sql.to_string();
+        let mut owned = std::mem::replace(sink, StreamSink::closed());
+        let (outcome, back) = self
+            .with(move |conn| {
+                let outcome = stream_script(conn, &sql, &mut owned);
+                Ok((outcome, owned))
+            })
+            .await?;
+        *sink = back;
+        outcome
     }
 
     /// Exact count; SQLite keeps no estimate.
