@@ -1,0 +1,48 @@
+/* The update notice (native/updater.ts): a small, non-modal card in the corner. */
+
+.update-notice {
+  position: fixed;
+  right: var(--space-lg);
+  bottom: var(--space-lg);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  width: min(360px, calc(100vw - 2 * var(--space-lg)));
+  padding: var(--space-lg);
+  border-radius: var(--radius-lg);
+  background: var(--raised);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-size: var(--font-size);
+}
+
+.update-notice-text p {
+  margin: var(--space-xs) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--font-size-small);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-line;
+}
+
+.update-notice-error {
+  color: var(--danger) !important;
+  -webkit-line-clamp: unset !important;
+  display: block !important;
+}
+
+.update-notice-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+}
+
+@media (max-width: 480px) {
+  .update-notice {
+    left: var(--space-lg);
+    width: auto;
+  }
+}

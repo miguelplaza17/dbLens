@@ -7,6 +7,7 @@ import { useSyncExternalStore } from "react";
 import { api, errorText, type Relation, type SchemaGraph, type SchemaLink, type SchemaTable } from "../api";
 import type { AppModel } from "../model";
 import type { Action } from "../shortcuts";
+import { MINIMAP } from "./draw";
 import {
   autoLayout,
   CARD_WIDTH,
@@ -146,9 +147,16 @@ export class Board {
     const { width, height } = this.viewport;
     if (!rect || width <= 0 || height <= 0 || rect.width <= 0 || rect.height <= 0) return;
     const margin = 48;
-    const zoom = clamp(Math.min((width - margin * 2) / rect.width, (height - margin * 2) / rect.height), MIN_ZOOM, 1);
+    // The minimap sits in the bottom-right corner: fit beside it or above it,
+    // whichever shows the tables larger, so it never covers a card.
+    const mapW = MINIMAP.width + MINIMAP_GAP;
+    const mapH = MINIMAP.height + MINIMAP_GAP;
+    const zoomIn = (w: number, h: number) => clamp(Math.min((w - margin * 2) / rect.width, (h - margin * 2) / rect.height), MIN_ZOOM, 1);
+    const beside = zoomIn(width - mapW, height);
+    const above = zoomIn(width, height - mapH);
+    const [w, h, zoom] = beside >= above ? [width - mapW, height, beside] : [width, height - mapH, above];
     this.zoom = zoom;
-    this.pan = { x: (width - rect.width * zoom) / 2 - rect.x * zoom, y: (height - rect.height * zoom) / 2 - rect.y * zoom };
+    this.pan = { x: (w - rect.width * zoom) / 2 - rect.x * zoom, y: (h - rect.height * zoom) / 2 - rect.y * zoom };
     this.needsFit = false;
     this.changed();
   }
@@ -159,6 +167,9 @@ export class Board {
     this.changed();
   }
 }
+
+/** The minimap's distance from the board's edge (--space-md in schema.css). */
+const MINIMAP_GAP = 12;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -363,6 +374,10 @@ export function performSchema(model: AppModel, action: Action): boolean {
       if (action === "zoomToFit") schema.fit();
       else schema.board?.zoomBy(action === "zoomIn" ? ZOOM_STEP : 1 / ZOOM_STEP);
       return true;
+    case "refresh":
+      // Reload reads the schema again too; the model reloads the rest.
+      if (model.shown === "schema") void schema.load(model);
+      return false;
     default:
       return false;
   }

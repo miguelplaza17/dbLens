@@ -31,6 +31,7 @@ use crate::session::{
     SchemaLink, SchemaTable, ROW_LIMIT,
 };
 use crate::url::UrlParts;
+use crate::wire::{StreamSink, FIRST_BLOCK_ROWS};
 
 /// Documents a cursor asks for at a time.
 const BATCH_SIZE: i32 = 500;
@@ -564,6 +565,7 @@ impl MongoSession {
         parsed: Statement,
         statement: &str,
         tag: &str,
+        sink: Option<&mut StreamSink>,
     ) -> DbResult<QueryResult> {
         match parsed {
             Statement::Use(name) => {
@@ -585,7 +587,7 @@ impl MongoSession {
                     .await
             }
             Statement::Collection { name, calls } => {
-                self.run_collection_method(inner, &name, &calls, statement, tag)
+                self.run_collection_method(inner, &name, &calls, statement, tag, sink)
                     .await
             }
         }
@@ -692,6 +694,7 @@ impl MongoSession {
         calls: &[Call],
         statement: &str,
         tag: &str,
+        sink: Option<&mut StreamSink>,
     ) -> DbResult<QueryResult> {
         let database = inner.current_database.clone();
         let main = &calls[0];
@@ -764,7 +767,8 @@ impl MongoSession {
                         "COUNT",
                     ));
                 }
-                self.documents("FIND", &database, command, tag).await
+                self.documents_to("FIND", &database, command, tag, sink)
+                    .await
             }
 
             "aggregate" => {
@@ -796,7 +800,8 @@ impl MongoSession {
                     }
                 }
                 command.insert("cursor", cursor);
-                self.documents("AGGREGATE", &database, command, tag).await
+                self.documents_to("AGGREGATE", &database, command, tag, sink)
+                    .await
             }
 
             "countDocuments" | "count" => {
@@ -1023,6 +1028,151 @@ impl MongoSession {
         result.truncated = more;
         Ok(result)
     }
+
+    /// The documents of a cursor command: streamed to `sink` when there is
+    /// one (the result is then ended already), else as a table.
+    async fn documents_to(
+        &self,
+        verb: &str,
+        database: &str,
+        command: Document,
+        tag: &str,
+        sink: Option<&mut StreamSink>,
+    ) -> DbResult<QueryResult> {
+        match sink {
+            Some(sink) => {
+                self.stream_documents(verb, database, command, tag, sink)
+                    .await
+            }
+            None => self.documents(verb, database, command, tag).await,
+        }
+    }
+
+    /// Streams the documents of a cursor command. The columns come from the
+    /// first documents (500, `_id` first); a key that shows up later is
+    /// appended as a new column. Rows past the sink's cap are not read: the
+    /// result ends cut, with one more row counted.
+    async fn stream_documents(
+        &self,
+        verb: &str,
+        database: &str,
+        command: Document,
+        tag: &str,
+        sink: &mut StreamSink,
+    ) -> DbResult<QueryResult> {
+        let mut cursor = self.cursor(database, command, tag).await?;
+        let mut first = Vec::new();
+        while first.len() < FIRST_BLOCK_ROWS {
+            match cursor.try_next().await.map_err(fail)? {
+                Some(doc) => first.push(doc),
+                None => break,
+            }
+        }
+        let mut columns = StreamColumns::default();
+        for doc in &first {
+            columns.learn(doc);
+        }
+        let started = sink.result_index();
+        if columns.names.is_empty() {
+            // Nothing to show as a grid: as `execute` does, only the count.
+            let count = first.len() as u64;
+            sink.command(&format!("{verb} {count}"), count);
+            return Ok(QueryResult::command(verb, 0));
+        }
+        columns.id_first();
+        sink.begin(&columns.columns());
+        let mut pending = first.into_iter();
+        let mut cut = false;
+        loop {
+            if !sink.is_open() {
+                return Err(DbError::Cancelled);
+            }
+            let doc = match pending.next() {
+                Some(doc) => doc,
+                None => match cursor.try_next().await.map_err(fail)? {
+                    Some(doc) => doc,
+                    None => break,
+                },
+            };
+            if !sink.keeping() {
+                // One document past the cap: enough to say the result is cut.
+                sink.end_row();
+                cut = true;
+                break;
+            }
+            let fresh = columns.learn(&doc);
+            if fresh > 0 {
+                sink.add_columns(&columns.columns()[columns.names.len() - fresh..]);
+            }
+            let mut row: Vec<Option<String>> = vec![None; columns.names.len()];
+            for (key, value) in &doc {
+                row[columns.index[key]] = cell(value);
+            }
+            for value in &row {
+                sink.cell(value.as_deref());
+            }
+            sink.end_row();
+        }
+        let shown = sink.seen();
+        sink.end(&format!("{verb} {shown}{}", if cut { "+" } else { "" }));
+        debug_assert!(sink.result_index() > started);
+        Ok(QueryResult::command(verb, 0))
+    }
+}
+
+/// The columns of a streamed result: the keys seen so far, in the order the
+/// grid shows them (`_id` first among the first documents, later keys appended).
+#[derive(Default)]
+struct StreamColumns {
+    names: Vec<String>,
+    index: HashMap<String, usize>,
+    types: Vec<Option<&'static str>>,
+}
+
+impl StreamColumns {
+    /// Learns the keys and types of one document; the number of new columns.
+    fn learn(&mut self, doc: &Document) -> usize {
+        let before = self.names.len();
+        for (key, value) in doc {
+            let at = match self.index.get(key) {
+                Some(&at) => at,
+                None => {
+                    self.index.insert(key.clone(), self.names.len());
+                    self.names.push(key.clone());
+                    self.types.push(None);
+                    self.names.len() - 1
+                }
+            };
+            let kind = type_name(value);
+            if self.types[at].is_none() || (self.types[at] == Some("null") && kind != "null") {
+                self.types[at] = Some(kind);
+            }
+        }
+        self.names.len() - before
+    }
+
+    /// Moves `_id` to the front (before the grid has columns).
+    fn id_first(&mut self) {
+        if let Some(&at) = self.index.get("_id") {
+            if at != 0 {
+                let name = self.names.remove(at);
+                let kind = self.types.remove(at);
+                self.names.insert(0, name);
+                self.types.insert(0, kind);
+                for (i, name) in self.names.iter().enumerate() {
+                    self.index.insert(name.clone(), i);
+                }
+            }
+        }
+    }
+
+    fn columns(&self) -> Vec<Column> {
+        self.names
+            .iter()
+            .zip(&self.types)
+            .map(|(name, kind)| Column::new(name.clone(), kind.unwrap_or("")))
+            .collect()
+    }
 }
 
 /// Methods that start a read, and the ones that may follow them in a chain.
@@ -1092,7 +1242,7 @@ impl DatabaseSession for MongoSession {
             for statement in &statements {
                 let parsed = shell::parse(statement)?;
                 results.push(
-                    self.run(&mut inner, parsed, statement, &operation.tag)
+                    self.run(&mut inner, parsed, statement, &operation.tag, None)
                         .await?,
                 );
             }
@@ -1100,6 +1250,34 @@ impl DatabaseSession for MongoSession {
         };
         let results = self.cancelable(&operation, work).await?;
         Ok(Execution::new(results, start.elapsed()))
+    }
+
+    /// Like `execute`, with the documents of find and aggregate sent to the
+    /// sink as the cursor delivers them (up to its row cap).
+    async fn execute_stream(&self, text: &str, sink: &mut StreamSink) -> DbResult<()> {
+        let statements = shell::statements(text);
+        let mut inner = self.inner.lock().await;
+        let operation = self.canceller.begin();
+        let work = async {
+            for statement in &statements {
+                let parsed = shell::parse(statement)?;
+                let before = sink.result_index();
+                let result = self
+                    .run(
+                        &mut inner,
+                        parsed,
+                        statement,
+                        &operation.tag,
+                        Some(&mut *sink),
+                    )
+                    .await?;
+                if sink.result_index() == before {
+                    sink.send_result(&result);
+                }
+            }
+            Ok(())
+        };
+        self.cancelable(&operation, work).await
     }
 
     /// One statement that only reads: find, aggregate (without $out or $merge),

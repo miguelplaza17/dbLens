@@ -13,6 +13,8 @@ import type { Action } from "../shortcuts";
 import { openDatabaseFile } from "./bridge";
 import { SET_NULL_EVENT } from "../grid/commands";
 import { importFromMac } from "./importSwift";
+import { openSettings } from "../settings/store";
+import { checkForUpdatesNow } from "./updater";
 
 export function performNative(model: AppModel, action: Action): boolean {
   switch (action) {
@@ -26,10 +28,13 @@ export function performNative(model: AppModel, action: Action): boolean {
       void pickDatabase(model);
       return true;
     case "settings":
-      model.showToast(t("Settings are not available yet"));
+      openSettings(t("Settings")).catch((error) => model.showToast(String(error)));
       return true;
     case "showShortcuts":
       model.open({ kind: "shortcuts" });
+      return true;
+    case "checkForUpdates":
+      void checkForUpdatesNow(model);
       return true;
     case "importSwift":
       void importFromMac(model);

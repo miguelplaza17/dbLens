@@ -43,6 +43,43 @@ In a plain browser, `npm run dev` (then http://localhost:1420) runs the UI on
 the mock backend in `src/mock.ts`: a sample Postgres database and a Redis one.
 `node docs/shots/take.cjs` takes screenshots of it (needs Playwright).
 
+## Updates
+
+Help > Check for Updates… (macOS: the app menu; shortcut Ctrl/Cmd+Alt+U) asks the
+release feed now. With Settings > Updates > "Check for updates automatically"
+(on by default) the app checks once a day, and "Update automatically" downloads
+an update when it is found and installs it when the app quits. A small notice
+in the corner offers "Install and Restart". The code is in
+`src-tauri/src/updater.rs` (`tauri-plugin-updater`, the same version as
+`@tauri-apps/plugin-updater` in `package.json`; the two must match exactly).
+
+The feed is `https://github.com/miguelplaza17/dbLens/releases/latest/download/latest.json`,
+set in `plugins.updater` in `src-tauri/tauri.conf.json`, with the public key
+there too. The committed key is a placeholder: until it is replaced, updates are
+off, and a check says "Updates are not configured in this build". Nothing is
+fetched or installed.
+
+To turn updates on (once, on a trusted machine; never commit the private key):
+
+1. `cd desktop && npx tauri signer generate -w ~/.tauri/dblens.key` (asks for a
+   password). It prints the public key.
+2. Put that public key (the whole line, base64) in `plugins.updater.pubkey` in
+   `src-tauri/tauri.conf.json`.
+3. In CI secrets, set `TAURI_SIGNING_PRIVATE_KEY` (the file's contents, or its
+   path on the runner) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+4. Build with signed updater artifacts: add
+   `--config '{"bundle":{"createUpdaterArtifacts":true}}'` to `npm run tauri build`
+   (it is left off in the committed config, so builds without a key still work).
+   This writes a `.sig` next to each package (AppImage, NSIS/MSI, the macOS
+   `.app.tar.gz`).
+5. Publish a `latest.json` as a release asset named `latest.json`: the version,
+   notes, and for each platform (`linux-x86_64`, `windows-x86_64`,
+   `darwin-aarch64`, `darwin-x86_64`) the package URL and the contents of its
+   `.sig`. `tauri-apps/tauri-action` writes it when it builds the release.
+
+Updates cover AppImage, Windows installers and the macOS app. A `.deb` or `.rpm`
+user updates by installing the new package.
+
 ## Test
 
 ```sh
@@ -71,13 +108,19 @@ key kept in the system keyring (Keychain on macOS). `DBLENS_STORE=memory` keeps 
 
 ## Status
 
-Checked on Linux (2026-11-02): `cargo fmt --check`, clippy clean (Linux and the
-Windows target), `cargo check --target x86_64-pc-windows-gnu`, unit tests,
-integration tests against PostgreSQL 16, MariaDB 10.11, Redis 7 and MongoDB 8, a
-release `.deb`, and the release app run under Xvfb: connect, open a 1,000,000-row
-table, scroll, the perf HUD, the menu bar and New Window. Windows: cross-compiles,
-never run. macOS: configured (bundle, signing from the environment, CI job, the
-Swift-app import) but never compiled or run.
+Checked on Linux (2026-11-02, after the Settings / schema board / MCP / updater /
+history integration): `cargo fmt --check`, clippy clean with `-D warnings`,
+`cargo check --target x86_64-pc-windows-gnu`, unit tests, integration tests against
+PostgreSQL 16, MariaDB 10.11, Redis 7 and MongoDB 8 (including `tests/mcp.rs` and
+`tests/stream_nosql.rs`), `npm run build`, and the debug app run under Xvfb against
+the test PostgreSQL: connect, the schema board (Ctrl+3, fit, Ctrl+= zoom, double-click
+to open rows), a query, the SQL history popover (Ctrl+Shift+H), Back (Ctrl+[), File >
+Let Agents Write (Ctrl+Alt+A), and the Settings window (Ctrl+,): every tab, Light and
+the Mint accent applied live to both windows, Check Now, Clear All History…, Ctrl+W.
+Screenshots: `docs/shots/linux-*.png`. Earlier: a release `.deb` and a
+1,000,000-row table under Xvfb. Windows: cross-compiles, never run. macOS: configured
+(bundle, signing from the environment, CI job, the Swift-app import) but never
+compiled or run.
 
 - **Grid**: Glide Data Grid (canvas). Table rows come in 300-row blocks as you
   scroll (visible first, neighbours after a short pause, 50 blocks kept); the
@@ -97,6 +140,19 @@ Swift-app import) but never compiled or run.
   windows (Ctrl/Cmd+Alt+N), Open SQLite File… (Ctrl/Cmd+O), dropped database
   files, single instance on Windows and Linux (a second launch opens its files in
   a new window), window size and position remembered.
+- **Settings window** (Ctrl/Cmd+,): Appearance (System / Light / Dark and the 12
+  accents, live in every window), Connections (Clear History per connection),
+  Agents (the `--mcp` command, Claude Code / Codex commands, JSON, "Let agents add
+  and remove connections"), Updates, Data & Privacy. Saved in `settings.json`.
+- **Schema board** (Ctrl/Cmd+3, `src/schema/`): cards, foreign-key curves, dagre
+  layout, pan, zoom (Ctrl/Cmd+= / - / 0), minimap, Key Columns Only, positions kept
+  per connection.
+- **MCP server**: `dblens --mcp` (JSON-RPC on stdio, no window; `src-tauri/src/mcp.rs`).
+  Reads are read-only in the database; writes need File > Let Agents Write
+  (Ctrl/Cmd+Alt+A, or the sidebar menu) on the connection.
+- **SQL history** per saved connection (Ctrl/Cmd+Shift+H), **Open in Terminal**
+  (Ctrl/Cmd+Shift+T), **Copy URL** with or without the password, **Back / Forward**
+  (Ctrl/Cmd+[ and ]).
 
 ### Per engine
 
@@ -123,17 +179,18 @@ run on a Mac.
 
 The desktop app has: saved connections in folders (URLs encrypted, key in the
 OS keyring), paste-a-URL or fields, SSH tunnels, the table grid with inline and
-sheet editing, the SQL panel with Rehearse and All or Nothing, a log, native
-menus and keyboard shortcuts with a shortcuts sheet, several windows, dark and
-light themes, English and Portuguese (the menu bar is English only).
+sheet editing, the SQL panel with Rehearse, All or Nothing and history, a log,
+the schema board, the MCP server for agents, the Settings window with accent
+colors, the updater, native menus and keyboard shortcuts with a shortcuts sheet,
+several windows, dark and light themes, English and Portuguese.
 
 Not yet (full list in [docs/MIGRATION.md](docs/MIGRATION.md)):
 
-- **Schema board.** The backend has `schema_graph`; the UI does not draw it.
-- **MCP server** (`dbLens --mcp` for agents).
-- **Settings window** (accent color, language, agents, data); Settings… shows a note.
-- **Updater**, and code signing for Windows and Linux.
+- **Schema board**: no sticky notes, card colors or marquee selection.
+- **Updates**: wired, but off until a real public key and a `latest.json` release
+  feed exist (see Updates above). Code signing for Windows and Linux.
+- **Agents**: no one-click install into agent apps; what agents run is not in the
+  SQL history.
 - **Export to a file.** Export copies CSV or JSON to the clipboard; there is no save dialog.
-- **SQL history**, **Open in Terminal**, **Copy URL**, **Back/Forward**.
 - **Read-only runs** from the UI: `read_only` exists in the backend but the UI does not use it.
 - Seed data, self-test and snapshot tools of the macOS app.

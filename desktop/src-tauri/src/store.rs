@@ -6,6 +6,11 @@
 //! (see `KEY_FILE_FIRST`). A damaged key or sealed file is refused,
 //! never replaced, so saved URLs are not silently lost.
 //!
+//! The app and `dblens --mcp` (mcp.rs) are separate processes on the same
+//! folder: every read or change goes through `Store::transact`, which holds an
+//! advisory lock on `connections.lock` and reloads both files first, so one
+//! never overwrites the other's changes with a stale copy, or reads a torn pair.
+//!
 //! Folder: `directories::ProjectDirs::from("app", "dblens", "dbLens").data_dir()`
 //! (Linux `~/.local/share/dblens`, Windows `%APPDATA%\dblens\dbLens\data`),
 //! or `$DBLENS_STORE_DIR` for development and tests.
@@ -29,6 +34,7 @@ const KEYRING_USER: &str = "connections-key";
 const META_FILE: &str = "connections.json";
 const SEALED_FILE: &str = "connections.enc";
 const KEY_FILE: &str = "connections.key";
+const LOCK_FILE: &str = "connections.lock";
 
 /// A saved connection as the sidebar shows it. The URL is never in here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +56,9 @@ pub struct SavedConnection {
     pub sort_index: i64,
     #[serde(default)]
     pub ssh: Option<SshConfig>,
+    /// "Let Agents Write": the MCP server (mcp.rs) may run changes here. Off by default.
+    #[serde(default)]
+    pub agents_can_write: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +80,9 @@ fn yes() -> bool {
 pub struct StoreSnapshot {
     pub connections: Vec<SavedConnection>,
     pub folders: Vec<ConnectionFolder>,
+    /// "Let agents add and remove connections" (MCP, mcp.rs). Off by default.
+    #[serde(default)]
+    pub agents_manage_connections: bool,
     /// True when the sealing key sits in `connections.key` beside the sealed
     /// URLs (no keyring on this system), so the frontend can say so. Never saved.
     #[serde(
@@ -159,24 +171,13 @@ impl Store {
     /// runtime (spawn_blocking), since the keyring may talk to D-Bus.
     pub fn open(dir: &Path, source: KeySource) -> DbResult<Store> {
         create_private_dir(dir)?;
-        let sealed_path = dir.join(SEALED_FILE);
-        let has_sealed = sealed_path.exists();
+        let _lock = lock_dir(dir)?;
+        let has_sealed = dir.join(SEALED_FILE).exists();
         let (key, key_in_file) = match source {
             KeySource::File(path) => (load_key_file(&path, !has_sealed)?, true),
             KeySource::Auto => load_key_auto(dir, !has_sealed)?,
         };
-        let meta = match fs::read(dir.join(META_FILE)) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(io)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => StoreSnapshot::default(),
-            Err(e) => return Err(io(e)),
-        };
-        let urls = if has_sealed {
-            let bytes = fs::read(&sealed_path).map_err(io)?;
-            let plain = open_sealed(&key, &bytes)?;
-            serde_json::from_slice(&plain).map_err(io)?
-        } else {
-            BTreeMap::new()
-        };
+        let (meta, urls) = read_files(dir, &key)?;
         Ok(Store {
             dir: Some(dir.to_path_buf()),
             key,
@@ -184,6 +185,21 @@ impl Store {
             meta,
             urls,
         })
+    }
+
+    /// Runs `body` with the folder locked against the other process (the app
+    /// or `dblens --mcp`) after reloading what that process may have saved, so
+    /// `body`'s changes are made to, and persisted from, the current files.
+    /// Blocking (file lock and reads). A store in memory just runs `body`.
+    pub fn transact<T>(&mut self, body: impl FnOnce(&mut Store) -> DbResult<T>) -> DbResult<T> {
+        let Some(dir) = self.dir.clone() else {
+            return body(self);
+        };
+        let _lock = lock_dir(&dir)?;
+        let (meta, urls) = read_files(&dir, &self.key)?;
+        self.meta = meta;
+        self.urls = urls;
+        body(self)
     }
 
     /// Connections ordered by folder, then position; folders as saved.
@@ -261,6 +277,7 @@ impl Store {
                     folder_id,
                     sort_index,
                     ssh,
+                    agents_can_write: false,
                 };
                 self.meta.connections.push(c.clone());
                 c
@@ -290,6 +307,26 @@ impl Store {
         let c = c.clone();
         self.persist()?;
         Ok(c)
+    }
+
+    /// "Let Agents Write" for one connection.
+    pub fn set_agents_can_write(&mut self, id: &str, allowed: bool) -> DbResult<SavedConnection> {
+        let c = self
+            .meta
+            .connections
+            .iter_mut()
+            .find(|c| c.id == id)
+            .ok_or_else(|| DbError::msg("No such connection."))?;
+        c.agents_can_write = allowed;
+        let c = c.clone();
+        self.persist()?;
+        Ok(c)
+    }
+
+    /// "Let agents add and remove connections", for all of them.
+    pub fn set_agents_manage_connections(&mut self, allowed: bool) -> DbResult<()> {
+        self.meta.agents_manage_connections = allowed;
+        self.persist()
     }
 
     /// Keeps the dates a connection brought from another app (the dbLens for
@@ -402,6 +439,102 @@ impl Store {
     }
 }
 
+/// The folder's advisory lock (`flock`, `LockFileEx`), held until dropped.
+/// Every process takes it around reading and writing `connections.json` and
+/// `connections.enc`. The OS also drops it when the process dies.
+struct DirLock(fs::File);
+
+impl Drop for DirLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            // SAFETY: the descriptor is open for as long as `self.0` lives.
+            unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            // SAFETY: the handle is open for as long as `self.0` lives.
+            unsafe {
+                windows_sys::Win32::Storage::FileSystem::UnlockFile(
+                    self.0.as_raw_handle() as _,
+                    0,
+                    0,
+                    u32::MAX,
+                    u32::MAX,
+                )
+            };
+        }
+    }
+}
+
+fn lock_dir(dir: &Path) -> DbResult<DirLock> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(dir.join(LOCK_FILE)).map_err(io)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        loop {
+            // SAFETY: a valid open descriptor; blocks until the lock is free.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(io(error));
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK};
+        let mut overlapped: windows_sys::Win32::System::IO::OVERLAPPED =
+            // SAFETY: OVERLAPPED is plain data; all zeros locks from offset 0.
+            unsafe { std::mem::zeroed() };
+        // SAFETY: a valid open handle; blocks until the lock is free.
+        let locked = unsafe {
+            LockFileEx(
+                file.as_raw_handle() as _,
+                LOCKFILE_EXCLUSIVE_LOCK,
+                0,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            )
+        };
+        if locked == 0 {
+            return Err(io(std::io::Error::last_os_error()));
+        }
+    }
+    Ok(DirLock(file))
+}
+
+/// The names and the sealed URLs as saved now (empty when not saved yet).
+fn read_files(
+    dir: &Path,
+    key: &Key<Aes256Gcm>,
+) -> DbResult<(StoreSnapshot, BTreeMap<String, String>)> {
+    let meta = match fs::read(dir.join(META_FILE)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(io)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => StoreSnapshot::default(),
+        Err(e) => return Err(io(e)),
+    };
+    let urls = match fs::read(dir.join(SEALED_FILE)) {
+        Ok(bytes) => serde_json::from_slice(&open_sealed(key, &bytes)?).map_err(io)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(e) => return Err(io(e)),
+    };
+    Ok((meta, urls))
+}
+
 /// nonce (12 bytes) followed by the ciphertext and tag.
 fn seal(key: &Key<Aes256Gcm>, plain: &[u8]) -> DbResult<Vec<u8>> {
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
@@ -426,22 +559,29 @@ fn open_sealed(key: &Key<Aes256Gcm>, bytes: &[u8]) -> DbResult<Vec<u8>> {
         })
 }
 
-/// Writes through a temp file and a rename, readable by this user only.
+/// Writes through a temp file and a rename, readable by this user only. The
+/// temp name is unique, so two processes saving at once never share one.
 fn write_private(path: &Path, bytes: &[u8]) -> DbResult<()> {
-    let temp = path.with_extension("tmp");
-    {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("store");
+    let temp = path.with_file_name(format!(".{name}.{}.tmp", uuid::Uuid::new_v4().simple()));
+    let written = (|| {
         let mut options = fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let mut file = options.open(&temp).map_err(io)?;
-        file.write_all(bytes).map_err(io)?;
-        file.sync_all().map_err(io)?;
+        let mut file = options.open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temp, path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temp);
     }
-    fs::rename(&temp, path).map_err(io)
+    written.map_err(io)
 }
 
 fn decode_key(text: &str) -> DbResult<Key<Aes256Gcm>> {
@@ -756,5 +896,44 @@ mod tests {
         store.delete(&a.id).unwrap();
         assert!(store.url(&a.id).is_none());
         assert!(store.save(draft("hello")).is_err());
+    }
+
+    /// Two processes on one folder (the app and `dblens --mcp`): changes made
+    /// through `transact` start from the other's saves and never undo them.
+    #[test]
+    fn two_stores_on_one_folder_keep_each_others_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("test.key");
+        let mut app = Store::open(dir.path(), KeySource::File(key.clone())).unwrap();
+        let kept = app
+            .transact(|s| s.save(draft("postgres://a@h/kept")))
+            .unwrap();
+        let mut mcp = Store::open(dir.path(), KeySource::File(key)).unwrap();
+        let added = mcp
+            .transact(|s| s.save(draft("postgres://b:pw@h/added")))
+            .unwrap();
+        // The app's next change keeps what the other one added, URL included.
+        app.transact(|s| s.rename(&kept.id, "Kept")).unwrap();
+        assert_eq!(app.url(&added.id), Some("postgres://b:pw@h/added"));
+        mcp.transact(|s| s.delete(&added.id)).unwrap();
+        // ...and a removal stays removed.
+        app.transact(|s| s.set_agents_can_write(&kept.id, true))
+            .unwrap();
+        assert!(app.get(&added.id).is_none() && app.url(&added.id).is_none());
+        let names: Vec<String> = mcp
+            .transact(|s| Ok(s.snapshot()))
+            .unwrap()
+            .connections
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, ["Kept"]);
+        // No temp files are left behind.
+        let leftovers = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(leftovers, 0);
     }
 }

@@ -9,6 +9,7 @@ import { t } from "../i18n";
 import type { AppModel } from "../model";
 import { shortcuts, type Action } from "../shortcuts";
 import { dispatch } from "./actions";
+import { nav } from "../nav";
 import { connectionText, firstDatabase, sqliteUrl } from "./drop";
 import { installCloseGuard } from "./closeGuard";
 
@@ -27,8 +28,13 @@ export function menuState(model: AppModel) {
     // Previous and next page scroll the grid a screen at a time.
     canBack: !!result,
     canForward: !!result,
+    navBack: nav.canBack,
+    navForward: nav.canForward,
     sqlPanel: model.showSQLPanel,
     running: model.running,
+    hasQuery: !!model.execution,
+    canShowSchema: !!model.session && model.session.engine !== "redis",
+    schemaShown: !!model.session && model.shown === "schema",
   };
 }
 
@@ -99,8 +105,16 @@ export function installNative(model: AppModel): () => void {
 
   // The menu is shared by all windows, so the focused one sets its state.
   let sent = "";
+  let agentsLabel = labels.toggleAgentsWrite;
   const push = () => {
     if (!document.hasFocus()) return;
+    // "Let Agents Write" reads as what the row will do for the open connection.
+    const saved = model.store.connections.find((c) => c.id === model.activeSavedId);
+    const wanted = t(saved?.agentsCanWrite ? "Stop Letting Agents Write" : "Let Agents Write");
+    if (wanted !== agentsLabel) {
+      agentsLabel = wanted;
+      void invoke("set_menu_labels", { labels: { toggleAgentsWrite: wanted } }).catch(() => undefined);
+    }
     const state = JSON.stringify(menuState(model));
     if (state === sent) return;
     sent = state;

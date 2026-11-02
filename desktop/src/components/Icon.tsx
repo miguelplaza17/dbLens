@@ -13,6 +13,8 @@ const paths: Record<string, string> = {
   folder: "M1.5 4.5a1 1 0 0 1 1-1h3.2l1.5 1.5h6.3a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z",
   folderPlus: "M1.5 4.5a1 1 0 0 1 1-1h3.2l1.5 1.5h6.3a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1zM8 7.5v4M6 9.5h4",
   plus: "M8 3v10M3 8h10",
+  minus: "M3 8h10",
+  schema: "M1.5 2.5h5v4h-5zM9.5 9.5h5v4h-5zM6.5 4.5H8a1 1 0 0 1 1 1v5a1 1 0 0 0 1 1M1.5 4.5h5M9.5 11.5h5",
   chevronRight: "M6 3.5 10.5 8 6 12.5",
   chevronDown: "M3.5 6 8 10.5 12.5 6",
   chevronLeft: "M10 3.5 5.5 8 10 12.5",
@@ -41,6 +43,9 @@ const paths: Record<string, string> = {
   export: "M8 10V2M5 5l3-3 3 3M3 9v4.5h10V9",
   sortUp: "M8 4l3.5 5h-7z",
   sortDown: "M8 12l3.5-5h-7z",
+  history: "M2.5 8a5.5 5.5 0 1 0 1.7-4M2.5 2.5v3h3M8 5v3.2l2 1.3",
+  back: "M13 8H3M7 4 3 8l4 4",
+  forward: "M3 8h10M9 4l4 4-4 4",
   keyboard: "M1.5 4h13v8h-13zM4 6.5h.01M6.5 6.5h.01M9 6.5h.01M11.5 6.5h.01M5 9.5h6",
 };
 

@@ -176,6 +176,44 @@ fn stream_messages() {
 }
 
 #[test]
+fn stream_appended_columns() {
+    let messages = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let kept = messages.clone();
+    let mut sink = StreamSink::new(
+        Arc::new(move |m| {
+            kept.lock().unwrap().push(m);
+            true
+        }),
+        wire::STREAM_ROW_CAP,
+    );
+    sink.begin(&[Column::new("_id", "objectId")]);
+    sink.cell(Some("a"));
+    sink.end_row();
+    sink.add_columns(&[Column::new("late", "string")]);
+    sink.cell(Some("b"));
+    sink.cell(Some("x"));
+    sink.end_row();
+    sink.end("FIND 2");
+    let all: Vec<Value> = messages.lock().unwrap().iter().map(|m| decode(m)).collect();
+    let types: Vec<&str> = all.iter().map(|m| m["type"].as_str().unwrap()).collect();
+    // The rows before the new column go out first, in their own block.
+    assert_eq!(types, ["columns", "rows", "columns", "rows", "end"]);
+    assert_eq!(
+        keys(&all[2]),
+        sorted(&["type", "result", "columns", "append"])
+    );
+    assert_eq!(all[2]["append"], true);
+    assert_eq!(
+        all[2]["columns"],
+        json!([{"name": "late", "type": "string"}])
+    );
+    assert_eq!(all[1]["data"], json!([["a"]]));
+    assert_eq!(all[3]["offset"], 1);
+    assert_eq!(all[3]["data"], json!([["b"], ["x"]]));
+    assert_eq!(all[0].get("append"), None);
+}
+
+#[test]
 fn relations_and_enums() {
     let r = serde_json::to_value(Relation {
         schema: "public".into(),
@@ -324,12 +362,14 @@ fn connections() {
             folder_id: String::new(),
             sort_index: 0,
             ssh: Some(ssh),
+            agents_can_write: false,
         }],
         folders: vec![ConnectionFolder {
             id: "f".into(),
             name: "F".into(),
             expanded: true,
         }],
+        agents_manage_connections: false,
         key_in_file: true,
     })
     .unwrap();
@@ -344,7 +384,8 @@ fn connections() {
             "lastUsed",
             "folderId",
             "sortIndex",
-            "ssh"
+            "ssh",
+            "agentsCanWrite"
         ])
     );
     assert_eq!(

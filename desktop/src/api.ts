@@ -140,7 +140,7 @@ export interface Execution {
  *  `result` numbers the statements' results from 0; a statement without rows
  *  sends only `end`. `done` comes last, always. */
 export type StreamMessage =
-  | { type: "columns"; result: number; columns: Column[] }
+  | { type: "columns"; result: number; columns: Column[]; append?: boolean } // append: more columns for a result already started (MongoDB new keys)
   | { type: "rows"; result: number; offset: number; rowCount: number; data: Value[][] }
   | { type: "end"; result: number; command: string; totalRows: number; truncated: boolean }
   | StreamDone;
@@ -223,6 +223,22 @@ export interface Summary {
   suggestedName: string;
 }
 
+/** One statement run in the SQL panel (history.rs `Entry`). */
+export interface HistoryEntry {
+  sql: string;
+  failed: boolean;
+  /** RFC 3339, UTC. */
+  date: string;
+  viaAgent: boolean;
+}
+
+/** Open in Terminal: it opened `tool`, or `missing` is the client to install and `install` how. */
+export interface OpenedTerminal {
+  tool: string | null;
+  missing: string | null;
+  install: string | null;
+}
+
 export interface SshConfig {
   host: string;
   port: number | null;
@@ -250,6 +266,8 @@ export interface SavedConnection {
   folderId: string;
   sortIndex: number;
   ssh: SshConfig | null;
+  /** "Let Agents Write": the MCP server may run changes here. */
+  agentsCanWrite?: boolean;
 }
 
 export interface ConnectionFolder {
@@ -261,6 +279,8 @@ export interface ConnectionFolder {
 export interface StoreSnapshot {
   connections: SavedConnection[];
   folders: ConnectionFolder[];
+  /** "Let agents add and remove connections" (MCP). */
+  agentsManageConnections?: boolean;
   /** No system keyring: the sealing key is in a file beside the sealed URLs. */
   keyInFile?: boolean;
 }
@@ -414,9 +434,17 @@ export class StreamCollector {
 
   add(message: StreamMessage) {
     switch (message.type) {
-      case "columns":
-        this.results[message.result] = emptyBlock(message.columns);
+      case "columns": {
+        const block = this.results[message.result];
+        if (message.append && block) {
+          // New columns after rows arrived: earlier rows have NULL there.
+          block.columns = [...block.columns, ...message.columns];
+          for (let c = 0; c < message.columns.length; c++) block.data.push(new Array<Value>(block.rowCount).fill(null));
+        } else {
+          this.results[message.result] = emptyBlock(message.columns);
+        }
         break;
+      }
       case "rows": {
         const block = this.results[message.result];
         if (block) appendRows(block, message.data, message.rowCount);
@@ -461,6 +489,13 @@ export function errorText(error: unknown): string {
 }
 
 // MARK: - Commands
+
+/** What a check for updates found (src-tauri/src/updater.rs). */
+export interface UpdateCheck {
+  available: boolean;
+  version: string | null;
+  notes: string | null;
+}
 
 export const api = {
   // URLs
@@ -548,6 +583,9 @@ export const api = {
   saveConnection: (draft: ConnectionDraft) => invoke<SavedConnection>("save_connection", { draft }),
   deleteConnection: (id: string) => invoke<void>("delete_connection", { id }),
   renameConnection: (id: string, name: string) => invoke<SavedConnection>("rename_connection", { id, name }),
+  /** "Let Agents Write" for the MCP server (src-tauri/src/mcp.rs). */
+  setAgentsCanWrite: (id: string, allowed: boolean) => invoke<SavedConnection>("set_agents_can_write", { id, allowed }),
+  setAgentsManageConnections: (allowed: boolean) => invoke<void>("set_agents_manage_connections", { allowed }),
   /** The saved URL with passwords masked, for the edit sheet. */
   connectionUrl: (id: string) => invoke<string>("connection_url", { id }),
   moveConnection: (id: string, folderId: string, beforeId: string | null = null) =>
@@ -556,6 +594,23 @@ export const api = {
   renameFolder: (id: string, name: string) => invoke<void>("rename_folder", { id, name }),
   deleteFolder: (id: string) => invoke<void>("delete_folder", { id }),
   setFolderExpanded: (id: string, expanded: boolean) => invoke<void>("set_folder_expanded", { id, expanded }),
+  /** The saved URL with its password. Ask the person first (src/history/connectionActions.ts). */
+  connectionUrlWithPassword: (id: string) => invoke<string>("connection_url_with_password", { id }),
+  /** Starts the database's own client (psql, mysql…) in a terminal (src-tauri/src/terminal.rs). */
+  openInTerminal: (connectionId: string, sessionId: string | null) =>
+    invoke<OpenedTerminal>("open_in_terminal", { connectionId, sessionId }),
+
+  // SQL history (src-tauri/src/history.rs): per saved connection, newest first, 200 at most.
+  sqlHistory: (connectionId: string) => invoke<HistoryEntry[]>("sql_history", { connectionId }),
+  addSqlHistory: (connectionId: string, sql: string, failed: boolean) =>
+    invoke<void>("add_sql_history", { connectionId, sql, failed }),
+  /** One connection's history, or all of it without an id. */
+  clearSqlHistory: (connectionId?: string) => invoke<void>("clear_sql_history", { connectionId: connectionId ?? null }),
   /** macOS only: copies dbLens for Mac's saved connections into this app (src-tauri/src/import_swift.rs). */
   importSwiftConnections: () => invoke<ImportReport>("import_swift_connections"),
+
+  // Updates (src-tauri/src/updater.rs). Fails with "not configured" in a build without a public key.
+  checkForUpdates: () => invoke<UpdateCheck>("check_for_updates"),
+  /** Installs the update the last check found, then closes and relaunches the app. */
+  installUpdate: () => invoke<void>("install_update"),
 };

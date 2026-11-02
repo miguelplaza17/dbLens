@@ -19,6 +19,9 @@ import type {
   StoreSnapshot,
   Summary,
 } from "./api";
+import { historyHandlers } from "./history/mock";
+
+import { bigSchema, demoLinks } from "./schema/sample";
 
 // MARK: - Sample databases
 
@@ -319,8 +322,14 @@ function conn(id: string, name: string, engine: Engine, url: string, folderId: s
   return { id, name, engine, url, createdAt: now, lastUsed: null, folderId, sortIndex, ssh: null };
 }
 
+let agentsManageConnections = false;
+
 function snapshot(): StoreSnapshot {
-  return { connections: saved.map(({ url: _url, ...c }) => ({ ...c })), folders: folders.map((f) => ({ ...f })) };
+  return {
+    connections: saved.map(({ url: _url, ...c }) => ({ ...c })),
+    folders: folders.map((f) => ({ ...f })),
+    agentsManageConnections,
+  };
 }
 
 // MARK: - URLs
@@ -556,6 +565,8 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   detect_engine: (a) => detect(String(a.text)),
   summarize_url: (a) => summarize(String(a.text)),
   mask_url: (a) => mask(String(a.text)),
+  check_for_updates: () => ({ available: false, version: null, notes: null }),
+  install_update: () => null,
 
   connect: async (a) => {
     await pause(250);
@@ -696,15 +707,19 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     const where = key.columns.map((c, i) => `${quote(c)} = ${literal(key.values[i])}`).join(" AND ");
     return { sql: `DELETE FROM ${quote(r.schema)}.${quote(r.name)} WHERE ${where}`, command: "DELETE 1", affected: 1 };
   },
-  schema_graph: (a): SchemaGraph => ({
-    tables: session(a).tables.map((t) => ({
+  schema_graph: (a): SchemaGraph => {
+    if (session(a).info.engine === "redis") return { tables: [], links: [] };
+    // `?schemaTables=200`: a generated schema, to try the board with many tables.
+    const many = Number(new URLSearchParams(location.search).get("schemaTables"));
+    if (many > 0) return bigSchema(many);
+    const tables = session(a).tables.map((t) => ({
       schema: t.relation.schema,
       name: t.relation.name,
       isView: t.relation.kind === "view",
       columns: t.columns.map((c) => ({ name: c.name, type: c.type, isPrimaryKey: t.key.includes(c.name), isNullable: !t.key.includes(c.name) })),
-    })),
-    links: [],
-  }),
+    }));
+    return { tables, links: demoLinks(tables) };
+  },
   qualified_name: (a) => {
     const r = a.relation as Relation;
     return session(a).info.engine === "redis" ? r.name : `${quote(r.schema)}.${quote(r.name)}`;
@@ -751,6 +766,16 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     const { url: _u, ...rest } = c;
     return { ...rest };
   },
+  set_agents_can_write: (a) => {
+    const c = saved.find((x) => x.id === a.id);
+    if (!c) throw "No such connection.";
+    c.agentsCanWrite = !!a.allowed;
+    const { url: _u, ...rest } = c;
+    return { ...rest };
+  },
+  set_agents_manage_connections: (a) => {
+    agentsManageConnections = !!a.allowed;
+  },
   connection_url: (a) => mask(saved.find((c) => c.id === a.id)?.url ?? ""),
   move_connection: (a) => {
     const c = saved.find((x) => x.id === a.id);
@@ -774,6 +799,7 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     const f = folders.find((x) => x.id === a.id);
     if (f) f.expanded = Boolean(a.expanded);
   },
+  ...historyHandlers,
 };
 
 /** Answers a command like Tauri's invoke: resolves with the value, rejects with a string. */

@@ -23,7 +23,7 @@ tauri-build = { version = "2.7", features = [] }
 tauri = { version = "2.12", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "process", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "process", "io-util", "io-std"] }
 async-trait = "0.1"
 thiserror = "2"
 regex = "1"
@@ -62,17 +62,20 @@ tauri-plugin-window-state = "2"
 tauri-plugin-dialog = "2"
 # Settings > Data & Privacy > Show Data Folder (src/settings.rs).
 tauri-plugin-opener = "2"
+# In-app updates from GitHub Releases (src/updater.rs). Same version as the npm package.
+tauri-plugin-updater = "2.14.1"
 
 # ssh children die with the app: PR_SET_PDEATHSIG on Linux, a kill-on-close
 # Job Object on Windows (both already in the dependency tree).
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 tauri-plugin-single-instance = "2"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+# flock / LockFileEx: the store folder's lock between the app and `dblens --mcp` (store.rs).
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Storage_FileSystem", "Win32_System_IO"] }
 
 [dev-dependencies]
 muda = "0.20"

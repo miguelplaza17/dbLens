@@ -8,6 +8,7 @@ import { useModel } from "../model";
 import { withKeys } from "../shortcuts";
 import { copyText } from "../format";
 import { beginConnectionDrag } from "../native/dragConnections";
+import { copyUrl, copyUrlWithPassword, openInTerminal } from "../history/connectionActions";
 import { Icon, type IconName } from "./Icon";
 
 const relationIcon: Record<Relation["kind"], IconName> = {
@@ -47,6 +48,14 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
       { title: t("Connect"), icon: "connect", action: () => void model.connect(c) },
       { title: t("Edit…"), icon: "edit", action: () => model.open({ kind: "connection", editing: c }) },
       { title: t("Rename…"), action: () => setRenaming(c.id) },
+      { title: t("Open in Terminal"), icon: "terminal", action: () => void openInTerminal(model, c) },
+      { title: t("Copy URL Without Password"), icon: "copy", action: () => void copyUrl(model, c) },
+      { title: t("Copy URL with Password…"), action: () => copyUrlWithPassword(model, c) },
+      {
+        title: c.agentsCanWrite ? t("Stop Letting Agents Write") : t("Let Agents Write"),
+        icon: "terminal",
+        action: () => void model.setAgentsCanWrite(c, !c.agentsCanWrite),
+      },
       ...(active ? [{ title: t("Disconnect"), icon: "disconnect" as IconName, action: () => void model.disconnect() }] : []),
       { separator: true, title: "" },
       ...model.store.folders

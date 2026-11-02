@@ -8,7 +8,9 @@ pub mod connector;
 pub mod drivers;
 pub mod engine;
 pub mod export;
+pub mod history;
 pub mod import_swift;
+pub mod mcp;
 pub mod menu;
 pub mod pool;
 pub mod session;
@@ -16,6 +18,8 @@ pub mod settings;
 pub mod sql_script;
 pub mod ssh;
 pub mod store;
+pub mod terminal;
+pub mod updater;
 pub mod url;
 pub mod windows;
 pub mod wire;
@@ -37,13 +41,17 @@ pub fn run() {
     let app = builder
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(commands::AppState::default())
         .manage(windows::PendingOpen::default())
         .manage(close_guard::CloseGuard::default())
         .manage(settings::SettingsState::from_env())
+        .manage(history::HistoryState::from_env())
+        .manage(updater::UpdaterState::default())
         .setup(|app| {
             menu::install(app.handle())?;
             windows::queue_launch_args(app.handle());
+            updater::start(app.handle());
             Ok(())
         })
         .on_menu_event(|app, event| menu::on_event(app, event.id().as_ref()))
@@ -114,6 +122,13 @@ pub fn run() {
             commands::delete_connection,
             commands::rename_connection,
             commands::connection_url,
+            terminal::connection_url_with_password,
+            terminal::open_in_terminal,
+            history::sql_history,
+            history::add_sql_history,
+            history::clear_sql_history,
+            commands::set_agents_can_write,
+            commands::set_agents_manage_connections,
             commands::move_connection,
             commands::add_folder,
             commands::rename_folder,
@@ -126,6 +141,8 @@ pub fn run() {
             settings::open_settings,
             settings::fit_settings,
             settings::show_data_folder,
+            updater::check_for_updates,
+            updater::install_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building dbLens");
@@ -135,6 +152,7 @@ pub fn run() {
         if let RunEvent::Exit = event {
             let state = app.state::<commands::AppState>();
             tauri::async_runtime::block_on(state.close_all());
+            updater::on_exit(app);
         }
     });
 }

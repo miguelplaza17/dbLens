@@ -4,9 +4,10 @@
 //! with `DBLENS_STORE=memory` nothing is written. Every change is sent to all
 //! windows as `SETTINGS_EVENT`, so the theme and accent change everywhere at once.
 //!
-//! Other parts read the current values with `current(app)`: the MCP server
-//! (`agents_manage_connections`), the updater (`check_for_updates`,
-//! `update_automatically`).
+//! Other parts read the current values with `current(app)`: the updater
+//! (`check_for_updates`, `update_automatically`). "Let agents add and remove
+//! connections" is not here: the MCP server runs as its own process and reads
+//! it from the store (`StoreSnapshot::agents_manage_connections`).
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -49,8 +50,6 @@ pub struct Settings {
     pub appearance: Appearance,
     /// One of `ACCENTS`.
     pub accent: String,
-    /// Settings > Agents > "Let agents add and remove connections". Off by default.
-    pub agents_manage_connections: bool,
     /// Settings > Updates > "Check for updates automatically".
     pub check_for_updates: bool,
     /// Settings > Updates > "Update automatically".
@@ -62,7 +61,6 @@ impl Default for Settings {
         Settings {
             appearance: Appearance::Dark,
             accent: "system".into(),
-            agents_manage_connections: false,
             check_for_updates: true,
             update_automatically: false,
         }
@@ -101,7 +99,9 @@ impl Settings {
             return Err("Settings: expected an object".into());
         };
         let mut merged = serde_json::to_value(self).map_err(|e| e.to_string())?;
-        let target = merged.as_object_mut().expect("settings serialize to an object");
+        let target = merged
+            .as_object_mut()
+            .expect("settings serialize to an object");
         for (key, value) in fields {
             if !target.contains_key(key) {
                 return Err(format!("Settings: unknown setting {key}"));
@@ -241,16 +241,20 @@ pub fn open_settings(app: AppHandle, title: String) -> Result<(), String> {
         return window.set_focus().map_err(|e| e.to_string());
     }
     let settings = current(&app);
-    let window = WebviewWindowBuilder::new(&app, WINDOW_LABEL, WebviewUrl::App("index.html".into()))
-        .title(title)
-        .inner_size(WINDOW_WIDTH, 480.0)
-        .resizable(false)
-        .maximizable(false)
-        .minimizable(false)
-        .theme(settings.native_theme())
-        .center()
-        .build()
-        .map_err(|e| e.to_string())?;
+    let window =
+        WebviewWindowBuilder::new(&app, WINDOW_LABEL, WebviewUrl::App("index.html".into()))
+            .title(title)
+            .inner_size(WINDOW_WIDTH, 480.0)
+            // Resizable, but held at the fitted size by min = max (`fit_settings`):
+            // GTK ignores resizes of a window that isn't resizable.
+            .min_inner_size(WINDOW_WIDTH, MIN_HEIGHT)
+            .max_inner_size(WINDOW_WIDTH, MAX_HEIGHT)
+            .maximizable(false)
+            .minimizable(false)
+            .theme(settings.native_theme())
+            .center()
+            .build()
+            .map_err(|e| e.to_string())?;
     // The menu bar belongs to the database windows (on macOS it is the app's anyway).
     #[cfg(not(target_os = "macos"))]
     let _ = window.remove_menu();
@@ -266,9 +270,18 @@ pub fn fit_settings(window: WebviewWindow, height: f64) -> Result<(), String> {
         return Ok(());
     }
     let height = height.clamp(MIN_HEIGHT, MAX_HEIGHT).round();
+    let size = tauri::LogicalSize::new(WINDOW_WIDTH, height);
+    let err = |e: tauri::Error| e.to_string();
+    // Loosen the limits, resize, then pin the new size (the requests run in order).
     window
-        .set_size(tauri::LogicalSize::new(WINDOW_WIDTH, height))
-        .map_err(|e| e.to_string())
+        .set_min_size(Some(tauri::LogicalSize::new(WINDOW_WIDTH, MIN_HEIGHT)))
+        .map_err(err)?;
+    window
+        .set_max_size(Some(tauri::LogicalSize::new(WINDOW_WIDTH, MAX_HEIGHT)))
+        .map_err(err)?;
+    window.set_size(size).map_err(err)?;
+    window.set_min_size(Some(size)).map_err(err)?;
+    window.set_max_size(Some(size)).map_err(err)
 }
 
 /// Opens the data folder in the file manager (Explorer, Finder, Files…).
@@ -302,7 +315,7 @@ mod tests {
         let again = SettingsState::at(Some(path.clone()));
         assert_eq!(again.get(), next);
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"agentsManageConnections\": false"), "{text}");
+        assert!(text.contains("\"checkForUpdates\": true"), "{text}");
     }
 
     #[test]
@@ -313,8 +326,11 @@ mod tests {
         assert!(s.patched(&json!({ "appearance": "sepia" })).is_err());
         assert!(s.patched(&json!({ "checkForUpdates": "yes" })).is_err());
         assert!(s.patched(&json!(["accent"])).is_err());
-        let ok = s.patched(&json!({ "agentsManageConnections": true })).unwrap();
-        assert!(ok.agents_manage_connections);
+        assert!(s
+            .patched(&json!({ "agentsManageConnections": true }))
+            .is_err());
+        let ok = s.patched(&json!({ "updateAutomatically": true })).unwrap();
+        assert!(ok.update_automatically);
     }
 
     #[test]
@@ -344,8 +360,14 @@ mod tests {
         for id in ACCENTS {
             assert!(ts.contains(&format!("\"{id}\"")), "accents.ts lacks {id}");
             if id != "system" {
-                assert!(css.contains(&format!("html.accent-{id} ")), "accents.css lacks {id}");
-                assert!(css.contains(&format!(".swatch-{id} ")), "accents.css lacks the {id} swatch");
+                assert!(
+                    css.contains(&format!("html.accent-{id} ")),
+                    "accents.css lacks {id}"
+                );
+                assert!(
+                    css.contains(&format!(".swatch-{id} ")),
+                    "accents.css lacks the {id} swatch"
+                );
             }
         }
     }

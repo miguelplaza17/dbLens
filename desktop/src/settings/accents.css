@@ -8,6 +8,12 @@
    table; keep the ids in step with src-tauri/src/settings.rs (ACCENTS). */
 :root {
   --on-accent-dark-ink: #16161c;
+  --switch-knob: #ffffff;
+}
+/* A switch that is off has no accent under its knob: keep the knob white
+   (--on-accent is dark ink for yellow, mint and teal). */
+.switch:not(:checked)::after {
+  background: var(--switch-knob);
 }
 html.accent-elephant {
   --accent: #3d7dca;

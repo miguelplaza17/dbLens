@@ -14,8 +14,6 @@ export type Appearance = "system" | "light" | "dark";
 export interface Settings {
   appearance: Appearance;
   accent: AccentId;
-  /** Settings > Agents > Let agents add and remove connections. */
-  agentsManageConnections: boolean;
   checkForUpdates: boolean;
   updateAutomatically: boolean;
 }
@@ -34,7 +32,6 @@ export const SETTINGS_EVENT = "settings-changed";
 const defaults: Settings = {
   appearance: "dark",
   accent: "system",
-  agentsManageConnections: false,
   checkForUpdates: true,
   updateAutomatically: false,
 };
@@ -142,6 +139,26 @@ export function effectiveTheme(appearance: Appearance): "light" | "dark" {
   return appearance;
 }
 
+const THEME_MIGRATED = "dblens.themeMigrated";
+
+/**
+ * Once: before settings.json existed the theme lived only in localStorage
+ * ("theme"). A user who had picked light would otherwise get the default dark,
+ * so that choice becomes the appearance, unless one was already set.
+ */
+async function migrateTheme(s: Settings): Promise<Settings> {
+  try {
+    if (localStorage.getItem(THEME_MIGRATED)) return s;
+    localStorage.setItem(THEME_MIGRATED, "1");
+    if (s.appearance === defaults.appearance && localStorage.getItem("theme") === "light") {
+      return await setSettings({ appearance: "light" });
+    }
+  } catch {
+    // No storage or a failed save: keep what was read.
+  }
+  return s;
+}
+
 /**
  * Follows the settings in this window: the accent at once, and the theme
  * through `setTheme` (the main window keeps it in its model; the Settings
@@ -158,9 +175,11 @@ export function followSettings(setTheme: (theme: "light" | "dark") => void, onCh
     onChange?.(s);
   };
   let stopped = false;
-  void getSettings().then((s) => {
-    if (!stopped) apply(s);
-  });
+  void getSettings()
+    .then(migrateTheme)
+    .then((s) => {
+      if (!stopped) apply(s);
+    });
   const stop = onSettings(apply);
   const onSystem = () => {
     if (appearance === "system" && !forced) setTheme(effectiveTheme("system"));

@@ -407,6 +407,11 @@ impl StreamSink {
         }
     }
 
+    /// How many results this run has ended so far (the next one's number).
+    pub fn result_index(&self) -> u32 {
+        self.result
+    }
+
     /// Rows seen in the current result set.
     pub fn seen(&self) -> u64 {
         self.seen
@@ -452,6 +457,28 @@ impl StreamSink {
         Self::head(&mut out, 3, "columns", Some(self.result));
         key(&mut out, "columns");
         columns(&mut out, cols);
+        self.emit(out);
+    }
+
+    /// Columns found after rows were sent (MongoDB documents with new keys):
+    /// they append to the current result's columns. Call between rows. Rows
+    /// sent earlier have NULL there (the receiver pads them).
+    pub fn add_columns(&mut self, cols: &[Column]) {
+        if cols.is_empty() || self.width == 0 {
+            return;
+        }
+        self.flush();
+        self.width += cols.len();
+        for _ in cols {
+            self.buffers.push(Vec::with_capacity(4096));
+            self.writers.push(ColumnWriter::new());
+        }
+        let mut out = Vec::with_capacity(64 + cols.len() * 32);
+        Self::head(&mut out, 4, "columns", Some(self.result));
+        key(&mut out, "columns");
+        columns(&mut out, cols);
+        key(&mut out, "append");
+        let _ = encode::write_bool(&mut out, true);
         self.emit(out);
     }
 

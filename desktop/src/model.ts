@@ -25,6 +25,8 @@ import { TableSource } from "./grid/blocks";
 import { markStart } from "./grid/perf";
 import { duration, executionSummary } from "./format";
 import { t } from "./i18n";
+import { setSettings } from "./settings/store";
+import { recordRun } from "./history/store";
 
 export const pageSizes = [50, 100, 200, 500, 1000];
 
@@ -87,7 +89,8 @@ export class AppModel {
   collapsedSchemas = new Set<string>();
 
   // The center pane
-  shown: "table" | "query" = "table";
+  /** The center pane: the table, the SQL result, or the schema board (src/schema). */
+  shown: "table" | "query" | "schema" = "table";
   relation: Relation | null = null;
   /** The table's first block (columns, keys, note). */
   tableResult: ResultBlock | null = null;
@@ -162,6 +165,7 @@ export class AppModel {
   }
   get shownResult(): ResultBlock | null {
     if (this.shown === "table") return this.tableResult;
+    if (this.shown === "schema") return null;
     return this.execution ? mainResult(this.execution) ?? null : null;
   }
   get canEditRows(): boolean {
@@ -333,6 +337,11 @@ export class AppModel {
     if (!name.trim() || name === saved.name) return;
     await this.attempt(() => api.renameConnection(saved.id, name.trim()));
     if (this.session?.savedId === saved.id) this.session = { ...this.session, name: name.trim() };
+    await this.loadStore();
+  }
+
+  async setAgentsCanWrite(saved: SavedConnection, allowed: boolean) {
+    await this.attempt(() => api.setAgentsCanWrite(saved.id, allowed));
     await this.loadStore();
   }
 
@@ -710,12 +719,16 @@ export class AppModel {
             this.changed();
           }
         });
-        if (done.error !== null) throw done.error;
+        // A cancelled run keeps its partial result; only a real failure throws.
+        if (done.error !== null && !done.cancelled) throw done.error;
         execution = collector.execution();
+        // New block objects so the grid sees the final truncated/total values.
+        if (shownEarly) execution = { ...execution, results: execution.results.map((r) => ({ ...r })) };
         if (done.cancelled) note = t("Stopped after %lld rows", mainResult(execution)?.rowCount ?? 0);
       }
       if (this.session?.sessionId !== info.sessionId) return;
       this.log = { date: started, isError: false, message: [executionSummary(execution), note].filter(Boolean).join(" · "), sql: text };
+      recordRun(this, text, false);
       const main = mainResult(execution);
       this.execution = execution;
       if (!shownEarly) {
@@ -738,6 +751,8 @@ export class AppModel {
       }
     } catch (e) {
       this.log = { date: started, isError: true, message: errorText(e), sql: text };
+      // Not into the history of a connection opened meanwhile.
+      if (this.session?.sessionId === info.sessionId) recordRun(this, text, true, info.savedId);
     }
     this.running = false;
     this.changed();
@@ -788,7 +803,15 @@ export class AppModel {
   }
 
   toggleTheme() {
-    this.theme = this.theme === "dark" ? "light" : "dark";
+    this.setTheme(this.theme === "dark" ? "light" : "dark");
+    // Saved in Settings > Appearance, so every window follows.
+    void setSettings({ appearance: this.theme });
+  }
+
+  /** The theme this window shows (from Settings > Appearance, src/settings/store.ts). */
+  setTheme(theme: Theme) {
+    if (theme === this.theme) return;
+    this.theme = theme;
     store("theme", this.theme);
     this.changed();
   }
@@ -824,7 +847,7 @@ export class AppModel {
     }, 1800);
   }
 
-  showResultTab(which: "table" | "query") {
+  showResultTab(which: "table" | "query" | "schema") {
     this.shown = which;
     this.selection = new Set();
     this.changed();

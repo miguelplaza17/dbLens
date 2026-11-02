@@ -27,5 +27,19 @@
   { "action": "freezeFirstColumn", "keys": "", "title": "Freeze First Column" },
   { "action": "toggleTheme", "keys": "Mod+Shift+L", "title": "Light or Dark", "inFields": true },
   { "action": "perfHud", "keys": "Mod+Shift+P", "title": "Performance HUD", "inFields": true },
-  { "action": "showShortcuts", "keys": "Mod+/", "title": "Keyboard Shortcuts", "inFields": true }
+  { "action": "checkForUpdates", "keys": "Mod+Alt+U", "title": "Check for Updates…", "inFields": true },
+  { "action": "showShortcuts", "keys": "Mod+/", "title": "Keyboard Shortcuts", "inFields": true },
+  { "action": "showTable", "keys": "Mod+1", "title": "Show Table", "inFields": true },
+  { "action": "showQuery", "keys": "Mod+2", "title": "Show Query Result", "inFields": true },
+  { "action": "showSchema", "keys": "Mod+3", "title": "Show Schema", "inFields": true },
+  { "action": "history", "keys": "Mod+Shift+H", "title": "SQL History", "inFields": true },
+  { "action": "openTerminal", "keys": "Mod+Shift+T", "title": "Open in Terminal", "inFields": true },
+  { "action": "copyUrl", "keys": "Mod+Alt+C", "title": "Copy URL Without Password", "inFields": false },
+  { "action": "copyUrlWithPassword", "keys": "Mod+Alt+Shift+C", "title": "Copy URL with Password…", "inFields": false },
+  { "action": "toggleAgentsWrite", "keys": "Mod+Alt+A", "title": "Let Agents Write", "inFields": false },
+  { "action": "goBack", "keys": "Mod+[", "title": "Back" },
+  { "action": "goForward", "keys": "Mod+]", "title": "Forward" },
+  { "action": "zoomIn", "keys": "Mod+=", "title": "Zoom In" },
+  { "action": "zoomOut", "keys": "Mod+-", "title": "Zoom Out" },
+  { "action": "zoomToFit", "keys": "Mod+0", "title": "Zoom to Fit" }
 ]

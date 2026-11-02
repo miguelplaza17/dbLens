@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What every window may call: core events and window controls, the file dialog, and saved window state. dbLens' own commands are allowed for every window by default.",
+  "description": "What every window may call: core events and window controls (close: the Settings window's Ctrl+W; the main window's close still asks about unsaved edits, close_guard.rs), the file dialog, and saved window state. dbLens' own commands are allowed for every window by default.",
   "windows": ["*"],
-  "permissions": ["core:default", "dialog:default", "window-state:default"]
+  "permissions": ["core:default", "core:window:allow-close", "dialog:default", "window-state:default"]
 }

@@ -10,6 +10,7 @@ export type Action =
   | "newWindow"
   | "openFile"
   | "importSwift"
+  | "checkForUpdates"
   | "closeWindow"
   | "disconnect"
   | "settings"
@@ -34,7 +35,20 @@ export type Action =
   | "freezeFirstColumn"
   | "toggleTheme"
   | "perfHud"
-  | "showShortcuts";
+  | "showShortcuts"
+  | "showTable"
+  | "showQuery"
+  | "showSchema"
+  | "zoomIn"
+  | "zoomOut"
+  | "zoomToFit"
+  | "history"
+  | "openTerminal"
+  | "copyUrl"
+  | "copyUrlWithPassword"
+  | "toggleAgentsWrite"
+  | "goBack"
+  | "goForward";
 
 export interface Shortcut {
   action: Action;

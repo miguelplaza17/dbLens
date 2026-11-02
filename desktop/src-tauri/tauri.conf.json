@@ -25,6 +25,12 @@
       "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'"
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "REPLACE_WITH_UPDATER_PUBLIC_KEY",
+      "endpoints": ["https://github.com/miguelplaza17/dbLens/releases/latest/download/latest.json"]
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["deb", "appimage", "rpm", "msi", "nsis", "app", "dmg"],

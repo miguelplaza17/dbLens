@@ -41,6 +41,10 @@ What works and what is missing: see "Status" in [README.md](README.md).
 | `src-tauri/src/drivers/mongo.rs`, `mongo_shell.rs` | MongoDB (official mongodb crate) and the mongosh parser |
 | `src-tauri/src/ssh.rs` | SSH tunnel via the system `ssh` |
 | `src-tauri/src/store.rs` | saved connections, folders, sealed URLs |
+| `src-tauri/src/history.rs`, `src/history/` | SQL history per saved connection (`sql-history.json`, 200 runs, consecutive repeats collapse): commands `sql_history`, `add_sql_history`, `clear_sql_history`; the History popover of the SQL panel |
+| `src-tauri/src/terminal.rs` | Open in Terminal (`open_in_terminal`; client command per engine, password in the environment, platform terminal) and `connection_url_with_password` |
+| `src/nav.ts` | Back / Forward between tables, results and the schema board |
+| `src-tauri/src/settings.rs`, `src/settings/` | app settings (`settings.json` in the data folder; memory only with `DBLENS_STORE=memory`), the Settings window (label `settings`, sized to its content), accent colors (`accents.css`); every change goes to all windows as event `settings-changed`; `settings::current(app)` for other modules |
 | `src-tauri/src/import_swift.rs`, `src-tauri/swift/` | macOS: import the Swift app's saved connections (Core Data store, sealed URLs; the Secure Enclave key through a tiny Swift helper that `build.rs` compiles for macOS targets only) |
 | `src-tauri/src/menu.rs` | the native menu bar, built from `src/shortcuts.json`; enabled rules (`MenuState`) |
 | `src-tauri/src/windows.rs` | new windows (labels `main`, `w2`, `w3`…), files to open passed at launch or by a second launch |
@@ -51,6 +55,7 @@ What works and what is missing: see "Status" in [README.md](README.md).
 | `src/i18n.ts`, `src/i18n/*.json` | `t()`; English source, `pt-BR` |
 | `src/shortcuts.json`, `src/shortcuts.ts` | every action: id, keys, title (one table for keys, tooltips and the native menu) |
 | `src/native/` | `actions.ts` (one dispatcher for keys and menu clicks), `perform.ts` (window actions), `bridge.ts` (menu events, menu state, file and text drops), `dragConnections.ts`, `importSwift.ts` |
+| `src/schema/` | the schema board: `store.ts` (graph, per-connection board state in localStorage, `performSchema` for Show Table/Query/Schema and zoom), `layout.ts` (card geometry, dagre layout), `draw.ts` (canvas painting, hit testing, minimap), `SchemaBoard.tsx`, `sample.ts` (mock foreign keys and `?schemaTables=N`) |
 | `src/grid/` | the table grid (Glide Data Grid, canvas): `blocks.ts` (row blocks fetched on demand, LRU, pending edits), `CellEditor.tsx`, `commands.ts` (grid actions), `perf.ts`/`PerfHud.tsx` (the perf HUD), `theme.ts` |
 | `src/App.tsx`, `src/components/`, `src/theme.css`, `src/styles.css` | the UI |
 
@@ -248,7 +253,7 @@ and sends MessagePack messages over a `tauri::ipc::Channel` as raw bytes
 
 ```ts
 type StreamMessage =
-  | { type: "columns"; result: number; columns: Column[] }                           // a result set starts
+  | { type: "columns"; result: number; columns: Column[]; append?: true }               // a result set starts; append: more columns for the one in progress (MongoDB new keys; earlier rows are NULL there)
   | { type: "rows"; result: number; offset: number; rowCount: number; data: Value[][] } // a block, column-major
   | { type: "end"; result: number; command: string; totalRows: number; truncated: boolean } // a statement ends
   | { type: "done"; durationMs: number; error: string | null; cancelled: boolean };  // always last
@@ -268,8 +273,18 @@ type StreamMessage =
 - If the window closes (the channel is gone), the driver stops and cancels the
   query on the server.
 - Postgres streams via the simple query protocol (`simple_query_raw`), MySQL via
-  `query_iter`, SQLite by stepping the statement; Redis and MongoDB run
-  `execute` and send each result whole (Mongo results stay cut at 5,000).
+  `query_iter`, SQLite by stepping the statement.
+- MongoDB streams `find` and `aggregate` (other statements send their result
+  whole). The columns come from the first 500 documents (`_id` first); a key
+  that first shows up later is sent as a `columns` message with `append: true`
+  (the rows sent before have NULL there; `StreamCollector` pads them). Up to
+  `rowCap` documents are sent, then the result ends cut (`truncated`, command
+  `FIND n+`) without reading the rest of the cursor.
+- Redis/Valkey streams array and map replies (LRANGE, HGETALL, ZRANGE, SMEMBERS,
+  XRANGE...) element by element as they are read, with the same grid layout as
+  `execute`. `SCAN`, `SSCAN`, `HSCAN` and `ZSCAN` loop their cursor to 0 (adding
+  `COUNT 1000` unless given), one column (`key`, `member`) or two (`field`/`value`,
+  `member`/`score`); past `rowCap` the loop stops and the result ends cut (`SCAN n+`).
 
 `api.executeStream(sessionId, sql, onMessage, rowCap?)` wraps it and resolves with
 the `done` message; `StreamCollector` builds an `Execution` from the messages
@@ -307,7 +322,7 @@ JS argument names are camelCase (Tauri maps them to the snake_case parameters).
 | `export_result` | `result: QueryResult` (row-major JSON; `api.exportResult` converts a block with `toQueryResult`), `format: "csv" \| "json"` | `string` |
 | `list_connections` | – | `StoreSnapshot` |
 | `save_connection` | `draft: ConnectionDraft` | `SavedConnection` (with `id` and a masked url, the saved password is kept) |
-| `delete_connection` | `id` | `void` |
+| `delete_connection` | `id` | `void` (its SQL history goes too) |
 | `rename_connection` | `id, name` | `SavedConnection` |
 | `connection_url` | `id` | `string` (masked, for the edit sheet) |
 | `move_connection` | `id, folderId, beforeId?` | `void` |
@@ -315,6 +330,8 @@ JS argument names are camelCase (Tauri maps them to the snake_case parameters).
 | `rename_folder` | `id, name` | `void` |
 | `delete_folder` | `id` | `void` (its connections move to the top level) |
 | `set_folder_expanded` | `id, expanded` | `void` |
+| `set_agents_can_write` | `id, allowed` | `SavedConnection` ("Let Agents Write": the MCP server may run `execute`, `test_changes`, `install_extension` there) |
+| `set_agents_manage_connections` | `allowed` | `void` (Settings > Agents: the MCP server may create and delete connections; kept in the store as `StoreSnapshot.agentsManageConnections`, not in `settings.json`, because `dblens --mcp` is a separate process that reads the store on every call) |
 | `import_swift_connections` | – | `ImportReport { imported, skipped, errors: string[] }` (macOS only; elsewhere it rejects. Skips a connection with the same URL and name; errors name connections, never URLs) |
 
 Window and menu commands (`menu.rs`, `windows.rs`):
@@ -323,7 +340,37 @@ Window and menu commands (`menu.rs`, `windows.rs`):
 |---|---|---|
 | `new_window` | – | `void` (opens a window with the smallest free label `w2`, `w3`…) |
 | `take_pending_open` | – | `string[]`: database files this window should open (from the command line or a second launch), once |
-| `set_menu_state` | `state: {connected, hasTable, canInsert, canEdit, hasSelection, hasResult, canBack, canForward, sqlPanel, running}` | `void` (the focused window greys out menu rows) |
+| `set_menu_state` | `state: {connected, hasTable, canInsert, canEdit, hasSelection, hasResult, canBack, canForward, navBack, navForward, sqlPanel, running, hasQuery, canShowSchema, schemaShown}` | `void` (the focused window greys out menu rows) |
+| `set_menu_labels` | `labels: {[actionId or "menu:<Title>"]: string}` | `void` (menu wording in the UI language, sent at start; the focused window also re-sends `toggleAgentsWrite` as "Let Agents Write" or "Stop Letting Agents Write") |
+| `close_guard_ready` / `close_confirmed` | – | `void` (the window answers close requests itself, asking about unsaved edits; `close_guard.rs`) |
+
+Settings (`settings.rs`; `src/settings/store.ts` wraps them, the UI never calls `invoke` for them):
+
+| Command | Arguments | Returns |
+|---|---|---|
+| `get_settings` | – | `Settings { appearance: "system" \| "light" \| "dark", accent, checkForUpdates, updateAutomatically }` (also sets the calling window's title bar theme) |
+| `set_settings` | `patch: Partial<Settings>` | `Settings`; unknown fields, wrong types and unknown accents are refused; saved, then event `settings-changed` (payload `Settings`) to every window |
+| `settings_info` | – | `{ version, executable, dataFolder: string \| null, os }` |
+| `open_settings` | `title` | `void` (opens or raises the Settings window) |
+| `fit_settings` | `height` | `void` (Settings window only: its height in CSS px, 240–860) |
+| `show_data_folder` | – | `void` (opens the data folder in the file manager; rejects with `DBLENS_STORE=memory`) |
+
+Updates (`updater.rs`; the tauri updater plugin, `plugins.updater` in `tauri.conf.json`):
+
+| Command | Arguments | Returns |
+|---|---|---|
+| `check_for_updates` | – | `UpdateInfo { available, version: string \| null, notes: string \| null }`; event `update-available` (payload `UpdateInfo`) to every window when one is found. Rejects with a clear message while the public key is the placeholder. |
+| `install_update` | – | `void` (installs the update the last check found, closes the windows through the close guard, relaunches) |
+
+MCP server (`mcp.rs`): `dblens --mcp` (checked in `main.rs` before Tauri starts) serves MCP JSON-RPC on
+stdio: `initialize`, `ping`, `tools/list`, `tools/call`. Tools: `list_connections`, `list_tables`,
+`describe_schema`, `describe_table`, `query` (read-only session), `list_extensions`, `install_extension`,
+`test_changes`, `execute`, `create_connection`, `delete_connection`. It opens the same store as the app
+(`DBLENS_STORE`, `DBLENS_STORE_DIR`) and never returns URLs. Both processes go through
+`Store::transact`: an advisory lock on `connections.lock`, then a reload of `connections.json` and
+`connections.enc`, so each sees and keeps the other's changes. Each `tools/call` runs concurrently, is stopped
+after 60 s (`DBLENS_MCP_TIMEOUT` seconds) with its statement cancelled, and honours `notifications/cancelled`
+(no answer is sent for a cancelled call).
 
 A saved URL with its password never reaches the frontend.
 
@@ -349,7 +396,10 @@ A saved URL with its password never reaches the frontend.
   Settings…, Quit) and Window as well. Settings… is under File on Windows and
   Edit on Linux. Keys without a modifier (Delete) have no accelerator. On Linux,
   Undo/Redo/Quit are custom rows (muda has no predefined ones there). Menu
-  labels are English for now.
+  labels come from the front end in the UI language (`set_menu_labels`).
+- Capabilities (`capabilities/default.json`): `core:default`, `core:window:allow-close`
+  (`getCurrentWindow().close()`: the Settings window's Mod+W and the key path of
+  Close Window), `dialog:default`, `window-state:default`.
 - Windows: each window has its own sessions, closed when it is destroyed; size
   and position are kept per label (window-state plugin). On Windows and Linux a
   second launch raises the running app (single-instance) and opens any

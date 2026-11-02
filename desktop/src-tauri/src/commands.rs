@@ -94,6 +94,17 @@ impl AppState {
         }
     }
 
+    /// The local end of a session's SSH tunnel, if it has one (Open in Terminal).
+    pub(crate) fn tunnel_port(&self, id: &str) -> Option<u16> {
+        let sessions = self.sessions.lock().ok()?;
+        sessions
+            .get(id)?
+            .connection
+            .tunnel
+            .as_ref()
+            .map(|t| t.local_port)
+    }
+
     /// Takes out the sessions `which` picks (all of them for `|_| true`).
     fn take_sessions(&self, which: impl Fn(&Open) -> bool) -> Vec<Arc<Open>> {
         let Ok(mut sessions) = self.sessions.lock() else {
@@ -154,7 +165,8 @@ impl AppState {
             };
             *guard = Some(store);
         }
-        body(guard.as_mut().expect("store opened"))
+        // Reloads under the folder lock first: `dblens --mcp` may have saved meanwhile.
+        guard.as_mut().expect("store opened").transact(body)
     }
 }
 
@@ -589,8 +601,14 @@ pub async fn save_connection(
 }
 
 #[tauri::command]
-pub async fn delete_connection(state: State<'_, AppState>, id: String) -> DbResult<()> {
-    state.with_store(|store| store.delete(&id)).await
+pub async fn delete_connection(
+    state: State<'_, AppState>,
+    history: State<'_, crate::history::HistoryState>,
+    id: String,
+) -> DbResult<()> {
+    state.with_store(|store| store.delete(&id)).await?;
+    // Its SQL history goes with it (history.rs).
+    history.clear(Some(&id))
 }
 
 #[tauri::command]
@@ -600,6 +618,29 @@ pub async fn rename_connection(
     name: String,
 ) -> DbResult<SavedConnection> {
     state.with_store(|store| store.rename(&id, &name)).await
+}
+
+/// "Let Agents Write" on one connection (the MCP server, mcp.rs).
+#[tauri::command]
+pub async fn set_agents_can_write(
+    state: State<'_, AppState>,
+    id: String,
+    allowed: bool,
+) -> DbResult<SavedConnection> {
+    state
+        .with_store(|store| store.set_agents_can_write(&id, allowed))
+        .await
+}
+
+/// "Let agents add and remove connections" for the MCP server.
+#[tauri::command]
+pub async fn set_agents_manage_connections(
+    state: State<'_, AppState>,
+    allowed: bool,
+) -> DbResult<()> {
+    state
+        .with_store(|store| store.set_agents_manage_connections(allowed))
+        .await
 }
 
 /// The saved URL with its passwords masked, for the edit sheet.

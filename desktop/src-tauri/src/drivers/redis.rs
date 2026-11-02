@@ -27,6 +27,7 @@ use crate::session::{
     QueryResult, Relation, RelationKind, RowKey, RowKeyKind, RowKeys, ROW_LIMIT,
 };
 use crate::url::UrlParts;
+use crate::wire::StreamSink;
 
 /// The most keys `relations()` lists.
 pub const KEY_LIMIT: usize = 5000;
@@ -401,6 +402,146 @@ pub fn read_resp<R: AsyncBufRead + Unpin + Send>(
             other => Err(bad(&format!("unexpected reply type {other}"))),
         }
     })
+}
+
+/// How a streamed array reply is laid out as a grid.
+#[derive(Clone, Copy, PartialEq)]
+enum Shape {
+    /// One `value` column, one element per row.
+    Values,
+    /// A flat array (or RESP3 map) of two things per row.
+    Pairs(&'static str, &'static str),
+    /// An array of 2-element arrays.
+    PairArrays(&'static str, &'static str),
+    /// XRANGE entries: id, "field=value, ...".
+    Entries,
+}
+
+/// What `read_streamed` found.
+enum Streamed {
+    /// A non-array reply (or a null array), read whole.
+    Whole(Resp),
+    /// An array reply, sent row by row; the result is not ended yet.
+    Rows,
+    /// The receiver went away: the rest of the reply is unread.
+    Closed,
+}
+
+/// The next reply; an array (or RESP3 map) goes to `sink` row by row as its
+/// elements arrive, so a big LRANGE or HGETALL is never held whole. The
+/// result is begun but not ended, so the caller names the command.
+async fn read_streamed<R: AsyncBufRead + Unpin + Send>(
+    io: &mut R,
+    parts: &[Vec<u8>],
+    sink: &mut StreamSink,
+) -> Result<Streamed, String> {
+    let marker = io
+        .fill_buf()
+        .await
+        .map_err(|e| io_message(&e))?
+        .first()
+        .copied()
+        .ok_or_else(|| "The server closed the connection.".to_string())?;
+    if !matches!(marker, b'*' | b'~' | b'>' | b'%') {
+        return Ok(Streamed::Whole(read_resp(io).await?));
+    }
+    let line = read_line(io).await?;
+    let count: i64 = line[1..]
+        .parse()
+        .map_err(|_| bad(&format!("bad length {}", &line[1..])))?;
+    if count < 0 {
+        return Ok(Streamed::Whole(Resp::Null));
+    }
+    let map = marker == b'%';
+    // Elements to read: a map has a key and a value for each entry.
+    let total = count as usize * if map { 2 } else { 1 };
+    let name = name_of(parts);
+    let mut first: Option<Resp> = None;
+    let shape = if map {
+        Shape::Pairs("field", "value")
+    } else if name == "XRANGE" || name == "XREVRANGE" {
+        if total > 0 {
+            first = Some(read_resp(io).await?);
+        }
+        match &first {
+            Some(Resp::Array(entry)) if entry.len() != 2 => Shape::Values,
+            Some(Resp::Array(_)) | None => Shape::Entries,
+            Some(_) => Shape::Values,
+        }
+    } else if let Some((a, b)) = pair_names(parts) {
+        if total > 0 {
+            first = Some(read_resp(io).await?);
+        }
+        match &first {
+            None => Shape::Pairs(a, b),
+            Some(Resp::Array(pair))
+                if pair.len() == 2 && !pair[0].is_aggregate() && !pair[1].is_aggregate() =>
+            {
+                Shape::PairArrays(a, b)
+            }
+            Some(item) if !item.is_aggregate() && total % 2 == 0 => Shape::Pairs(a, b),
+            Some(_) => Shape::Values,
+        }
+    } else {
+        Shape::Values
+    };
+    let columns: Vec<Column> = match shape {
+        Shape::Values => vec![Column::new("value", "")],
+        Shape::Pairs(a, b) | Shape::PairArrays(a, b) => {
+            vec![Column::new(a, ""), Column::new(b, "")]
+        }
+        Shape::Entries => vec![Column::new("id", ""), Column::new("fields", "")],
+    };
+    sink.begin(&columns);
+    let per_row = if matches!(shape, Shape::Pairs(..)) {
+        2
+    } else {
+        1
+    };
+    let mut read = 0;
+    while read < total {
+        if !sink.is_open() {
+            return Ok(Streamed::Closed);
+        }
+        let mut items = Vec::with_capacity(per_row);
+        for _ in 0..per_row {
+            if read >= total {
+                break;
+            }
+            items.push(match first.take() {
+                Some(item) => item,
+                None => read_resp(io).await?,
+            });
+            read += 1;
+        }
+        if sink.keeping() {
+            for cell in shaped_row(shape, &items) {
+                sink.cell(cell.as_deref());
+            }
+        }
+        sink.end_row();
+    }
+    Ok(Streamed::Rows)
+}
+
+/// One streamed row's cells.
+fn shaped_row(shape: Shape, items: &[Resp]) -> Row {
+    let text = |i: usize| items.get(i).and_then(Resp::text);
+    match (shape, items.first()) {
+        (Shape::Values, _) => vec![text(0)],
+        (Shape::Pairs(..), _) => vec![text(0), text(1)],
+        (Shape::PairArrays(..), Some(Resp::Array(pair))) if pair.len() == 2 => {
+            vec![pair[0].text(), pair[1].text()]
+        }
+        (Shape::Entries, Some(Resp::Array(entry))) if entry.len() == 2 => {
+            let fields: &[Resp] = match &entry[1] {
+                Resp::Array(flat) | Resp::Map(flat) => flat,
+                _ => &[],
+            };
+            vec![entry[0].text(), Some(field_text(fields))]
+        }
+        _ => vec![text(0), None],
+    }
 }
 
 // MARK: - Socket
@@ -1240,6 +1381,121 @@ impl Inner {
         Ok(results)
     }
 
+    /// Like `execute`, but a command's array reply goes to `sink` as it is
+    /// read, and SCAN, SSCAN, HSCAN and ZSCAN loop their cursor to the end
+    /// (or the sink's cap).
+    async fn execute_stream(
+        &mut self,
+        commands: Vec<Vec<Vec<u8>>>,
+        sink: &mut StreamSink,
+    ) -> DbResult<()> {
+        for parts in commands {
+            match name_of(&parts).as_str() {
+                "SCAN" | "SSCAN" | "HSCAN" | "ZSCAN" => self.scan_stream(parts, sink).await?,
+                "SELECT" | "QUIT" => {
+                    for result in self.execute(vec![parts]).await? {
+                        sink.send_result(&result);
+                    }
+                }
+                _ => self.command_stream(parts, sink).await?,
+            }
+            if !sink.is_open() {
+                return Err(DbError::Cancelled);
+            }
+        }
+        Ok(())
+    }
+
+    /// One command whose reply streams.
+    async fn command_stream(&mut self, parts: Vec<Vec<u8>>, sink: &mut StreamSink) -> DbResult<()> {
+        let link = self.link().await?;
+        let run = async {
+            link.send(std::slice::from_ref(&parts)).await?;
+            read_streamed(&mut link.io, &parts, sink).await
+        }
+        .await;
+        match run {
+            Ok(Streamed::Rows) => {
+                let command = format!("{} {}", name_of(&parts), sink.seen());
+                sink.end(&command);
+                Ok(())
+            }
+            Ok(Streamed::Whole(Resp::Error(message))) => Err(DbError::Message(message)),
+            Ok(Streamed::Whole(reply)) => {
+                sink.send_result(&result(&reply, &parts));
+                Ok(())
+            }
+            Ok(Streamed::Closed) => {
+                self.link = None;
+                Err(DbError::Cancelled)
+            }
+            Err(message) => {
+                self.link = None;
+                Err(DbError::Message(message))
+            }
+        }
+    }
+
+    /// SCAN, SSCAN, HSCAN or ZSCAN from the given cursor until it comes back
+    /// 0, one page at a time. Stops at the sink's cap (the result is then
+    /// marked cut and its `command` ends in +): scanning the rest only to
+    /// count it would walk the whole keyspace.
+    async fn scan_stream(
+        &mut self,
+        mut parts: Vec<Vec<u8>>,
+        sink: &mut StreamSink,
+    ) -> DbResult<()> {
+        let name = name_of(&parts);
+        let at = if name == "SCAN" { 1 } else { 2 };
+        if parts.len() <= at {
+            return Err(DbError::msg(format!(
+                "wrong number of arguments for '{}' command",
+                name.to_lowercase()
+            )));
+        }
+        let given_count = parts[at + 1..]
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(b"COUNT"));
+        if !given_count {
+            parts.push(b"COUNT".to_vec());
+            parts.push(b"1000".to_vec());
+        }
+        let (columns, width) = match name.as_str() {
+            "SCAN" => (vec![Column::new("key", "")], 1),
+            "SSCAN" => (vec![Column::new("member", "")], 1),
+            "HSCAN" => (vec![Column::new("field", ""), Column::new("value", "")], 2),
+            _ => (vec![Column::new("member", ""), Column::new("score", "")], 2),
+        };
+        sink.begin(&columns);
+        let mut cut = false;
+        loop {
+            let reply = self.raw(parts.clone()).await?;
+            let (cursor, batch) = scan_reply(&reply)?;
+            for row in batch.chunks(width) {
+                if !sink.is_open() {
+                    return Err(DbError::Cancelled);
+                }
+                if sink.keeping() {
+                    for item in row {
+                        sink.cell(item.text().as_deref());
+                    }
+                }
+                sink.end_row();
+            }
+            if cursor == "0" {
+                break;
+            }
+            if !sink.keeping() {
+                cut = true;
+                break;
+            }
+            parts[at] = cursor.into_bytes();
+        }
+        let command = format!("{name} {}{}", sink.seen(), if cut { "+" } else { "" });
+        sink.end(&command);
+        Ok(())
+    }
+
     // Browsing
 
     async fn relations(&mut self) -> DbResult<Vec<Relation>> {
@@ -2052,6 +2308,26 @@ impl DatabaseSession for RedisSession {
             results
         })?;
         Ok(Execution::new(results, start.elapsed()))
+    }
+
+    /// Like `execute`, with array replies (LRANGE, HGETALL, ZRANGE, ...) sent
+    /// to the sink while they are read, and SCAN-like commands looped to the end.
+    async fn execute_stream(&self, sql: &str, sink: &mut StreamSink) -> DbResult<()> {
+        let commands = commands_in(sql)?;
+        for parts in &commands {
+            let name = name_of(parts);
+            if STREAMING.contains(&name.as_str()) {
+                return Err(DbError::msg(format!(
+                    "{name} never returns, so it can't run here. Use redis-cli for it."
+                )));
+            }
+        }
+        guarded!(self, inner => {
+            let outcome = inner.execute_stream(commands, sink).await;
+            let moved = inner.database != inner.target.url.database;
+            self.scope_changed.store(moved, Ordering::SeqCst);
+            outcome
+        })
     }
 
     async fn read_only(&self, text: &str) -> DbResult<Execution> {

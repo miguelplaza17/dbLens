@@ -9,6 +9,8 @@ import { copyText } from "../format";
 import { keyLabel, withKeys } from "../shortcuts";
 import { Icon } from "./Icon";
 import { SQLEditor } from "./SQLEditor";
+import { HistoryButton } from "../history/HistoryPopover";
+import { openInTerminal } from "../history/connectionActions";
 
 export function SQLPanel() {
   const model = useModel();
@@ -75,6 +77,16 @@ export function SQLPanel() {
               </button>
             </>
           )}
+          <HistoryButton />
+          <button
+            className="icon-button"
+            disabled={!connected}
+            onClick={() => void openInTerminal(model)}
+            title={withKeys(t("Open in Terminal"), "openTerminal")}
+            aria-label={t("Open in Terminal")}
+          >
+            <Icon name="terminal" size={14} />
+          </button>
           {model.running ? (
             <button className="button" onClick={() => model.cancel()} title={withKeys(t("Cancel"), "cancel")}>
               <Icon name="stop" size={12} />

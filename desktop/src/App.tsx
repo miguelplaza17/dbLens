@@ -9,6 +9,7 @@ import { useModel, type AppModel, type Sheet as SheetState } from "./model";
 import { actionFor, shortcutList, withKeys, type Action } from "./shortcuts";
 import { dispatch, setPerformer } from "./native/actions";
 import { installNative } from "./native/bridge";
+import { followSettings } from "./settings/store";
 import { performNative } from "./native/perform";
 import { gridAction } from "./grid/commands";
 import { PerfHud } from "./grid/PerfHud";
@@ -20,6 +21,11 @@ import { RowEditor } from "./components/RowEditor";
 import { ContextMenu, Sheet } from "./components/Sheet";
 import { Sidebar } from "./components/Sidebar";
 import { SQLPanel } from "./components/SQLPanel";
+import { SchemaBoard } from "./schema/SchemaBoard";
+import { UpdateNotice } from "./native/UpdateNotice";
+import { performSchema, schema } from "./schema/store";
+import { nav, performNav } from "./nav";
+import { performHistory } from "./history/actions";
 
 export default function App() {
   const model = useModel();
@@ -54,6 +60,10 @@ export default function App() {
   }, [model]);
 
   useEffect(() => installNative(model), [model]);
+  // Back and Forward between the tables and results you opened (src/nav.ts).
+  useEffect(() => nav.install(model), [model]);
+  // Settings > Appearance, live from any window (src/settings/store.ts).
+  useEffect(() => followSettings((theme) => model.setTheme(theme)), [model]);
 
   const title = model.session?.name ?? "dbLens";
   const subtitle = !model.session
@@ -62,7 +72,9 @@ export default function App() {
       : t("No Database Open")
     : model.shown === "query"
       ? t("Query Result")
-      : model.relation
+      : model.shown === "schema"
+        ? t("Schema")
+        : model.relation
         ? model.relation.kind === "key" || !model.relation.schema
           ? model.relation.name
           : `${model.relation.schema}.${model.relation.name}`
@@ -81,6 +93,28 @@ export default function App() {
           >
             <Icon name="sidebar" />
           </button>
+          {model.session && (
+            <>
+              <button
+                className="icon-button"
+                disabled={!nav.canBack}
+                onClick={() => void nav.goBack()}
+                title={withKeys(t("Back"), "goBack")}
+                aria-label={t("Back")}
+              >
+                <Icon name="back" />
+              </button>
+              <button
+                className="icon-button"
+                disabled={!nav.canForward}
+                onClick={() => void nav.goForward()}
+                title={withKeys(t("Forward"), "goForward")}
+                aria-label={t("Forward")}
+              >
+                <Icon name="forward" />
+              </button>
+            </>
+          )}
           <div className="toolbar-title">
             <span className="title">{title}</span>
             <span className="subtitle">{subtitle}</span>
@@ -96,6 +130,17 @@ export default function App() {
             </div>
           )}
           <span className="spacer" />
+          {model.session && schema.available(model) && (
+            <button
+              className={`icon-button${model.shown === "schema" ? " active" : ""}`}
+              onClick={() => (model.shown === "schema" ? model.showResultTab("table") : void schema.show(model))}
+              title={withKeys(t("Show Schema"), "showSchema")}
+              aria-label={t("Show Schema")}
+              aria-pressed={model.shown === "schema"}
+            >
+              <Icon name="schema" />
+            </button>
+          )}
           {model.session && (
             <>
               <button className="icon-button" onClick={() => void model.reload()} title={withKeys(t("Reload"), "refresh")} aria-label={t("Reload")}>
@@ -129,7 +174,7 @@ export default function App() {
           </button>
         </header>
         <div className="content">
-          <ResultPane ref={searchRef} />
+          {model.shown === "schema" ? <SchemaBoard /> : <ResultPane ref={searchRef} />}
           <PerfHud />
         </div>
         {model.showSQLPanel && (
@@ -148,6 +193,7 @@ export default function App() {
           {model.toast}
         </div>
       )}
+      <UpdateNotice />
     </div>
   );
 }
@@ -241,6 +287,9 @@ function perform(model: AppModel, action: Action, fields: { filter: HTMLInputEle
   // The grid on screen takes copy, paging and the perf HUD first.
   if (gridAction(action)) return;
   if (performNative(model, action)) return;
+  if (performSchema(model, action)) return;
+  if (performNav(action)) return;
+  if (performHistory(model, action)) return;
   switch (action) {
     case "newConnection":
       return model.open({ kind: "connection", editing: null });

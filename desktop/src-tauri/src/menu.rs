@@ -134,6 +134,7 @@ pub fn layout(os: Os) -> Vec<Menus> {
             title: "dbLens",
             entries: vec![
                 P(Predefined::About),
+                A("checkForUpdates"),
                 S,
                 A("settings"),
                 S,
@@ -153,7 +154,17 @@ pub fn layout(os: Os) -> Vec<Menus> {
     if mac {
         file.push(A("importSwift"));
     }
-    file.extend([S, A("disconnect"), S, A("closeWindow")]);
+    file.extend([
+        S,
+        A("openTerminal"),
+        A("copyUrl"),
+        A("copyUrlWithPassword"),
+        A("toggleAgentsWrite"),
+        S,
+        A("disconnect"),
+        S,
+        A("closeWindow"),
+    ]);
     if os == Os::Windows {
         file.extend([S, A("settings")]);
     }
@@ -193,6 +204,9 @@ pub fn layout(os: Os) -> Vec<Menus> {
     });
 
     let mut view = vec![
+        A("goBack"),
+        A("goForward"),
+        S,
         A("toggleSidebar"),
         A("toggleSQLPanel"),
         S,
@@ -202,6 +216,14 @@ pub fn layout(os: Os) -> Vec<Menus> {
         A("previousPage"),
         A("nextPage"),
         A("freezeFirstColumn"),
+        S,
+        A("showTable"),
+        A("showQuery"),
+        A("showSchema"),
+        S,
+        A("zoomIn"),
+        A("zoomOut"),
+        A("zoomToFit"),
         S,
         A("refresh"),
         A("toggleTheme"),
@@ -217,7 +239,15 @@ pub fn layout(os: Os) -> Vec<Menus> {
 
     menus.push(Menus {
         title: "Query",
-        entries: vec![A("run"), A("runAtomically"), A("rehearse"), S, A("cancel")],
+        entries: vec![
+            A("run"),
+            A("runAtomically"),
+            A("rehearse"),
+            S,
+            A("cancel"),
+            S,
+            A("history"),
+        ],
     });
 
     if mac {
@@ -226,8 +256,10 @@ pub fn layout(os: Os) -> Vec<Menus> {
             entries: vec![P(Predefined::Minimize), P(Predefined::Maximize)],
         });
     }
+    // macOS has Check for Updates in the app menu (after About), elsewhere in Help.
     let mut help = vec![A("showShortcuts")];
     if !mac {
+        help.insert(0, A("checkForUpdates"));
         help.extend([S, P(Predefined::About)]);
     }
     menus.push(Menus {
@@ -250,8 +282,17 @@ pub struct MenuState {
     pub has_result: bool,
     pub can_back: bool,
     pub can_forward: bool,
+    /// Back and Forward between the places visited (src/nav.ts).
+    pub nav_back: bool,
+    pub nav_forward: bool,
     pub sql_panel: bool,
     pub running: bool,
+    /// The SQL panel has a result to show (Show Query Result).
+    pub has_query: bool,
+    /// The connection can draw a schema board (not Redis).
+    pub can_show_schema: bool,
+    /// The schema board is on screen (its zoom rows work).
+    pub schema_shown: bool,
 }
 
 /// Whether an action's row is enabled.
@@ -261,6 +302,11 @@ pub fn enabled(action: &str, s: &MenuState) -> bool {
         "searchRows" => s.has_table,
         "previousPage" => s.can_back,
         "nextPage" => s.can_forward,
+        "goBack" => s.nav_back,
+        "goForward" => s.nav_forward,
+        "history" | "openTerminal" | "copyUrl" | "copyUrlWithPassword" | "toggleAgentsWrite" => {
+            s.connected
+        }
         "freezeFirstColumn" => s.has_result,
         "saveChanges" | "revertChanges" => s.can_edit,
         "newRow" => s.can_insert,
@@ -269,6 +315,10 @@ pub fn enabled(action: &str, s: &MenuState) -> bool {
         "copyRows" => s.has_result,
         "run" | "rehearse" | "runAtomically" => s.connected && !s.running,
         "cancel" => s.running,
+        "showTable" => s.connected,
+        "showQuery" => s.has_query,
+        "showSchema" => s.can_show_schema,
+        "zoomIn" | "zoomOut" | "zoomToFit" => s.schema_shown,
         _ => true,
     }
 }
@@ -604,6 +654,31 @@ mod tests {
     }
 
     #[test]
+    fn schema_rows_follow_the_board() {
+        let connected = MenuState {
+            connected: true,
+            can_show_schema: true,
+            ..Default::default()
+        };
+        assert!(enabled("showTable", &connected) && enabled("showSchema", &connected));
+        assert!(!enabled("showQuery", &connected), "needs a query result");
+        assert!(!enabled("zoomIn", &connected), "needs the board on screen");
+        let redis = MenuState {
+            can_show_schema: false,
+            ..connected.clone()
+        };
+        assert!(!enabled("showSchema", &redis));
+        let board = MenuState {
+            schema_shown: true,
+            has_query: true,
+            ..connected
+        };
+        for a in ["zoomIn", "zoomOut", "zoomToFit", "showQuery"] {
+            assert!(enabled(a, &board), "{a} should work on the board");
+        }
+    }
+
+    #[test]
     fn rows_grey_out_without_a_connection_or_table() {
         let none = MenuState::default();
         for a in [
@@ -625,6 +700,12 @@ mod tests {
             "saveChanges",
             "revertChanges",
             "freezeFirstColumn",
+            "showTable",
+            "showQuery",
+            "showSchema",
+            "zoomIn",
+            "zoomOut",
+            "zoomToFit",
         ] {
             assert!(!enabled(a, &none), "{a} should be off with nothing open");
         }

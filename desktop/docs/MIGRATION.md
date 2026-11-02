@@ -3,7 +3,7 @@
 Checklist for replacing the macOS Swift app (`Sources/`, `build.sh`, `tools/release.sh`)
 with the Tauri app in `desktop/`, which becomes the only dbLens on Windows, Linux and macOS.
 
-Status as of 2026-11-02, updated after the grid / native menu / macOS integration. Facts come from reading `Sources/dbLens/*.swift`, `Sources/dbLens/UI/*.swift`,
+Status as of 2026-11-02, updated after the Settings, schema board, MCP, updater, history and NoSQL streaming integration (checked in the real app under Xvfb on Linux). Facts come from reading `Sources/dbLens/*.swift`, `Sources/dbLens/UI/*.swift`,
 `desktop/src`, `desktop/src-tauri/src` and `desktop/docs/PERF.md`. Items marked **unknown** were not
 checked, or cannot be checked from this Linux container (no Mac, no Windows).
 
@@ -114,11 +114,11 @@ the Tauri names (`Mod` = Cmd on macOS, Ctrl elsewhere).
 
 | Feature (Swift) | Swift shortcut | Tauri | Notes |
 |---|---|---|---|
-| Check for Updates… | | Missing | Sparkle, `Updater.swift`. See Updates below. |
+| Check for Updates… | | Done (not live) | Help > Check for Updates… (macOS: app menu), Mod+Alt+U, `updater.rs`. Off until a real key and feed exist; see Updates below. |
 | New Connection… | Cmd+N | Done | `newConnection` |
-| Back / Forward | Cmd+[ / Cmd+] | Missing | No navigation history in Tauri (`model.canGoBack` was the old pager, not history). |
-| Show Table / Query Result / Show Schema | Cmd+1 / 2 / 3 | Missing | Schema part depends on the schema board. |
-| Zoom In / Out / Zoom to Fit (schema) | Cmd+= / Cmd+- / Cmd+0 | Missing | Depends on the schema board. |
+| Back / Forward | Cmd+[ / Cmd+] | Done | `src/nav.ts`: tables, query results and the schema board, across connections (reconnects), 50 steps; toolbar buttons and View menu. Not recorded: the page offset (the grid scrolls). |
+| Show Table / Query Result / Show Schema | Cmd+1 / 2 / 3 | Done | `showTable`, `showQuery`, `showSchema` (`src/schema/store.ts`, `performSchema`) |
+| Zoom In / Out / Zoom to Fit (schema) | Cmd+= / Cmd+- / Cmd+0 | Done | `zoomIn`, `zoomOut`, `zoomToFit`; enabled while the board is shown |
 | Show / Hide SQL Panel | Cmd+Shift+Y | Done | `toggleSQLPanel` |
 | Show / Hide Sidebar | (SidebarCommands) | Done | `toggleSidebar`, Mod+B |
 | Run SQL | Cmd+Return | Done | `run` |
@@ -129,30 +129,30 @@ the Tauri names (`Mod` = Cmd on macOS, Ctrl elsewhere).
 | Import Connections from dbLens for Mac… | – | Done (macOS) | File menu, macOS only (`importSwift`, `os: "mac"` in `shortcuts.json`). Never run on a Mac. |
 | New Row… | Cmd+Shift+N | Done | `newRow` |
 | Copy All | Cmd+Shift+C | Done | `copyRows` |
-| Open in Terminal | Cmd+Shift+T | Missing | `ClientCommand`, `Models.swift` `openInTerminal`. Also in the SQL panel and the sidebar menu. |
+| Open in Terminal | Cmd+Shift+T | Done | `terminal.rs`: psql, mysql/mariadb, sqlite3, redis-cli/valkey-cli, mongosh; password by environment variable (mongosh asks for it); wt.exe / cmd (PowerShell script), x-terminal-emulator, gnome-terminal, konsole…, Terminal.app via osascript. File menu, SQL panel button, sidebar menu. Untested on a real Windows and macOS. |
 | Disconnect | Cmd+Shift+D | Partial | Action exists, but the key is Mod+Shift+W in Tauri. Decide which key to keep. |
-| Settings | (Settings scene) | Missing | Menu row and Mod+, exist; `perform.ts` shows the toast "Settings are not available yet". |
+| Settings | (Settings scene) | Done | Mod+, and the Settings… row open a separate window (`settings.rs`, `src/settings/`). |
 | Keyboard shortcuts sheet | (not in Swift menus) | Done | Mod+/, Tauri only. |
 | Performance HUD | (not in Swift) | Done | Mod+Shift+P, Tauri only: first rows, block fetch p50/p95, scroll fps, longest frame, JS heap, rows cached (`src/grid/PerfHud.tsx`). |
-| Menu bar | (SwiftUI menus) | Done (Linux checked) | `menu.rs`, built from `shortcuts.json`; menu labels English only. macOS app menu and Window menu never compiled on a Mac. |
+| Menu bar | (SwiftUI menus) | Done (Linux checked) | `menu.rs`, built from `shortcuts.json`; labels in the UI language (`set_menu_labels`). Ctrl+= / Ctrl+- accelerators checked on Linux. macOS app menu and Window menu never compiled on a Mac. |
 
 ### Settings (SettingsView.swift, UI/*.swift)
 
-Swift has six tabs: General, Appearance, Connections, Agents, Updates, Data & Privacy. Tauri has no
-Settings window (README: "Settings window … missing").
+Swift has six tabs: General, Appearance, Connections, Agents, Updates, Data & Privacy. Tauri has five (no
+General) in a separate window, `settings.rs` and `src/settings/`; its height follows the tab. Checked in the real app on Linux.
 
 | Setting (Swift) | Tauri | Notes |
 |---|---|---|
 | General > Rows per page (50–1000) | Not needed | The grid scrolls through the whole table in blocks; `model.pageSize` is left over and unused. |
 | General > Show the SQL panel | Partial | Only the toggle action. |
 | General > Ask before deleting a connection | Partial | A confirmation dialog exists; no setting to turn it off. |
-| Appearance > Accent color (`Theme.all`, `ThemeStore`) | Missing | `theme.css` has one `--accent`; no accent list, no picker. Light/dark toggle is Done (Mod+Shift+L). |
+| Appearance > Accent color (`Theme.all`, `ThemeStore`) | Done | Same 12 accents (`src/settings/accents.css`), plus System / Light / Dark; live in every window. "System" accent keeps the theme's blue (no OS accent is read). Mod+Shift+L saves the mode too. |
 | Connections > Edit, delete, folders | Done | Sidebar context menus. |
-| Connections > Clear SQL history | Missing | No SQL history in Tauri (see below). |
-| Agents > MCP server setup and copy commands | Missing | See MCP below. |
-| Agents > Let agents add and remove connections | Missing | MCP. |
-| Updates > Check automatically, Update automatically, Check Now | Missing | Updater. |
-| Data & Privacy > Clear all history, Show in Finder | Missing | Finder is macOS only; a "show data folder" action would be the equivalent. |
+| Connections > Clear SQL history | Done | `api.clearSqlHistory(id)`. Deleting a connection also clears its history. |
+| Agents > MCP server setup and copy commands | Partial | Copy the command (`<this program> --mcp`), the Claude Code and Codex commands, or the JSON. No one-click install into agent apps. |
+| Agents > Let agents add and remove connections | Done | Kept in the store (`StoreSnapshot.agentsManageConnections`, `set_agents_manage_connections`), not `settings.json`, because the MCP server is its own process and reads the store on every call. |
+| Updates > Check automatically, Update automatically, Check Now | Done (not live) | Both toggles saved (`checkForUpdates`, `updateAutomatically`) and read by `updater.rs`; Check Now says "up to date", the new version, or that the key is a placeholder. |
+| Data & Privacy > Clear all history, Show in Finder | Done | Show Folder / Show in Explorer / Show in Finder opens the data folder (opener plugin; not clicked on a real desktop). Clear All History… (inline confirmation) calls `api.clearSqlHistory()`. |
 
 ### Connections and sidebar (ContentView.swift, ConnectionSheet.swift)
 
@@ -163,10 +163,10 @@ Settings window (README: "Settings window … missing").
 | Move to folder / No Folder (menu) | Done | Sidebar menu. |
 | Connect, Edit, Rename, Delete (with confirmation) | Done | |
 | Disconnect (menu) | Done | |
-| Copy URL without password | Missing | `connection_url` and `mask_url` commands exist; no menu item. |
-| Copy URL with password | Missing | Same. Needs a confirmation, as Swift has. |
-| Open in Terminal (connection menu) | Missing | See above. |
-| Let Agents Write (per connection) | Missing | MCP. |
+| Copy URL without password | Done | File menu (Ctrl+Alt+C) and the sidebar menu. |
+| Copy URL with password | Done | After a confirmation; the clipboard is cleared after a minute if it still holds it. |
+| Open in Terminal (connection menu) | Done | See above. |
+| Let Agents Write (per connection) | Done | Sidebar menu, and File > Let Agents Write (Mod+Alt+A; the row reads "Stop Letting Agents Write" when on). `set_agents_can_write`. |
 | Connection sheet: URL or fields, SSL mode, SSH, SQLite file picker | Done | `ConnectionSheet.tsx`, `urlForm.ts`, `ssh.rs`. |
 | Connection error with Try Again / Edit Connection | Done | `connection_problem.rs`. |
 | Drop a connection string or SQLite file on the window | Done (files) | `native/drop.ts`. Text drops depend on the webview delivering them; untested. |
@@ -199,32 +199,50 @@ Settings window (README: "Settings window … missing").
 | Rehearse (rolled back) | Done | |
 | All or Nothing (one transaction) | Done | |
 | Read-only run | Partial | `read_only` exists in the backend, not in the UI. |
-| SQL history (per connection, popover, Use / Run) | Missing | Swift stores it in user defaults (`sqlHistory.<id>`); the import does not read it. |
-| Terminal button | Missing | See Open in Terminal. |
+| SQL history (per connection, popover, Use / Run) | Done | `history.rs`: `sql-history.json`, last 200 per saved connection, consecutive repeats collapse. Popover in the SQL panel (Ctrl+Shift+H, Query menu). The import does not read Swift's `sqlHistory.<id>`. |
+| Terminal button | Done | See Open in Terminal. |
 | Database-specific commands (Redis, MongoDB) | Done | Bottom panel. |
 
 ### Schema board (SchemaBoard.swift, about 950 lines)
 
-Missing. The backend has `schema_graph`; nothing draws it. Swift has: cards with columns and keys,
-collapsed view, colored cards, sticky notes, arrange, pan and zoom, fit, schema picker, Open Rows from a card,
-keyboard navigation, and the layout saved per connection. Decide whether a canvas board is still wanted
-(it would be a second canvas next to the grid).
+Done in `src/schema/` (one 2D canvas, drawn on demand): cards with columns and key markers (primary key,
+foreign key, nullable), foreign keys as curves that light up for the hovered or selected card, automatic layout
+(dagre, left to right; very tall ranks wrap into more columns; tables without links packed beside or below),
+Arrange, pan (drag the background, arrow keys) and zoom (wheel or pinch at the pointer, Ctrl/Cmd+= / - / 0),
+fit, minimap, schema picker, Key Columns Only (all or per card), drag cards (several with Shift-click; snaps to
+8, Alt moves freely), double-click or Return opens the rows, right-click menu (Open Rows, fold), Ctrl/Cmd+A
+selects all, Reload reads the schema again. Positions, folded cards, pan and zoom are kept per saved
+connection in localStorage (`schemaBoard.<id>`). Below 45% zoom cards show bars instead of column text, so
+200 tables pan and zoom at a median 16.7 ms frame in headless Chromium (`node docs/shots/schema.cjs`; the mock takes
+`?schemaTables=200`). Not ported: sticky notes, card colors, marquee (Shift-drag) selection, the help popover.
+Redis has no board (Show Schema is greyed out).
 
 ### MCP server for agents (MCPServer.swift, UI/AgentSettings.swift)
 
-Missing. `dbLens --mcp` runs a JSON-RPC server on stdio. Tools in Swift: `list_connections`,
-`create_connection`, `delete_connection`, `list_tables`, `describe_schema`, `list_extensions`,
-`install_extension`, `describe_table`, `query`, `test_changes`, `execute`. Reads are read-only (the database
-refuses writes); writes need "Let Agents Write" on the connection; agents never see URLs. Swift's
-Settings > Agents also shows the `claude mcp add` command and JSON to copy. This is the largest feature
-gap for agent users. Decide: port, or drop and say so in the release notes.
+Done: `src-tauri/src/mcp.rs`, tests in `tests/mcp.rs`. `dblens --mcp` serves JSON-RPC on stdio before Tauri
+starts (no window). Same tools as Swift: `list_connections`, `create_connection`, `delete_connection`,
+`list_tables`, `describe_schema`, `list_extensions`, `install_extension`, `describe_table`, `query`,
+`test_changes`, `execute`. Reads run read-only in the database; `execute`, `test_changes` and
+`install_extension` need "Let Agents Write" on the connection; `create_connection` / `delete_connection` need
+Settings > Agents > "Let agents add and remove connections". Agents never see URLs. The app and the server share the store folder
+through a lock file (`connections.lock`): each reloads it before every change, so neither undoes the other's
+saves (the sidebar shows a connection an agent added the next time it lists them). A call runs at most 60 s
+(`DBLENS_MCP_TIMEOUT`) and can be cancelled (`notifications/cancelled`); both cancel the running statement. Settings > Agents shows the
+command, the Claude Code and Codex commands and the JSON to copy. Not done: one-click install into agent apps;
+what agents run is not written to the SQL history. Tested on SQLite and PostgreSQL only; Windows `--mcp` with
+the GUI subsystem relies on the client's stdio pipes (untested).
 
 ### Updates (Updater.swift, UI/UpdateNotice.swift, tools/release.sh)
 
-Missing in Tauri. Swift uses Sparkle: a daily check of an appcast on GitHub Releases
-(`dist/appcast.xml`, signed with an Ed25519 key), automatic download, and a notice in the window. Windows and
-Linux need a different updater; the Tauri updater plugin is an option (**unknown**: not evaluated). Also
-unknown: whether the macOS Tauri build will be signed and notarized like `tools/release.sh`.
+Swift uses Sparkle: a daily check of an appcast on GitHub Releases (`dist/appcast.xml`, signed with an
+Ed25519 key), automatic download, and a notice in the window. Tauri: the updater plugin, wired in
+`src-tauri/src/updater.rs`, `src/native/updater.ts` and `UpdateNotice.tsx`: Help > Check for Updates…, a daily
+check 30 s after launch (`update-check.txt`), download and install on quit with "Update automatically", a
+notice with Restart. **Not live**: the public key in `tauri.conf.json` is a placeholder, so checks say so and
+nothing is fetched; the release workflow does not yet produce `latest.json` or pass
+`createUpdaterArtifacts`, and the signing secrets are not set (README, "Updates"). No real download, install
+or relaunch has run on any OS. Also unknown: whether the macOS Tauri build will be signed and notarized like
+`tools/release.sh`.
 
 ### Import (desktop/src-tauri/src/import_swift.rs)
 
@@ -237,24 +255,24 @@ Done on macOS only (see section c).
 | Secure Enclave key for saved URLs (`Secrets.swift`, `SecretBox`) | Different | Tauri uses the OS keyring (`store.rs`; macOS Keychain via keyring's `apple-native`), or a 0600 key file when there is none. Unsigned or ad hoc macOS builds may ask for the Keychain password after each rebuild (the problem the Swift app avoided). |
 | Seed data (`SeedData.swift`), self-test (`SelfTest.swift`), snapshots (`Snapshot.swift`, `tools/snap.sh`) | Different | Tauri: `src/mock.ts` and `docs/shots/take.cjs`. No self-test script equivalent; `cargo test` covers the drivers. |
 | Localization: English and Portuguese | Done | `desktop/src/i18n/`. Check strings with the Swift `Localization/` keys. |
-| Accent themes (`UI/Theme.swift`) | Missing | See Settings. |
+| Accent themes (`UI/Theme.swift`) | Done | `src/settings/accents.css`; the schema board redraws on a change. |
 | Dark mode forced (`AppDelegate`) | Different | Tauri follows the theme toggle. |
 | `Store` path with a Dev build copy | Not needed | Tauri has one store, see README. |
 
 ### Summary of what is missing (Tauri, compared with Swift)
 
-1. Schema board (whole feature).
-2. MCP server and the Agents settings (including "Let Agents Write").
-3. Settings window (all tabs) and accent colors.
-4. Updater (Sparkle replacement), and release signing for Windows and Linux. macOS signing and notarization are
-   wired into CI from the `APPLE_*` secrets but have never run.
-5. SQL history (per connection), with Clear and the Data & Privacy actions.
-6. Open in Terminal (menu, SQL panel, sidebar).
-7. Copy URL with and without password.
-8. Export to a file (save panel); Tauri only copies to the clipboard.
-9. Back/Forward (no history at all) and Show Table / Query / Schema shortcuts.
-10. Read-only run in the UI. (Rows per page no longer applies: the grid scrolls.)
-11. Localized menu labels (the menu bar is English only; the window is translated).
+1. Schema board: sticky notes, card colors, marquee selection and the help popover (the board itself is done).
+2. Updater: wired but not live (placeholder key, no `latest.json` in the release workflow). Release signing for
+   Windows and Linux. macOS signing and notarization are wired into CI from the `APPLE_*` secrets but have never run.
+3. Agents: one-click install into agent apps; agent runs in the SQL history.
+4. Export to a file (save panel); Tauri only copies to the clipboard.
+5. Read-only run in the UI. (Rows per page no longer applies: the grid scrolls.)
+6. Settings > General (show the SQL panel at start, ask before deleting a connection).
+7. Importing the Swift app's SQL history, "Let Agents Write" flags and settings.
+
+Done since the last status: Settings window and accents, MCP server and Let Agents Write, SQL history, Open in
+Terminal, Copy URL with and without password, Back/Forward, localized menu labels, and streaming for MongoDB
+`find`/`aggregate` and Redis replies and `SCAN` loops (CONTRACT.md).
 
 Documentation note: `desktop/README.md` now describes the menu bar (`menu.rs`: File, Edit, View, Query, Help; on
 macOS also the app menu and Window). It was checked under Xvfb on Linux only.
@@ -290,7 +308,7 @@ the Tauri store folder; the command refuses that case.
 ### What it does not carry over
 
 - SQL history (`sqlHistory.<id>` in user defaults).
-- "Let Agents Write" flags (no MCP in Tauri).
+- "Let Agents Write" flags (the MCP server exists now, but the import does not copy the flags).
 - Settings (rows per page, accent, panel visibility) and the schema board layouts.
 - Keychain items from older versions (the current code does not read the Keychain; `Secrets.swift`).
 
@@ -327,7 +345,7 @@ the Tauri store folder; the command refuses that case.
 ### Steps
 
 1. **Close the feature gaps that are decided as must-have** (section b: at least the items the user needs).
-   Decide each of the 10 missing items in the summary: port, or drop and say so in the release notes.
+   Decide each of the missing items in the summary: port, or drop and say so in the release notes.
 2. **Run the macOS Tauri build** in CI (the `macos-14` job in `desktop.yml`), first ad hoc, then with the Developer
    ID secrets, and check notarization and stapling as `tools/release.sh` does. **Unknown**: whether it passes; the
    Swift helper, the Keychain path and the universal build have never been compiled.
@@ -359,7 +377,7 @@ the Tauri store folder; the command refuses that case.
 
 ### Open decisions
 
-- Port or drop: schema board, MCP server, updater, SQL history, open in terminal, accent colors, export to file.
+- Port or drop: export to file, schema board sticky notes and card colors.
 - Version number of the last Swift release.
 - Cask option A or B.
 - Updater for Windows and Linux (Tauri updater plugin or none).
