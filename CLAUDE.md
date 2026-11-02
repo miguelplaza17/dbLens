@@ -62,3 +62,11 @@ SwiftData database and no server.
 - Self-test and snapshots need a throwaway Postgres: `DBLENS_TEST_URL=postgres://… tools/selftest.sh` (it creates and drops one table).
 - The app is always dark (`AppDelegate`), so snapshots are dark only.
 - SSH: `SSHTunnel` (DBLensKit) runs the Mac's `/usr/bin/ssh -N -L` with BatchMode, so keys must come from ssh-agent, a key file, or ~/.ssh/config (no password prompts). The session owns its tunnel; a dropped tunnel reconnects in `AppModel.tunnelDropped`. To test it, run a throwaway sshd on a high port with its own host key and authorized_keys, then `DBLENS_TEST_SSH="127.0.0.1:<port>|<client key>" tools/selftest.sh` (and `swift test`). Never add keys to the real ~/.ssh/authorized_keys.
+
+## desktop/ (Tauri, Windows and Linux)
+
+- A separate Tauri 2 app with the same product; the macOS rules above (build.sh, snap.sh, selftest.sh, SwiftUI design) don't apply there. `desktop/CONTRACT.md` has the architecture, `desktop/README.md` the status.
+- `desktop/src-tauri/` the Rust core: `session.rs` (the `DatabaseSession` trait, like Session.swift), `drivers/` (one file per engine, ported from the Swift drivers), `store.rs`, `ssh.rs`, `commands.rs` (IPC). `desktop/src/` the React UI; `api.ts` mirrors the Rust types, checked by `tests/contract.rs`. `src/mock.ts` answers in a plain browser.
+- Build: `cd desktop && npm install && npm run tauri build` (`-- --bundles deb,appimage` on Linux). UI only: `npm run dev`, then http://localhost:1420.
+- Check, in `desktop/src-tauri`: `cargo fmt`, `cargo clippy --all-targets -- -D warnings` (also with `--target x86_64-pc-windows-gnu`), `cargo test`. Integration tests take `DBLENS_TEST_URL`, `DBLENS_TEST_MYSQL_URL`, `DBLENS_TEST_REDIS_URL`, `DBLENS_TEST_MONGO_URL` and skip without them; SQLite tests use temp files.
+- `DBLENS_STORE=memory` keeps saved connections in memory; never point the app at the real store when testing.

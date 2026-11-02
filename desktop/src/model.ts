@@ -121,6 +121,7 @@ export class AppModel {
   /** The open context menu. */
   menu: MenuState | null = null;
 
+  private keyNoticeShown = false;
   private version = 0;
   private listeners = new Set<() => void>();
   private searchTimer: ReturnType<typeof setTimeout> | undefined;
@@ -183,45 +184,64 @@ export class AppModel {
     try {
       this.store = await api.listConnections();
       this.storeError = null;
+      if (this.store.keyInFile && !this.keyNoticeShown) {
+        // Said once, in the log line, so people on a system without a keyring know.
+        this.keyNoticeShown = true;
+        if (!this.log) {
+          this.log = {
+            date: new Date(),
+            isError: false,
+            message: t("There is no system keyring here, so the key that seals saved passwords is kept in a file beside them."),
+            sql: "",
+          };
+        }
+      }
     } catch (e) {
+      // A locked keyring, say: show it. The next action tries the store again.
       this.storeError = errorText(e);
+      this.logError(this.storeError, "");
     }
     this.changed();
   }
 
   /** Opens a saved connection. */
   async connect(saved: SavedConnection) {
-    await this.open({ savedId: saved.id }, saved.id);
+    await this.openSaved({ savedId: saved.id }, saved.id);
   }
 
-  /** Connects first, then saves: only a URL that works is kept (ConnectionSheet.save). */
+  /** Connects first, then saves: only a URL that works is kept (ConnectionSheet.save).
+   *  An edited saved connection is tried as typed (masked passwords filled in by
+   *  the backend) and saved only once it connects. */
   async connectNew(draft: { url: string; name: string; ssh: SshConfig | null; editing: SavedConnection | null }) {
-    if (draft.editing) {
-      const saved = await api.saveConnection({ id: draft.editing.id, url: draft.url, name: draft.name, ssh: draft.ssh, folderId: draft.editing.folderId });
-      await this.loadStore();
-      const ok = await this.open({ savedId: saved.id }, saved.id, true);
-      if (!ok) throw this.connectError ?? t("Couldn't Connect");
-      return;
-    }
+    const editing = draft.editing;
     await this.closeSession();
-    this.connecting = "url";
+    this.connecting = editing ? editing.id : "url";
     this.connectError = null;
     this.changed();
+    let info: ConnectInfo | null = null;
     try {
-      const info = await api.connect({ url: draft.url, ssh: draft.ssh });
-      const saved = await api.saveConnection({ url: draft.url, name: draft.name, ssh: draft.ssh });
+      info = editing
+        ? await api.connect({ savedId: editing.id, url: draft.url, ssh: draft.ssh })
+        : await api.connect({ url: draft.url, ssh: draft.ssh });
+      const saved = await api.saveConnection(
+        editing
+          ? { id: editing.id, url: draft.url, name: draft.name, ssh: draft.ssh, folderId: editing.folderId }
+          : { url: draft.url, name: draft.name, ssh: draft.ssh },
+      );
       this.session = { ...info, savedId: saved.id, name: saved.name };
       this.connecting = null;
       await this.loadStore();
       this.opened();
     } catch (e) {
+      // Connected but not saved: close that session (and its tunnel) instead of leaking it.
+      if (info && this.session?.sessionId !== info.sessionId) await api.disconnect(info.sessionId).catch(() => undefined);
       this.connecting = null;
       this.changed();
       throw errorText(e);
     }
   }
 
-  private async open(target: { savedId: string }, savedId: string, throwing = false): Promise<boolean> {
+  private async openSaved(target: { savedId: string }, savedId: string): Promise<boolean> {
     await this.closeSession();
     this.connecting = savedId;
     this.connectError = null;
@@ -237,7 +257,6 @@ export class AppModel {
       this.connectError = errorText(e);
       this.logError(this.connectError, "");
       this.changed();
-      if (throwing) return false;
       return false;
     }
   }
@@ -394,7 +413,8 @@ export class AppModel {
       this.tableResult = result;
       this.tableError = null;
       this.tableVersion++;
-      this.selection = new Set();
+      // The selection belongs to the grid on screen; a reload behind a query result keeps it.
+      if (this.shown === "table") this.selection = new Set();
     } catch (e) {
       if (request !== this.pageRequest) return;
       this.tableError = errorText(e);
@@ -483,26 +503,25 @@ export class AppModel {
     return { info, relation, result };
   }
 
-  /** Saves one cell of the page; the row keeps its place. */
+  /** Saves one cell of the page; the row keeps its place. Row keys are the
+   *  backend's own exact form, so when an edit can change the key (a key column,
+   *  or Postgres's ctid and xmin, which every update renews) the page is reloaded
+   *  for fresh keys instead of patched. */
   async updateCell(row: number, column: number, value: string | null) {
     const { info, relation, result } = this.requireTable();
     if (!result.keys) throw t("Read Only");
     const name = result.columns[column].name;
-    const outcome = await api.updateRow(info.sessionId, relation, rowKey(result.keys, row), [{ column: name, value }]);
+    const keys = result.keys;
+    const outcome = await api.updateRow(info.sessionId, relation, rowKey(keys, row), [{ column: name, value }]);
     this.logOutcome(outcome.sql, outcome.command);
+    if (keys.kind === "ctid" || keys.columns.includes(name)) {
+      await this.loadPage();
+      return;
+    }
     const rows = result.rows.slice();
     rows[row] = rows[row].slice();
     rows[row][column] = value;
-    const keys = result.keys;
-    const keyIndex = keys.columns.indexOf(name);
-    if (keyIndex >= 0) {
-      const values = keys.values.slice();
-      values[row] = values[row].slice();
-      values[row][keyIndex] = value;
-      this.tableResult = { ...result, rows, keys: { ...keys, values } };
-    } else {
-      this.tableResult = { ...result, rows };
-    }
+    this.tableResult = { ...result, rows };
     this.changed();
   }
 
@@ -563,7 +582,8 @@ export class AppModel {
     const info = this.session;
     const text = textOverride ?? this.runText;
     if (!info || !text || this.running) return;
-    if (this.usesCommands && mode !== "plain") return;
+    // Rehearsals and all-or-nothing runs are SQL only (not Redis commands or MongoDB queries).
+    if ((this.usesCommands || this.usesQueries) && mode !== "plain") return;
     this.running = true;
     this.changed();
     const started = new Date();
@@ -597,7 +617,9 @@ export class AppModel {
         this.selection = new Set();
       } else if (mode !== "rehearse") {
         // A write: the open table and the list of tables may have changed.
-        if (this.relation && this.shown === "table") void this.loadPage(true);
+        // Reload the open table even while a query result is shown, so the
+        // Table tab never shows stale rows or keys.
+        if (this.relation) void this.loadPage(true);
         if (/\b(create|drop|alter|rename)\b/i.test(text)) void this.loadRelations();
         if (!this.relation) this.shown = "query";
       }

@@ -30,26 +30,47 @@ pub struct SshConfig {
 impl SshConfig {
     /// "ana@bastion.example.com:2222" for the sidebar and the log.
     pub fn label(&self) -> String {
-        let user = if self.user.is_empty() || self.host.contains('@') { String::new() } else { format!("{}@", self.user) };
+        let user = if self.user.is_empty() || self.host.contains('@') {
+            String::new()
+        } else {
+            format!("{}@", self.user)
+        };
         let port = self.port.map(|p| format!(":{p}")).unwrap_or_default();
         format!("{user}{}{port}", self.host)
     }
 }
 
 /// The arguments for ssh, public for tests.
-pub fn arguments(config: &SshConfig, local_port: u16, remote_host: &str, remote_port: u16) -> Vec<String> {
-    let target = if remote_host.contains(':') { format!("[{remote_host}]") } else { remote_host.to_string() };
+pub fn arguments(
+    config: &SshConfig,
+    local_port: u16,
+    remote_host: &str,
+    remote_port: u16,
+) -> Vec<String> {
+    let target = if remote_host.contains(':') {
+        format!("[{remote_host}]")
+    } else {
+        remote_host.to_string()
+    };
     let mut args: Vec<String> = [
-        "-N", "-T",
-        "-L", &format!("127.0.0.1:{local_port}:{target}:{remote_port}"),
-        "-o", "ExitOnForwardFailure=yes",
-        "-o", "ServerAliveInterval=15",
-        "-o", "ServerAliveCountMax=3",
-        "-o", "ConnectTimeout=10",
+        "-N",
+        "-T",
+        "-L",
+        &format!("127.0.0.1:{local_port}:{target}:{remote_port}"),
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-o",
+        "ConnectTimeout=10",
         // No prompts: there is no terminal. Keys come from the agent or the key file.
-        "-o", "BatchMode=yes",
+        "-o",
+        "BatchMode=yes",
         // Trust a server the first time, refuse it if its key ever changes.
-        "-o", "StrictHostKeyChecking=accept-new",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -58,7 +79,12 @@ pub fn arguments(config: &SshConfig, local_port: u16, remote_host: &str, remote_
         args.extend(["-p".into(), port.to_string()]);
     }
     if !config.key_path.is_empty() {
-        args.extend(["-i".into(), expand_tilde(&config.key_path), "-o".into(), "IdentitiesOnly=yes".into()]);
+        args.extend([
+            "-i".into(),
+            expand_tilde(&config.key_path),
+            "-o".into(),
+            "IdentitiesOnly=yes".into(),
+        ]);
     }
     if !config.user.is_empty() && !config.host.contains('@') {
         args.extend(["-l".into(), config.user.clone()]);
@@ -87,7 +113,10 @@ pub fn problem(config: &SshConfig, remote_host: &str) -> Option<String> {
         return Some("The SSH server can only have letters, digits, and . - _ @ : [ ] (and can't start with -).".into());
     }
     if !config.user.is_empty() && !valid(&config.user, &user_ok) {
-        return Some("The SSH user can only have letters, digits, and . - _ (and can't start with -).".into());
+        return Some(
+            "The SSH user can only have letters, digits, and . - _ (and can't start with -)."
+                .into(),
+        );
     }
     if config.key_path.starts_with('-') || config.key_path.contains(['\n', '\r']) {
         return Some("The SSH key path is not valid.".into());
@@ -108,18 +137,30 @@ pub struct SshTunnel {
 
 impl std::fmt::Debug for SshTunnel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SshTunnel").field("local_port", &self.local_port).field("config", &self.config).finish()
+        f.debug_struct("SshTunnel")
+            .field("local_port", &self.local_port)
+            .field("config", &self.config)
+            .finish()
     }
 }
 
 impl SshTunnel {
     /// Opens the tunnel and waits until the local port answers, or fails with ssh's own message.
-    pub async fn open(config: &SshConfig, remote_host: &str, remote_port: u16) -> DbResult<SshTunnel> {
+    pub async fn open(
+        config: &SshConfig,
+        remote_host: &str,
+        remote_port: u16,
+    ) -> DbResult<SshTunnel> {
         Self::open_with(&ssh_program(), config, remote_host, remote_port).await
     }
 
     /// `open` with an explicit ssh program (tests use a stand-in).
-    async fn open_with(program: &str, config: &SshConfig, remote_host: &str, remote_port: u16) -> DbResult<SshTunnel> {
+    async fn open_with(
+        program: &str,
+        config: &SshConfig,
+        remote_host: &str,
+        remote_port: u16,
+    ) -> DbResult<SshTunnel> {
         if let Some(problem) = problem(config, remote_host) {
             return Err(DbError::Message(problem));
         }
@@ -136,7 +177,12 @@ impl SshTunnel {
             // CREATE_NO_WINDOW: no console flashes up for ssh.exe.
             command.creation_flags(0x0800_0000);
         }
-        let mut child = command.spawn().map_err(|e| DbError::Message(format!("Couldn't start ssh: {e}")))?;
+        die_with_parent(&mut command);
+        let mut child = command
+            .spawn()
+            .map_err(|e| DbError::Message(format!("Couldn't start ssh: {e}")))?;
+        #[cfg(windows)]
+        kill_with_app(&child);
         let errors = Arc::new(Mutex::new(String::new()));
         if let Some(mut stderr) = child.stderr.take() {
             let sink = errors.clone();
@@ -152,7 +198,12 @@ impl SshTunnel {
                 }
             });
         }
-        let tunnel = SshTunnel { local_port, config: config.clone(), child: Mutex::new(child), errors };
+        let tunnel = SshTunnel {
+            local_port,
+            config: config.clone(),
+            child: Mutex::new(child),
+            errors,
+        };
         tunnel.wait_until_ready().await?;
         Ok(tunnel)
     }
@@ -166,13 +217,18 @@ impl SshTunnel {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 return Err(DbError::Message(format!("SSH: {}", self.error_text())));
             }
-            if tokio::net::TcpStream::connect(("127.0.0.1", self.local_port)).await.is_ok() {
+            if tokio::net::TcpStream::connect(("127.0.0.1", self.local_port))
+                .await
+                .is_ok()
+            {
                 return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         self.close();
-        Err(DbError::msg("SSH: the tunnel did not respond within 20 seconds."))
+        Err(DbError::msg(
+            "SSH: the tunnel did not respond within 20 seconds.",
+        ))
     }
 
     /// Why the tunnel is gone, or None while it runs. For "the tunnel dropped" errors.
@@ -180,12 +236,19 @@ impl SshTunnel {
         if self.is_running() {
             None
         } else {
-            Some(format!("The SSH tunnel to {} dropped: {}", self.config.label(), self.error_text()))
+            Some(format!(
+                "The SSH tunnel to {} dropped: {}",
+                self.config.label(),
+                self.error_text()
+            ))
         }
     }
 
     pub fn is_running(&self) -> bool {
-        self.child.lock().map(|mut c| matches!(c.try_wait(), Ok(None))).unwrap_or(false)
+        self.child
+            .lock()
+            .map(|mut c| matches!(c.try_wait(), Ok(None)))
+            .unwrap_or(false)
     }
 
     /// What ssh said, without the "Permanently added" noise.
@@ -219,6 +282,72 @@ impl Drop for SshTunnel {
     }
 }
 
+/// Linux: ssh gets SIGTERM when dbLens ends, even on a crash or SIGKILL, so no
+/// forwarded port outlives the app. (The signal follows the spawning thread; a
+/// tokio worker lives as long as the runtime, which is the app's lifetime.)
+#[cfg(target_os = "linux")]
+fn die_with_parent(command: &mut Command) {
+    // SAFETY: the closure only calls async-signal-safe functions (prctl,
+    // getppid, _exit) between fork and exec.
+    let parent = unsafe { libc::getpid() };
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // The parent died before prctl took effect.
+            if libc::getppid() != parent {
+                libc::_exit(1);
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn die_with_parent(_command: &mut Command) {}
+
+/// Windows: ssh.exe joins a Job Object that kills it when dbLens's last handle
+/// to the job closes, which happens when dbLens ends in any way.
+#[cfg(windows)]
+fn kill_with_app(child: &Child) {
+    use std::sync::OnceLock;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    // The job handle stays open for the whole process (stored as usize to be Sync).
+    static JOB: OnceLock<usize> = OnceLock::new();
+    let job = *JOB.get_or_init(|| {
+        // SAFETY: plain Win32 calls with valid arguments; a null handle is checked.
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return 0;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            job as usize
+        }
+    });
+    if job == 0 {
+        return;
+    }
+    if let Some(process) = child.raw_handle() {
+        // SAFETY: both handles are valid while the child runs.
+        unsafe {
+            AssignProcessToJobObject(job as _, process as _);
+        }
+    }
+}
+
 /// `ssh` from PATH; on Windows the built-in OpenSSH when PATH lacks it.
 fn ssh_program() -> String {
     #[cfg(windows)]
@@ -245,16 +374,30 @@ mod tests {
     use super::*;
 
     fn cfg(host: &str, user: &str, key: &str) -> SshConfig {
-        SshConfig { host: host.into(), port: None, user: user.into(), key_path: key.into() }
+        SshConfig {
+            host: host.into(),
+            port: None,
+            user: user.into(),
+            key_path: key.into(),
+        }
     }
 
     #[test]
     fn builds_arguments() {
-        let config = SshConfig { host: "bastion.x.com".into(), port: Some(2222), user: "ana".into(), key_path: String::new() };
+        let config = SshConfig {
+            host: "bastion.x.com".into(),
+            port: Some(2222),
+            user: "ana".into(),
+            key_path: String::new(),
+        };
         let args = arguments(&config, 61000, "db.internal", 5432);
-        assert_eq!(&args[args.len() - 4..], ["-l", "ana", "--", "bastion.x.com"]);
+        assert_eq!(
+            &args[args.len() - 4..],
+            ["-l", "ana", "--", "bastion.x.com"]
+        );
         assert!(args.contains(&"BatchMode=yes".to_string()) && args.contains(&"2222".to_string()));
-        assert!(arguments(&cfg("bastion", "", ""), 1, "::1", 5432).contains(&"127.0.0.1:1:[::1]:5432".to_string()));
+        assert!(arguments(&cfg("bastion", "", ""), 1, "::1", 5432)
+            .contains(&"127.0.0.1:1:[::1]:5432".to_string()));
         assert_eq!(config.label(), "ana@bastion.x.com:2222");
     }
 
@@ -269,15 +412,32 @@ mod tests {
         ] {
             assert!(problem(&config, "localhost").is_some(), "{config:?}");
         }
-        for host in ["bastion", "ana@db.x.com", "100.64.0.1", "[::1]", "my-host_1.example.com"] {
-            assert!(problem(&cfg(host, "ana.b-1", "~/.ssh/id_ed25519"), "db-service-internal").is_none(), "{host}");
+        for host in [
+            "bastion",
+            "ana@db.x.com",
+            "100.64.0.1",
+            "[::1]",
+            "my-host_1.example.com",
+        ] {
+            assert!(
+                problem(
+                    &cfg(host, "ana.b-1", "~/.ssh/id_ed25519"),
+                    "db-service-internal"
+                )
+                .is_none(),
+                "{host}"
+            );
         }
         assert!(problem(&cfg("bastion", "", ""), "db;rm").is_some());
     }
 
     #[tokio::test]
     async fn reports_ssh_errors() {
-        let config = SshConfig { host: "127.0.0.1".into(), port: Some(1), ..Default::default() };
+        let config = SshConfig {
+            host: "127.0.0.1".into(),
+            port: Some(1),
+            ..Default::default()
+        };
         // Fails whether or not ssh is installed: no server on port 1.
         assert!(SshTunnel::open(&config, "localhost", 5432).await.is_err());
     }
@@ -299,28 +459,47 @@ mod tests {
     async fn surfaces_the_message_of_a_failing_ssh() {
         let dir = tempfile::tempdir().unwrap();
         let program = fake_ssh(dir.path(), "echo 'Warning: Permanently added x' >&2; echo 'Permission denied (publickey).' >&2; exit 255");
-        let error = SshTunnel::open_with(&program, &cfg("bastion", "", ""), "db", 5432).await.unwrap_err();
+        let error = SshTunnel::open_with(&program, &cfg("bastion", "", ""), "db", 5432)
+            .await
+            .unwrap_err();
         assert_eq!(error.to_string(), "SSH: Permission denied (publickey).");
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn opens_waits_detects_drop_and_kills() {
-        if std::process::Command::new("python3").arg("--version").output().is_err() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
             return;
         }
         let dir = tempfile::tempdir().unwrap();
         // Stand-in for ssh: listens on the -L local port like a real forward would.
         let script = "exec python3 -c \"import socket,sys,time\nspec=sys.argv[sys.argv.index('-L')+1].split(':')\ns=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind((spec[0],int(spec[1])));s.listen(5);time.sleep(60)\" \"$@\"";
         let program = fake_ssh(dir.path(), script);
-        let tunnel = SshTunnel::open_with(&program, &cfg("bastion", "", ""), "db", 5432).await.unwrap();
+        let tunnel = SshTunnel::open_with(&program, &cfg("bastion", "", ""), "db", 5432)
+            .await
+            .unwrap();
         assert!(tunnel.is_running() && tunnel.drop_reason().is_none());
-        assert!(tokio::net::TcpStream::connect(("127.0.0.1", tunnel.local_port)).await.is_ok());
+        assert!(
+            tokio::net::TcpStream::connect(("127.0.0.1", tunnel.local_port))
+                .await
+                .is_ok()
+        );
         tunnel.close();
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!tunnel.is_running());
-        assert!(tunnel.drop_reason().unwrap().starts_with("The SSH tunnel to bastion dropped"));
+        assert!(tunnel
+            .drop_reason()
+            .unwrap()
+            .starts_with("The SSH tunnel to bastion dropped"));
         // The port is free again once ssh is gone.
-        assert!(tokio::net::TcpStream::connect(("127.0.0.1", tunnel.local_port)).await.is_err());
+        assert!(
+            tokio::net::TcpStream::connect(("127.0.0.1", tunnel.local_port))
+                .await
+                .is_err()
+        );
     }
 }

@@ -2,6 +2,7 @@
 //! and row edits. Port of `Session.swift`. Every type here crosses the IPC
 //! boundary as camelCase JSON; `src/api.ts` mirrors them field for field.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -11,6 +12,59 @@ use crate::engine::Engine;
 
 /// Results bigger than this are cut, so the grid stays fast.
 pub const ROW_LIMIT: usize = 5_000;
+
+/// Which cancellable operation is running, so a cancel reaches only the
+/// statement it was meant for: one that has already finished, or the next one
+/// in line, is left alone. Ids start at 1; 0 means nothing is running.
+#[derive(Debug, Default)]
+pub struct Activity {
+    running: AtomicU64,
+    next: AtomicU64,
+    cancelled: AtomicU64,
+}
+
+impl Activity {
+    /// Marks a new operation as running and returns its id.
+    pub fn start(&self) -> u64 {
+        let id = self.next.fetch_add(1, Ordering::SeqCst) + 1;
+        self.running.store(id, Ordering::SeqCst);
+        id
+    }
+
+    /// Ends the operation; true when a cancel was asked for it.
+    pub fn finish(&self, id: u64) -> bool {
+        let _ = self
+            .running
+            .compare_exchange(id, 0, Ordering::SeqCst, Ordering::SeqCst);
+        self.cancelled.load(Ordering::SeqCst) == id
+    }
+
+    /// The running operation, if any.
+    pub fn current(&self) -> Option<u64> {
+        match self.running.load(Ordering::SeqCst) {
+            0 => None,
+            id => Some(id),
+        }
+    }
+
+    /// Whether `id` is still the running operation.
+    pub fn is_running(&self, id: u64) -> bool {
+        id != 0 && self.running.load(Ordering::SeqCst) == id
+    }
+
+    /// Marks the running operation as cancelled and returns its id; None when idle.
+    pub fn request_cancel(&self) -> Option<u64> {
+        let id = self.current()?;
+        self.cancelled.store(id, Ordering::SeqCst);
+        Some(id)
+    }
+
+    /// Whether a cancel was asked for the operation running now.
+    pub fn current_cancelled(&self) -> bool {
+        self.current()
+            .is_some_and(|id| self.cancelled.load(Ordering::SeqCst) == id)
+    }
+}
 
 /// An error a driver reports, with the server's own message when it has one.
 /// It reaches the frontend as a plain string (its Display text).
@@ -134,7 +188,12 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 /// `%text%` for LIKE, with LIKE's own wildcards and the escape character
 /// escaped by a backslash.
 pub fn like_pattern(text: &str) -> String {
-    format!("%{}%", text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"))
+    format!(
+        "%{}%",
+        text.replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    )
 }
 
 /// One column of a result.
@@ -149,7 +208,10 @@ pub struct Column {
 
 impl Column {
     pub fn new(name: impl Into<String>, type_name: impl Into<String>) -> Self {
-        Self { name: name.into(), type_name: type_name.into() }
+        Self {
+            name: name.into(),
+            type_name: type_name.into(),
+        }
     }
 }
 
@@ -183,12 +245,19 @@ impl RowKeys {
 
     /// The key of one row, to send back with an edit.
     pub fn row(&self, index: usize) -> Option<RowKey> {
-        Some(RowKey { columns: self.columns.clone(), kind: self.kind, values: self.values.get(index)?.clone() })
+        Some(RowKey {
+            columns: self.columns.clone(),
+            kind: self.kind,
+            values: self.values.get(index)?.clone(),
+        })
     }
 }
 
 /// The key of the one row an edit targets: `RowKeys` narrowed to a row.
 /// (Swift passes `keys` plus a row index; one row is all the IPC needs.)
+/// The values are the driver's own form of each key (exact hex for binary
+/// keys, a storage-class tag in SQLite), so the frontend sends them back as
+/// they came and never builds them from what the grid shows.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RowKey {
@@ -228,14 +297,34 @@ pub struct QueryResult {
 
 impl QueryResult {
     /// A result with rows. `total_rows` is the row count before any cut.
-    pub fn rows(columns: Vec<Column>, rows: Vec<Vec<Option<String>>>, command: impl Into<String>) -> Self {
+    pub fn rows(
+        columns: Vec<Column>,
+        rows: Vec<Vec<Option<String>>>,
+        command: impl Into<String>,
+    ) -> Self {
         let total = rows.len() as u64;
-        Self { columns, rows, command: command.into(), truncated: false, total_rows: total, keys: None, note: None }
+        Self {
+            columns,
+            rows,
+            command: command.into(),
+            truncated: false,
+            total_rows: total,
+            keys: None,
+            note: None,
+        }
     }
 
     /// A statement that returned no rows: "UPDATE 2", "CREATE TABLE".
     pub fn command(command: impl Into<String>, affected: u64) -> Self {
-        Self { columns: vec![], rows: vec![], command: command.into(), truncated: false, total_rows: affected, keys: None, note: None }
+        Self {
+            columns: vec![],
+            rows: vec![],
+            command: command.into(),
+            truncated: false,
+            total_rows: affected,
+            keys: None,
+            note: None,
+        }
     }
 
     pub fn has_rows(&self) -> bool {
@@ -263,12 +352,19 @@ pub struct Execution {
 
 impl Execution {
     pub fn new(results: Vec<QueryResult>, duration: Duration) -> Self {
-        Self { results, duration_ms: duration.as_secs_f64() * 1000.0 }
+        Self {
+            results,
+            duration_ms: duration.as_secs_f64() * 1000.0,
+        }
     }
 
     /// The result to show: the last one with columns, else the last one.
     pub fn main(&self) -> Option<&QueryResult> {
-        self.results.iter().rev().find(|r| r.has_rows()).or(self.results.last())
+        self.results
+            .iter()
+            .rev()
+            .find(|r| r.has_rows())
+            .or(self.results.last())
     }
 }
 
@@ -302,8 +398,19 @@ pub struct Relation {
 }
 
 impl Relation {
-    pub fn new(schema: impl Into<String>, name: impl Into<String>, kind: RelationKind, estimate: f64) -> Self {
-        Self { schema: schema.into(), name: name.into(), kind, estimate, subtype: String::new() }
+    pub fn new(
+        schema: impl Into<String>,
+        name: impl Into<String>,
+        kind: RelationKind,
+        estimate: f64,
+    ) -> Self {
+        Self {
+            schema: schema.into(),
+            name: name.into(),
+            kind,
+            estimate,
+            subtype: String::new(),
+        }
     }
 
     /// "schema.name", unique within a connection.
@@ -375,7 +482,10 @@ impl SchemaGraph {
     /// columns) with columns joined by the unit separator (U+001F).
     pub fn build(columns: &[Vec<Option<String>>], links: &[Vec<Option<String>>]) -> SchemaGraph {
         fn flag(v: &Option<String>) -> bool {
-            matches!(v.as_deref().map(str::to_lowercase).as_deref(), Some("t" | "true" | "1" | "yes"))
+            matches!(
+                v.as_deref().map(str::to_lowercase).as_deref(),
+                Some("t" | "true" | "1" | "yes")
+            )
         }
         fn text(v: &Option<String>) -> String {
             v.clone().unwrap_or_default()
@@ -386,7 +496,12 @@ impl SchemaGraph {
             let (schema, name) = (text(&row[0]), text(&row[1]));
             let id = format!("{schema}.{name}");
             let at = *index.entry(id).or_insert_with(|| {
-                tables.push(SchemaTable { schema, name, is_view: flag(&row[2]), columns: vec![] });
+                tables.push(SchemaTable {
+                    schema,
+                    name,
+                    is_view: flag(&row[2]),
+                    columns: vec![],
+                });
                 tables.len() - 1
             });
             tables[at].columns.push(SchemaColumn {
@@ -397,7 +512,11 @@ impl SchemaGraph {
             });
         }
         let split = |v: &Option<String>| -> Vec<String> {
-            text(v).split('\u{1f}').filter(|s| !s.is_empty()).map(String::from).collect()
+            text(v)
+                .split('\u{1f}')
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
         };
         let links = links
             .iter()
@@ -407,7 +526,13 @@ impl SchemaGraph {
                 if !index.contains_key(&from) || !index.contains_key(&to) {
                     return None;
                 }
-                Some(SchemaLink { name: text(&r[0]), from, from_columns: split(&r[3]), to, to_columns: split(&r[4]) })
+                Some(SchemaLink {
+                    name: text(&r[0]),
+                    from,
+                    from_columns: split(&r[3]),
+                    to,
+                    to_columns: split(&r[4]),
+                })
             })
             .collect();
         SchemaGraph { tables, links }
@@ -432,7 +557,11 @@ pub trait DatabaseSession: Send + Sync {
         if relation.schema.is_empty() {
             self.quote(&relation.name)
         } else {
-            format!("{}.{}", self.quote(&relation.schema), self.quote(&relation.name))
+            format!(
+                "{}.{}",
+                self.quote(&relation.schema),
+                self.quote(&relation.name)
+            )
         }
     }
 
@@ -459,7 +588,10 @@ pub trait DatabaseSession: Send + Sync {
     /// fails. Returns `DbError::NotAtomic` where the database can't (MySQL DDL,
     /// MongoDB, Redis), so the caller can run it plainly instead.
     async fn execute_atomically(&self, _text: &str) -> DbResult<Execution> {
-        Err(DbError::NotAtomic(format!("{} has no transaction dbLens can roll back.", self.engine().name())))
+        Err(DbError::NotAtomic(format!(
+            "{} has no transaction dbLens can roll back.",
+            self.engine().name()
+        )))
     }
 
     async fn relations(&self) -> DbResult<Vec<Relation>>;
@@ -481,7 +613,12 @@ pub trait DatabaseSession: Send + Sync {
     async fn count(&self, relation: &Relation, search: &str) -> DbResult<Option<u64>>;
 
     /// Edits exactly one row (rolled back if it would touch more or none).
-    async fn update(&self, relation: &Relation, key: &RowKey, changes: &[CellValue]) -> DbResult<EditOutcome>;
+    async fn update(
+        &self,
+        relation: &Relation,
+        key: &RowKey,
+        changes: &[CellValue],
+    ) -> DbResult<EditOutcome>;
     async fn insert(&self, relation: &Relation, values: &[CellValue]) -> DbResult<EditOutcome>;
     async fn delete(&self, relation: &Relation, key: &RowKey) -> DbResult<EditOutcome>;
 
@@ -498,6 +635,27 @@ pub trait DatabaseSession: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cancel_reaches_only_the_operation_it_saw() {
+        let activity = Activity::default();
+        assert_eq!(
+            activity.request_cancel(),
+            None,
+            "nothing runs: nothing to cancel"
+        );
+        let first = activity.start();
+        assert_eq!(activity.request_cancel(), Some(first));
+        assert!(activity.current_cancelled());
+        assert!(activity.finish(first));
+        let second = activity.start();
+        assert!(
+            !activity.is_running(first),
+            "a late cancel for the first one is dropped"
+        );
+        assert!(!activity.current_cancelled());
+        assert!(!activity.finish(second));
+    }
     use std::cmp::Ordering;
 
     #[test]
@@ -507,26 +665,80 @@ mod tests {
 
     #[test]
     fn sorts_like_people_read() {
-        assert_eq!(ColumnSort::compare(Some("9"), Some("10"), true), Ordering::Less);
-        assert_eq!(ColumnSort::compare(Some("file2"), Some("file10"), true), Ordering::Less);
-        assert_eq!(ColumnSort::compare(Some("b"), Some("A"), true), Ordering::Greater);
-        assert_eq!(ColumnSort::compare(None, Some("a"), true), Ordering::Greater);
+        assert_eq!(
+            ColumnSort::compare(Some("9"), Some("10"), true),
+            Ordering::Less
+        );
+        assert_eq!(
+            ColumnSort::compare(Some("file2"), Some("file10"), true),
+            Ordering::Less
+        );
+        assert_eq!(
+            ColumnSort::compare(Some("b"), Some("A"), true),
+            Ordering::Greater
+        );
+        assert_eq!(
+            ColumnSort::compare(None, Some("a"), true),
+            Ordering::Greater
+        );
         // NULL stays last in both directions.
-        assert_eq!(ColumnSort::compare(None, Some("a"), false), Ordering::Greater);
-        assert_eq!(ColumnSort::compare(Some("9"), Some("10"), false), Ordering::Greater);
+        assert_eq!(
+            ColumnSort::compare(None, Some("a"), false),
+            Ordering::Greater
+        );
+        assert_eq!(
+            ColumnSort::compare(Some("9"), Some("10"), false),
+            Ordering::Greater
+        );
     }
 
     #[test]
     fn builds_schema_graphs() {
         let s = |v: &str| Some(v.to_string());
         let columns = vec![
-            vec![s("public"), s("customers"), s("f"), s("id"), s("int"), s("f"), s("t")],
-            vec![s("public"), s("orders"), s("0"), s("id"), s("int"), s("no"), s("true")],
-            vec![s("public"), s("orders"), s("0"), s("customer_id"), s("int"), s("yes"), s("false")],
+            vec![
+                s("public"),
+                s("customers"),
+                s("f"),
+                s("id"),
+                s("int"),
+                s("f"),
+                s("t"),
+            ],
+            vec![
+                s("public"),
+                s("orders"),
+                s("0"),
+                s("id"),
+                s("int"),
+                s("no"),
+                s("true"),
+            ],
+            vec![
+                s("public"),
+                s("orders"),
+                s("0"),
+                s("customer_id"),
+                s("int"),
+                s("yes"),
+                s("false"),
+            ],
         ];
         let links = vec![
-            vec![s("fk"), s("public.orders"), s("public.customers"), s("customer_id"), s("id")],
-            vec![s("gone"), s("public.orders"), s("other.missing"), s("a"), s("b")],
+            vec![
+                s("fk"),
+                s("public.orders"),
+                s("public.customers"),
+                s("customer_id"),
+                s("id"),
+            ],
+            vec![
+                s("gone"),
+                s("public.orders"),
+                s("other.missing"),
+                s("a"),
+                s("b"),
+            ],
         ];
         let graph = SchemaGraph::build(&columns, &links);
         assert_eq!(graph.tables.len(), 2);
@@ -539,15 +751,29 @@ mod tests {
     #[test]
     fn serializes_camel_case() {
         let result = QueryResult {
-            keys: Some(RowKeys { columns: vec!["id".into()], kind: RowKeyKind::PrimaryKey, values: vec![vec![s("1")]] }),
-            ..QueryResult::rows(vec![Column::new("id", "int4")], vec![vec![s("1")]], "SELECT 1")
+            keys: Some(RowKeys {
+                columns: vec!["id".into()],
+                kind: RowKeyKind::PrimaryKey,
+                values: vec![vec![s("1")]],
+            }),
+            ..QueryResult::rows(
+                vec![Column::new("id", "int4")],
+                vec![vec![s("1")]],
+                "SELECT 1",
+            )
         };
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["totalRows"], 1);
         assert_eq!(json["columns"][0]["type"], "int4");
         assert_eq!(json["keys"]["kind"], "primaryKey");
-        assert_eq!(serde_json::to_string(&DbError::NotAtomic("no".into())).unwrap(), "\"no\"");
-        assert_eq!(serde_json::to_value(RelationKind::Materialized).unwrap(), "materialized");
+        assert_eq!(
+            serde_json::to_string(&DbError::NotAtomic("no".into())).unwrap(),
+            "\"no\""
+        );
+        assert_eq!(
+            serde_json::to_value(RelationKind::Materialized).unwrap(),
+            "materialized"
+        );
         fn s(v: &str) -> Option<String> {
             Some(v.into())
         }
@@ -556,7 +782,10 @@ mod tests {
     #[test]
     fn main_result_prefers_rows() {
         let exec = Execution::new(
-            vec![QueryResult::rows(vec![Column::new("a", "")], vec![], "SELECT 0"), QueryResult::command("UPDATE 1", 1)],
+            vec![
+                QueryResult::rows(vec![Column::new("a", "")], vec![], "SELECT 0"),
+                QueryResult::command("UPDATE 1", 1),
+            ],
             Duration::from_millis(5),
         );
         assert_eq!(exec.main().unwrap().command, "SELECT 0");

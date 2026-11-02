@@ -40,6 +40,10 @@ interface Editing {
   row: number;
   column: number;
   value: string;
+  /** The cell's value when the editor opened (NULL shows as an empty field). */
+  original: Cell;
+  /** Something was typed. An untouched editor changes nothing, so a NULL stays NULL. */
+  touched: boolean;
   error?: string;
   saving?: boolean;
 }
@@ -84,6 +88,10 @@ export const ResultGrid = memo(function ResultGrid(props: GridProps) {
   const columnKey = result.columns.map((c) => `${c.name}:${c.type}`).join("|");
   const [widths, setWidths] = useState<number[]>(() => measure(result));
   const [editing, setEditing] = useState<Editing | null>(null);
+  /** A save is on its way: blur and Tab wait instead of saving twice. */
+  const saving = useRef(false);
+  /** Escape closed the editor: the blur that follows must not save. */
+  const discarded = useRef(false);
   const anchor = useRef<number | null>(null);
 
   // New columns: measure again. New rows: start at the top, nothing in edit.
@@ -176,8 +184,7 @@ export const ResultGrid = memo(function ResultGrid(props: GridProps) {
       onOpenRow([...selection][0]);
     } else if (event.key === "F2" && onEditCell && selection.size === 1) {
       event.preventDefault();
-      const row = [...selection][0];
-      setEditing({ row, column: 0, value: result.rows[row][0] ?? "" });
+      startEdit([...selection][0], 0);
     } else if (event.key === "Escape" && selection.size > 0) {
       onSelectionChange(new Set());
     }
@@ -185,21 +192,36 @@ export const ResultGrid = memo(function ResultGrid(props: GridProps) {
 
   // MARK: Editing
 
-  const commit = async (value: Cell) => {
-    if (!editing || !onEditCell) return;
-    const before = result.rows[editing.row]?.[editing.column] ?? null;
-    if (value === before) {
+  function startEdit(row: number, column: number) {
+    const original = result.rows[row]?.[column] ?? null;
+    discarded.current = false;
+    setEditing({ row, column, value: original ?? "", original, touched: false });
+  }
+
+  /** Saves the editor's text. True when it is saved or nothing changed; false
+   *  when the save failed (the editor stays open with the error) or is busy. */
+  const commit = async (target: Editing | null, refocus = true): Promise<boolean> => {
+    if (!target || !onEditCell || saving.current) return false;
+    const close = () => {
       setEditing(null);
-      scroller.current?.focus();
-      return;
+      if (refocus) scroller.current?.focus();
+    };
+    // Untouched (Enter right away on a NULL cell, say): no change at all.
+    if (!target.touched || target.value === target.original) {
+      close();
+      return true;
     }
-    setEditing({ ...editing, saving: true, error: undefined });
+    saving.current = true;
+    setEditing({ ...target, saving: true, error: undefined });
     try {
-      await onEditCell(editing.row, editing.column, value);
-      setEditing(null);
-      scroller.current?.focus();
+      await onEditCell(target.row, target.column, target.value);
+      close();
+      return true;
     } catch (error) {
-      setEditing({ ...editing, saving: false, error: typeof error === "string" ? error : String(error) });
+      setEditing({ ...target, saving: false, error: typeof error === "string" ? error : String(error) });
+      return false;
+    } finally {
+      saving.current = false;
     }
   };
 
@@ -261,25 +283,35 @@ export const ResultGrid = memo(function ResultGrid(props: GridProps) {
                 autoFocus
                 className={editing.error ? "invalid" : ""}
                 value={editing.value}
+                placeholder={editing.original === null ? "NULL" : undefined}
                 disabled={editing.saving}
                 title={editing.error}
                 spellCheck={false}
                 onFocus={(e) => e.currentTarget.select()}
-                onChange={(e) => setEditing({ ...editing, value: e.target.value, error: undefined })}
+                onChange={(e) => setEditing({ ...editing, value: e.target.value, touched: true, error: undefined })}
                 onKeyDown={(e) => {
                   e.stopPropagation();
-                  if (e.key === "Enter") void commit(editing.value);
+                  if (e.key === "Enter") void commit(editing);
                   if (e.key === "Escape") {
+                    discarded.current = true;
                     setEditing(null);
                     scroller.current?.focus();
                   }
                   if (e.key === "Tab") {
                     e.preventDefault();
                     const next = c + (e.shiftKey ? -1 : 1);
-                    if (next >= 0 && next < row.length) setEditing({ row: i, column: next, value: row[next] ?? "" });
+                    // Save what was typed first; move on only when that worked.
+                    void commit(editing, false).then((saved) => {
+                      if (saved && next >= 0 && next < row.length) startEdit(i, next);
+                      else if (saved) scroller.current?.focus();
+                    });
                   }
                 }}
-                onBlur={() => !editing.saving && !editing.error && setEditing(null)}
+                onBlur={() => {
+                  // Clicking away saves what was typed, like Enter; an untouched editor just closes.
+                  if (discarded.current || saving.current || editing.saving || editing.error) return;
+                  void commit(editing, false);
+                }}
               />
               {editing.error && <div className="grid-cell-error selectable">{editing.error}</div>}
             </div>
@@ -290,7 +322,7 @@ export const ResultGrid = memo(function ResultGrid(props: GridProps) {
               data-col={c}
               role="gridcell"
               onDoubleClick={() => {
-                if (onEditCell) setEditing({ row: i, column: c, value: value ?? "" });
+                if (onEditCell) startEdit(i, c);
                 else onOpenRow?.(i);
               }}
             >

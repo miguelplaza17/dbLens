@@ -23,5 +23,16 @@ export default defineConfig({
     target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",
     minify: !process.env.TAURI_ENV_DEBUG ? "esbuild" : false,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
+    rollupOptions: {
+      output: {
+        // The SQL editor is the largest dependency; keep it in its own file.
+        manualChunks: (id) =>
+          id.includes("node_modules/@codemirror") || id.includes("node_modules/@lezer")
+            ? "codemirror"
+            : id.includes("node_modules/react")
+              ? "react"
+              : undefined,
+      },
+    },
   },
 });

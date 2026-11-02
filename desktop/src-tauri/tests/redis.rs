@@ -13,7 +13,10 @@ async fn open() -> Option<Box<dyn DatabaseSession>> {
 }
 
 fn cell(column: &str, value: Option<&str>) -> CellValue {
-    CellValue { column: column.into(), value: value.map(String::from) }
+    CellValue {
+        column: column.into(),
+        value: value.map(String::from),
+    }
 }
 
 fn key(columns: &[&str], values: &[&str]) -> RowKey {
@@ -25,12 +28,25 @@ fn key(columns: &[&str], values: &[&str]) -> RowKey {
 }
 
 fn rel(name: &str, subtype: &str) -> Relation {
-    let schema = name.split(':').next().filter(|_| name.contains(':')).unwrap_or("").to_string();
-    Relation { schema, name: name.into(), kind: RelationKind::Key, estimate: -1.0, subtype: subtype.into() }
+    let schema = name
+        .split(':')
+        .next()
+        .filter(|_| name.contains(':'))
+        .unwrap_or("")
+        .to_string();
+    Relation {
+        schema,
+        name: name.into(),
+        kind: RelationKind::Key,
+        estimate: -1.0,
+        subtype: subtype.into(),
+    }
 }
 
 async fn run(s: &dyn DatabaseSession, text: &str) {
-    s.execute(text).await.unwrap_or_else(|e| panic!("{text}: {e}"));
+    s.execute(text)
+        .await
+        .unwrap_or_else(|e| panic!("{text}: {e}"));
 }
 
 async fn clean(s: &dyn DatabaseSession, prefix: &str) {
@@ -41,7 +57,9 @@ async fn clean(s: &dyn DatabaseSession, prefix: &str) {
 }
 
 fn texts(rows: &[Vec<Option<String>>], column: usize) -> Vec<String> {
-    rows.iter().map(|r| r[column].clone().unwrap_or_default()).collect()
+    rows.iter()
+        .map(|r| r[column].clone().unwrap_or_default())
+        .collect()
 }
 
 #[tokio::test]
@@ -55,14 +73,28 @@ async fn connects_and_reports_version() {
 
 #[tokio::test]
 async fn bad_password_and_bad_host_say_why() {
-    let Some(url) = std::env::var("DBLENS_TEST_REDIS_URL").ok() else { return };
+    let Some(url) = std::env::var("DBLENS_TEST_REDIS_URL").ok() else {
+        return;
+    };
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let err = redis::connect("redis://127.0.0.1:1", None).await.err().expect("refused");
-    assert!(err.message().contains("Couldn't connect to 127.0.0.1:1"), "{err}");
-    let err = redis::connect("redis+sentinel://h", None).await.err().expect("sentinel");
+    let err = redis::connect("redis://127.0.0.1:1", None)
+        .await
+        .err()
+        .expect("refused");
+    assert!(
+        err.message().contains("Couldn't connect to 127.0.0.1:1"),
+        "{err}"
+    );
+    let err = redis::connect("redis+sentinel://h", None)
+        .await
+        .err()
+        .expect("sentinel");
     assert!(err.message().contains("Sentinel"));
     // Through a "tunnel" port that is closed.
-    let err = redis::connect(&url, Some(1)).await.err().expect("tunnel port");
+    let err = redis::connect(&url, Some(1))
+        .await
+        .err()
+        .expect("tunnel port");
     assert!(err.message().contains("127.0.0.1:1"), "{err}");
 }
 
@@ -75,7 +107,9 @@ async fn lists_keys_by_prefix_and_type() {
     let all = s.relations().await.unwrap();
     let mine: Vec<&Relation> = all.iter().filter(|r| r.name.starts_with(p)).collect();
     assert_eq!(mine.len(), 6);
-    assert!(mine.iter().all(|r| r.kind == RelationKind::Key && r.estimate == -1.0));
+    assert!(mine
+        .iter()
+        .all(|r| r.kind == RelationKind::Key && r.estimate == -1.0));
     let find = |n: &str| mine.iter().find(|r| r.name == n).unwrap();
     assert_eq!(find(&format!("{p}:a:1")).schema, p);
     assert_eq!(find(&format!("{p}:a:1")).subtype, "string");
@@ -85,12 +119,20 @@ async fn lists_keys_by_prefix_and_type() {
     assert_eq!(find(&format!("{p}:z")).subtype, "zset");
     assert_eq!(find(&format!("{p}plain")).schema, "");
     // sorted by group, then name
-    let order: Vec<(&str, &str)> = all.iter().map(|r| (r.schema.as_str(), r.name.as_str())).collect();
+    let order: Vec<(&str, &str)> = all
+        .iter()
+        .map(|r| (r.schema.as_str(), r.name.as_str()))
+        .collect();
     let mut sorted = order.clone();
     sorted.sort();
     assert_eq!(order, sorted);
     clean(&*s, p).await;
-    assert!(s.relations().await.unwrap().iter().all(|r| !r.name.starts_with(p)));
+    assert!(s
+        .relations()
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| !r.name.starts_with(p)));
 }
 
 #[tokio::test]
@@ -98,45 +140,102 @@ async fn pages_each_type() {
     let Some(s) = open().await else { return };
     let p = "dbl_page";
     clean(&*s, p).await;
-    run(&*s, &format!("SET {p}:str \"hello world\"\nEXPIRE {p}:str 3600\nSET {p}:nottl x")).await;
+    run(
+        &*s,
+        &format!("SET {p}:str \"hello world\"\nEXPIRE {p}:str 3600\nSET {p}:nottl x"),
+    )
+    .await;
     run(&*s, &format!("HSET {p}:h b 2 a 1 c 3\nRPUSH {p}:l x y z w\nSADD {p}:s q p r\nZADD {p}:z 2 two 1 one 3 three")).await;
     run(&*s, &format!("XADD {p}:x 1-1 f v g w\nXADD {p}:x 2-1 f v2")).await;
 
-    let str_page = s.page(&rel(&format!("{p}:str"), "string"), 100, 0, "", None).await.unwrap();
+    let str_page = s
+        .page(&rel(&format!("{p}:str"), "string"), 100, 0, "", None)
+        .await
+        .unwrap();
     assert_eq!(str_page.rows, vec![vec![Some("hello world".to_string())]]);
     assert_eq!(str_page.keys.as_ref().unwrap().columns, ["key"]);
-    assert!(str_page.note.as_deref().unwrap().starts_with("string · TTL "), "{:?}", str_page.note);
-    let nottl = s.page(&rel(&format!("{p}:nottl"), "string"), 100, 0, "", None).await.unwrap();
+    assert!(
+        str_page
+            .note
+            .as_deref()
+            .unwrap()
+            .starts_with("string · TTL "),
+        "{:?}",
+        str_page.note
+    );
+    let nottl = s
+        .page(&rel(&format!("{p}:nottl"), "string"), 100, 0, "", None)
+        .await
+        .unwrap();
     assert_eq!(nottl.note.as_deref(), Some("string · no expiry"));
 
-    let hash = s.page(&rel(&format!("{p}:h"), "hash"), 100, 0, "", None).await.unwrap();
-    assert_eq!(hash.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["field", "value"]);
+    let hash = s
+        .page(&rel(&format!("{p}:h"), "hash"), 100, 0, "", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        hash.columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        ["field", "value"]
+    );
     assert_eq!(texts(&hash.rows, 0), ["a", "b", "c"]);
-    assert_eq!(hash.keys.as_ref().unwrap().values[1], vec![Some("b".to_string())]);
-    let hash2 = s.page(&rel(&format!("{p}:h"), "hash"), 2, 1, "", None).await.unwrap();
+    assert_eq!(
+        hash.keys.as_ref().unwrap().values[1],
+        vec![Some("b".to_string())]
+    );
+    let hash2 = s
+        .page(&rel(&format!("{p}:h"), "hash"), 2, 1, "", None)
+        .await
+        .unwrap();
     assert_eq!(texts(&hash2.rows, 0), ["b", "c"]);
 
-    let list = s.page(&rel(&format!("{p}:l"), "list"), 2, 1, "", None).await.unwrap();
+    let list = s
+        .page(&rel(&format!("{p}:l"), "list"), 2, 1, "", None)
+        .await
+        .unwrap();
     assert_eq!(list.columns[0].type_name, "integer");
     assert_eq!(texts(&list.rows, 0), ["1", "2"]);
     assert_eq!(texts(&list.rows, 1), ["y", "z"]);
-    assert_eq!(list.keys.as_ref().unwrap().values[0], vec![Some("1".to_string())]);
+    assert_eq!(
+        list.keys.as_ref().unwrap().values[0],
+        vec![Some("1".to_string())]
+    );
 
-    let set = s.page(&rel(&format!("{p}:s"), "set"), 100, 0, "", None).await.unwrap();
+    let set = s
+        .page(&rel(&format!("{p}:s"), "set"), 100, 0, "", None)
+        .await
+        .unwrap();
     assert_eq!(texts(&set.rows, 0), ["p", "q", "r"]);
 
-    let zset = s.page(&rel(&format!("{p}:z"), "zset"), 100, 0, "", None).await.unwrap();
+    let zset = s
+        .page(&rel(&format!("{p}:z"), "zset"), 100, 0, "", None)
+        .await
+        .unwrap();
     assert_eq!(zset.columns[1].type_name, "double");
     assert_eq!(texts(&zset.rows, 0), ["one", "two", "three"]);
     assert_eq!(texts(&zset.rows, 1), ["1", "2", "3"]);
 
-    let stream = s.page(&rel(&format!("{p}:x"), "stream"), 100, 0, "", None).await.unwrap();
-    assert_eq!(stream.rows[0], vec![Some("1-1".to_string()), Some("f=v, g=w".to_string())]);
+    let stream = s
+        .page(&rel(&format!("{p}:x"), "stream"), 100, 0, "", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        stream.rows[0],
+        vec![Some("1-1".to_string()), Some("f=v, g=w".to_string())]
+    );
     assert!(stream.keys.is_none());
-    let stream2 = s.page(&rel(&format!("{p}:x"), "stream"), 1, 1, "", None).await.unwrap();
+    let stream2 = s
+        .page(&rel(&format!("{p}:x"), "stream"), 1, 1, "", None)
+        .await
+        .unwrap();
     assert_eq!(texts(&stream2.rows, 0), ["2-1"]);
 
-    let gone = s.page(&rel(&format!("{p}:missing"), "string"), 10, 0, "", None).await.unwrap_err();
+    let gone = s
+        .page(&rel(&format!("{p}:missing"), "string"), 10, 0, "", None)
+        .await
+        .unwrap_err();
     assert!(gone.message().contains("no longer exists"));
     clean(&*s, p).await;
 }
@@ -146,7 +245,11 @@ async fn searches_sorts_and_counts() {
     let Some(s) = open().await else { return };
     let p = "dbl_search";
     clean(&*s, p).await;
-    run(&*s, &format!("HSET {p}:h apple 10 Banana 9 cherry Red2 date 100")).await;
+    run(
+        &*s,
+        &format!("HSET {p}:h apple 10 Banana 9 cherry Red2 date 100"),
+    )
+    .await;
     run(&*s, &format!("RPUSH {p}:l one Two three")).await;
     let h = rel(&format!("{p}:h"), "hash");
     let l = rel(&format!("{p}:l"), "list");
@@ -155,16 +258,30 @@ async fn searches_sorts_and_counts() {
     assert_eq!(texts(&hit.rows, 0), ["Banana"]);
     let in_value = s.page(&h, 100, 0, "red", None).await.unwrap();
     assert_eq!(texts(&in_value.rows, 0), ["cherry"]);
-    assert!(s.page(&h, 100, 0, "zzz", None).await.unwrap().rows.is_empty());
+    assert!(s
+        .page(&h, 100, 0, "zzz", None)
+        .await
+        .unwrap()
+        .rows
+        .is_empty());
 
-    let by_value = ColumnSort { column: "value".into(), ascending: true };
+    let by_value = ColumnSort {
+        column: "value".into(),
+        ascending: true,
+    };
     let sorted = s.page(&h, 100, 0, "", Some(&by_value)).await.unwrap();
     assert_eq!(texts(&sorted.rows, 1), ["9", "10", "100", "Red2"]);
-    let desc = ColumnSort { column: "value".into(), ascending: false };
+    let desc = ColumnSort {
+        column: "value".into(),
+        ascending: false,
+    };
     let sorted = s.page(&h, 2, 0, "", Some(&desc)).await.unwrap();
     assert_eq!(texts(&sorted.rows, 1), ["Red2", "100"]);
     // keys follow the filtered rows
-    assert_eq!(sorted.keys.unwrap().values[0], vec![Some("cherry".to_string())]);
+    assert_eq!(
+        sorted.keys.unwrap().values[0],
+        vec![Some("cherry".to_string())]
+    );
     let paged = s.page(&h, 2, 2, "", Some(&by_value)).await.unwrap();
     assert_eq!(texts(&paged.rows, 1), ["100", "Red2"]);
 
@@ -172,12 +289,35 @@ async fn searches_sorts_and_counts() {
     assert_eq!(s.count(&h, "an").await.unwrap(), Some(1));
     assert_eq!(s.count(&l, "").await.unwrap(), Some(3));
     assert_eq!(s.count(&l, "T").await.unwrap(), Some(2));
-    run(&*s, &format!("SET {p}:str v\nSADD {p}:s a b\nZADD {p}:z 1 a\nXADD {p}:x * f v")).await;
-    assert_eq!(s.count(&rel(&format!("{p}:str"), "string"), "").await.unwrap(), Some(1));
-    assert_eq!(s.count(&rel(&format!("{p}:s"), "set"), "").await.unwrap(), Some(2));
-    assert_eq!(s.count(&rel(&format!("{p}:z"), "zset"), "").await.unwrap(), Some(1));
-    assert_eq!(s.count(&rel(&format!("{p}:x"), "stream"), "").await.unwrap(), Some(1));
-    assert_eq!(s.count(&rel(&format!("{p}:nokey"), "?"), "").await.unwrap(), None);
+    run(
+        &*s,
+        &format!("SET {p}:str v\nSADD {p}:s a b\nZADD {p}:z 1 a\nXADD {p}:x * f v"),
+    )
+    .await;
+    assert_eq!(
+        s.count(&rel(&format!("{p}:str"), "string"), "")
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        s.count(&rel(&format!("{p}:s"), "set"), "").await.unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        s.count(&rel(&format!("{p}:z"), "zset"), "").await.unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        s.count(&rel(&format!("{p}:x"), "stream"), "")
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    assert_eq!(
+        s.count(&rel(&format!("{p}:nokey"), "?"), "").await.unwrap(),
+        None
+    );
     clean(&*s, p).await;
 }
 
@@ -191,52 +331,113 @@ async fn edits_one_row() {
     // string: value changes, TTL stays; NULL is refused
     let st = rel(&format!("{p}:str"), "string");
     s.page(&st, 10, 0, "", None).await.unwrap();
-    s.update(&st, &key(&["key"], &[&st.name]), &[cell("value", Some("new"))]).await.unwrap();
+    s.update(
+        &st,
+        &key(&["key"], &[&st.name]),
+        &[cell("value", Some("new"))],
+    )
+    .await
+    .unwrap();
     let after = s.page(&st, 10, 0, "", None).await.unwrap();
     assert_eq!(after.rows[0][0].as_deref(), Some("new"));
     assert!(after.note.unwrap().contains("TTL"));
-    let e = s.update(&st, &key(&["key"], &[&st.name]), &[cell("value", None)]).await.unwrap_err();
+    let e = s
+        .update(&st, &key(&["key"], &[&st.name]), &[cell("value", None)])
+        .await
+        .unwrap_err();
     assert!(e.message().contains("no NULL"));
-    let e = s.update(&st, &key(&["key"], &[&st.name]), &[cell("other", Some("x"))]).await.unwrap_err();
+    let e = s
+        .update(
+            &st,
+            &key(&["key"], &[&st.name]),
+            &[cell("other", Some("x"))],
+        )
+        .await
+        .unwrap_err();
     assert!(e.message().contains("can't be changed"));
-    assert!(s.update(&st, &key(&["key"], &[&st.name]), &[]).await.unwrap().affected == 0);
+    assert!(
+        s.update(&st, &key(&["key"], &[&st.name]), &[])
+            .await
+            .unwrap()
+            .affected
+            == 0
+    );
 
     // hash: value, rename, clash
     let h = rel(&format!("{p}:h"), "hash");
     s.page(&h, 10, 0, "", None).await.unwrap();
-    let o = s.update(&h, &key(&["field"], &["f1"]), &[cell("value", Some("V1"))]).await.unwrap();
+    let o = s
+        .update(&h, &key(&["field"], &["f1"]), &[cell("value", Some("V1"))])
+        .await
+        .unwrap();
     assert_eq!((o.command.as_str(), o.affected), ("HSET", 1));
-    s.update(&h, &key(&["field"], &["f1"]), &[cell("field", Some("g1"))]).await.unwrap();
+    s.update(&h, &key(&["field"], &["f1"]), &[cell("field", Some("g1"))])
+        .await
+        .unwrap();
     let page = s.page(&h, 10, 0, "", None).await.unwrap();
     assert_eq!(texts(&page.rows, 0), ["f2", "g1"]);
     assert_eq!(texts(&page.rows, 1), ["v2", "V1"]);
-    let e = s.update(&h, &key(&["field"], &["f2"]), &[cell("field", Some("g1"))]).await.unwrap_err();
+    let e = s
+        .update(&h, &key(&["field"], &["f2"]), &[cell("field", Some("g1"))])
+        .await
+        .unwrap_err();
     assert!(e.message().contains("already there"));
-    let e = s.update(&h, &key(&["field"], &["gone"]), &[cell("value", Some("x"))]).await.unwrap_err();
+    let e = s
+        .update(&h, &key(&["field"], &["gone"]), &[cell("value", Some("x"))])
+        .await
+        .unwrap_err();
     assert!(e.message().contains("changed or was deleted"));
 
     // list: by index, checked against what was shown
     let l = rel(&format!("{p}:l"), "list");
     s.page(&l, 10, 0, "", None).await.unwrap();
-    s.update(&l, &key(&["index"], &["1"]), &[cell("value", Some("B"))]).await.unwrap();
-    assert_eq!(texts(&s.page(&l, 10, 0, "", None).await.unwrap().rows, 1), ["a", "B", "c"]);
+    s.update(&l, &key(&["index"], &["1"]), &[cell("value", Some("B"))])
+        .await
+        .unwrap();
+    assert_eq!(
+        texts(&s.page(&l, 10, 0, "", None).await.unwrap().rows, 1),
+        ["a", "B", "c"]
+    );
     run(&*s, &format!("LSET {p}:l 2 changed")).await;
-    let e = s.update(&l, &key(&["index"], &["2"]), &[cell("value", Some("x"))]).await.unwrap_err();
+    let e = s
+        .update(&l, &key(&["index"], &["2"]), &[cell("value", Some("x"))])
+        .await
+        .unwrap_err();
     assert!(e.message().contains("changed or was deleted"), "{e}");
 
     // set: rename member
     let set = rel(&format!("{p}:s"), "set");
     s.page(&set, 10, 0, "", None).await.unwrap();
-    s.update(&set, &key(&["member"], &["m1"]), &[cell("member", Some("m3"))]).await.unwrap();
-    assert_eq!(texts(&s.page(&set, 10, 0, "", None).await.unwrap().rows, 0), ["m2", "m3"]);
-    let e = s.update(&set, &key(&["member"], &["m2"]), &[cell("member", Some("m3"))]).await.unwrap_err();
+    s.update(
+        &set,
+        &key(&["member"], &["m1"]),
+        &[cell("member", Some("m3"))],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        texts(&s.page(&set, 10, 0, "", None).await.unwrap().rows, 0),
+        ["m2", "m3"]
+    );
+    let e = s
+        .update(
+            &set,
+            &key(&["member"], &["m2"]),
+            &[cell("member", Some("m3"))],
+        )
+        .await
+        .unwrap_err();
     assert!(e.message().contains("already there"));
 
     // zset: score, rename keeping the score
     let z = rel(&format!("{p}:z"), "zset");
     s.page(&z, 10, 0, "", None).await.unwrap();
-    s.update(&z, &key(&["member"], &["a"]), &[cell("score", Some("5"))]).await.unwrap();
-    s.update(&z, &key(&["member"], &["b"]), &[cell("member", Some("bb"))]).await.unwrap();
+    s.update(&z, &key(&["member"], &["a"]), &[cell("score", Some("5"))])
+        .await
+        .unwrap();
+    s.update(&z, &key(&["member"], &["b"]), &[cell("member", Some("bb"))])
+        .await
+        .unwrap();
     let page = s.page(&z, 10, 0, "", None).await.unwrap();
     assert_eq!(texts(&page.rows, 0), ["bb", "a"]);
     assert_eq!(texts(&page.rows, 1), ["2", "5"]);
@@ -254,41 +455,87 @@ async fn inserts_and_deletes_rows() {
     let set = rel(&format!("{p}:s"), "set");
     let z = rel(&format!("{p}:z"), "zset");
 
-    s.insert(&h, &[cell("field", Some("g")), cell("value", Some("w"))]).await.unwrap();
-    let e = s.insert(&h, &[cell("field", Some("g")), cell("value", Some("w"))]).await.unwrap_err();
+    s.insert(&h, &[cell("field", Some("g")), cell("value", Some("w"))])
+        .await
+        .unwrap();
+    let e = s
+        .insert(&h, &[cell("field", Some("g")), cell("value", Some("w"))])
+        .await
+        .unwrap_err();
     assert!(e.message().contains("already there"));
-    assert!(s.insert(&h, &[cell("value", Some("w"))]).await.unwrap_err().message().contains("Enter a field"));
+    assert!(s
+        .insert(&h, &[cell("value", Some("w"))])
+        .await
+        .unwrap_err()
+        .message()
+        .contains("Enter a field"));
     s.insert(&l, &[cell("value", Some("d"))]).await.unwrap();
     s.insert(&set, &[cell("member", Some("n"))]).await.unwrap();
     assert!(s.insert(&set, &[cell("member", Some("n"))]).await.is_err());
     s.insert(&z, &[cell("member", Some("b"))]).await.unwrap();
-    s.insert(&z, &[cell("member", Some("c")), cell("score", Some("7"))]).await.unwrap();
-    assert!(s.insert(&rel(&format!("{p}:str"), "string"), &[cell("value", Some("x"))]).await.unwrap_err().message().contains("holds one value"));
-    assert!(s.insert(&rel(&format!("{p}:x"), "stream"), &[]).await.unwrap_err().message().contains("command panel"));
-    assert!(s.insert(&rel(&format!("{p}:none"), "hash"), &[]).await.is_err());
+    s.insert(&z, &[cell("member", Some("c")), cell("score", Some("7"))])
+        .await
+        .unwrap();
+    assert!(s
+        .insert(
+            &rel(&format!("{p}:str"), "string"),
+            &[cell("value", Some("x"))]
+        )
+        .await
+        .unwrap_err()
+        .message()
+        .contains("holds one value"));
+    assert!(s
+        .insert(&rel(&format!("{p}:x"), "stream"), &[])
+        .await
+        .unwrap_err()
+        .message()
+        .contains("command panel"));
+    assert!(s
+        .insert(&rel(&format!("{p}:none"), "hash"), &[])
+        .await
+        .is_err());
 
-    assert_eq!(texts(&s.page(&h, 10, 0, "", None).await.unwrap().rows, 0), ["f", "g"]);
-    assert_eq!(texts(&s.page(&l, 10, 0, "", None).await.unwrap().rows, 1), ["a", "b", "c", "d"]);
+    assert_eq!(
+        texts(&s.page(&h, 10, 0, "", None).await.unwrap().rows, 0),
+        ["f", "g"]
+    );
+    assert_eq!(
+        texts(&s.page(&l, 10, 0, "", None).await.unwrap().rows, 1),
+        ["a", "b", "c", "d"]
+    );
     let zp = s.page(&z, 10, 0, "", None).await.unwrap();
     assert_eq!(texts(&zp.rows, 0), ["b", "a", "c"]);
     assert_eq!(texts(&zp.rows, 1), ["0", "1", "7"]);
 
     // deletes need the page that showed the row
     s.delete(&h, &key(&["field"], &["g"])).await.unwrap();
-    assert_eq!(texts(&s.page(&h, 10, 0, "", None).await.unwrap().rows, 0), ["f"]);
+    assert_eq!(
+        texts(&s.page(&h, 10, 0, "", None).await.unwrap().rows, 0),
+        ["f"]
+    );
     let e = s.delete(&h, &key(&["field"], &["g"])).await.unwrap_err();
     assert!(e.message().contains("changed or was deleted"));
     s.delete(&set, &key(&["member"], &["n"])).await.unwrap();
     s.delete(&z, &key(&["member"], &["a"])).await.unwrap();
     s.page(&l, 10, 0, "", None).await.unwrap();
     s.delete(&l, &key(&["index"], &["1"])).await.unwrap();
-    assert_eq!(texts(&s.page(&l, 10, 0, "", None).await.unwrap().rows, 1), ["a", "c", "d"]);
+    assert_eq!(
+        texts(&s.page(&l, 10, 0, "", None).await.unwrap().rows, 1),
+        ["a", "c", "d"]
+    );
     // the list moved under us: the shown value no longer matches
     run(&*s, &format!("LSET {p}:l 0 other")).await;
     let e = s.delete(&l, &key(&["index"], &["0"])).await.unwrap_err();
     assert!(e.message().contains("changed or was deleted"));
-    assert_eq!(texts(&s.page(&l, 10, 0, "", None).await.unwrap().rows, 1), ["other", "c", "d"]);
-    let e = s.delete(&rel(&format!("{p}:str"), "string"), &key(&["key"], &["x"])).await.unwrap_err();
+    assert_eq!(
+        texts(&s.page(&l, 10, 0, "", None).await.unwrap().rows, 1),
+        ["other", "c", "d"]
+    );
+    let e = s
+        .delete(&rel(&format!("{p}:str"), "string"), &key(&["key"], &["x"]))
+        .await
+        .unwrap_err();
     assert!(e.message().contains("DEL"));
     clean(&*s, p).await;
 }
@@ -298,11 +545,18 @@ async fn refuses_to_edit_bytes_that_are_not_text() {
     let Some(s) = open().await else { return };
     let p = "dbl_bin";
     clean(&*s, p).await;
-    run(&*s, &format!("HSET {p}:h f \"\\xff\\xfe\"\nSET {p}:s \"\\xff\"")).await;
+    run(
+        &*s,
+        &format!("HSET {p}:h f \"\\xff\\xfe\"\nSET {p}:s \"\\xff\""),
+    )
+    .await;
     let h = rel(&format!("{p}:h"), "hash");
     let page = s.page(&h, 10, 0, "", None).await.unwrap();
     assert_eq!(page.rows[0][1].as_deref(), Some("0xFFFE"));
-    let e = s.update(&h, &key(&["field"], &["f"]), &[cell("value", Some("x"))]).await.unwrap_err();
+    let e = s
+        .update(&h, &key(&["field"], &["f"]), &[cell("value", Some("x"))])
+        .await
+        .unwrap_err();
     assert!(e.message().contains("aren't text"), "{e}");
     assert!(s.delete(&h, &key(&["field"], &["f"])).await.is_err());
     clean(&*s, p).await;
@@ -319,19 +573,47 @@ async fn runs_commands_as_typed() {
         .unwrap();
     assert_eq!(r.results.len(), 6);
     assert_eq!(r.results[1].rows[0][0].as_deref(), Some("a b\n"));
-    assert_eq!(r.results[3].columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["field", "value"]);
+    assert_eq!(
+        r.results[3]
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        ["field", "value"]
+    );
     assert_eq!(r.results[3].command, "HGETALL 2");
     assert_eq!(texts(&r.results[5].rows, 0), ["x", "y"]);
     assert!(r.duration_ms >= 0.0);
     // errors stop the run with the server's text
     let e = s.execute("GET a b c").await.unwrap_err();
-    assert!(e.message().to_lowercase().contains("wrong number of arguments"), "{e}");
+    assert!(
+        e.message()
+            .to_lowercase()
+            .contains("wrong number of arguments"),
+        "{e}"
+    );
     let e = s.execute("NOSUCHCOMMAND").await.unwrap_err();
-    assert!(e.message().to_lowercase().contains("unknown command"), "{e}");
-    assert!(s.execute("SET 'oops").await.unwrap_err().message().contains("Unbalanced"));
-    assert!(s.execute("MONITOR").await.unwrap_err().message().contains("never returns"));
+    assert!(
+        e.message().to_lowercase().contains("unknown command"),
+        "{e}"
+    );
+    assert!(s
+        .execute("SET 'oops")
+        .await
+        .unwrap_err()
+        .message()
+        .contains("Unbalanced"));
+    assert!(s
+        .execute("MONITOR")
+        .await
+        .unwrap_err()
+        .message()
+        .contains("never returns"));
     // the connection still works afterwards
-    assert_eq!(s.execute("PING").await.unwrap().results[0].rows[0][0].as_deref(), Some("PONG"));
+    assert_eq!(
+        s.execute("PING").await.unwrap().results[0].rows[0][0].as_deref(),
+        Some("PONG")
+    );
     clean(&*s, p).await;
 }
 
@@ -341,11 +623,26 @@ async fn select_changes_the_database_for_later_calls() {
     let p = "dbl_sel";
     clean(&*s, p).await;
     run(&*s, &format!("SET {p}:a 1")).await;
-    assert!(s.relations().await.unwrap().iter().any(|r| r.name == format!("{p}:a")));
+    assert!(s
+        .relations()
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.name == format!("{p}:a")));
     run(&*s, "SELECT 14").await;
-    assert!(s.relations().await.unwrap().iter().all(|r| r.name != format!("{p}:a")));
+    assert!(s
+        .relations()
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| r.name != format!("{p}:a")));
     run(&*s, "SELECT 15").await;
-    assert!(s.relations().await.unwrap().iter().any(|r| r.name == format!("{p}:a")));
+    assert!(s
+        .relations()
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.name == format!("{p}:a")));
     clean(&*s, p).await;
 }
 
@@ -357,12 +654,23 @@ async fn read_only_allows_only_reads() {
     run(&*s, &format!("SET {p}:k v")).await;
     let ok = s.read_only(&format!("GET {p}:k")).await.unwrap();
     assert_eq!(ok.results[0].rows[0][0].as_deref(), Some("v"));
-    let e = s.read_only(&format!("SET {p}:k changed")).await.unwrap_err();
+    let e = s
+        .read_only(&format!("SET {p}:k changed"))
+        .await
+        .unwrap_err();
     assert!(e.message().contains("SET can change data"));
     assert!(s.read_only("FLUSHDB").await.is_err());
     assert!(s.read_only("EVAL \"return 1\" 0").await.is_err());
-    assert!(s.read_only("PING\nPING").await.unwrap_err().message().contains("one command"));
-    assert_eq!(s.execute(&format!("GET {p}:k")).await.unwrap().results[0].rows[0][0].as_deref(), Some("v"));
+    assert!(s
+        .read_only("PING\nPING")
+        .await
+        .unwrap_err()
+        .message()
+        .contains("one command"));
+    assert_eq!(
+        s.execute(&format!("GET {p}:k")).await.unwrap().results[0].rows[0][0].as_deref(),
+        Some("v")
+    );
     clean(&*s, p).await;
 }
 
@@ -373,10 +681,18 @@ async fn rehearse_refuses_and_atomic_is_not_atomic() {
     clean(&*s, p).await;
     let e = s.rehearse(&format!("SET {p}:k 1")).await.unwrap_err();
     assert!(e.message().contains("can't try a statement and undo it"));
-    let e = s.execute_atomically(&format!("SET {p}:k 1")).await.unwrap_err();
+    let e = s
+        .execute_atomically(&format!("SET {p}:k 1"))
+        .await
+        .unwrap_err();
     assert!(matches!(e, DbError::NotAtomic(_)), "{e:?}");
     // nothing ran
-    assert!(s.relations().await.unwrap().iter().all(|r| r.name != format!("{p}:k")));
+    assert!(s
+        .relations()
+        .await
+        .unwrap()
+        .iter()
+        .all(|r| r.name != format!("{p}:k")));
     assert!(s.schema_graph().await.unwrap().tables.is_empty());
     assert_eq!(s.quote("a b"), "a b");
     assert_eq!(s.qualified(&rel("u:1", "string")), "u:1");
@@ -397,12 +713,18 @@ async fn cancel_stops_a_running_command_and_the_session_recovers() {
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
     // cancel with nothing running does nothing; the next call reconnects
     s.cancel();
-    assert_eq!(s.execute("PING").await.unwrap().results[0].rows[0][0].as_deref(), Some("PONG"));
+    assert_eq!(
+        s.execute("PING").await.unwrap().results[0].rows[0][0].as_deref(),
+        Some("PONG")
+    );
 }
 
 #[tokio::test]
 async fn closes_and_reconnects_lazily() {
     let Some(s) = open().await else { return };
     s.close().await;
-    assert_eq!(s.execute("PING").await.unwrap().results[0].rows[0][0].as_deref(), Some("PONG"));
+    assert_eq!(
+        s.execute("PING").await.unwrap().results[0].rows[0][0].as_deref(),
+        Some("PONG")
+    );
 }

@@ -183,6 +183,8 @@ export interface ConnectionFolder {
 export interface StoreSnapshot {
   connections: SavedConnection[];
   folders: ConnectionFolder[];
+  /** No system keyring: the sealing key is in a file beside the sealed URLs. */
+  keyInFile?: boolean;
 }
 
 export interface ConnectionDraft {
@@ -228,8 +230,9 @@ export const api = {
   maskUrl: (text: string) => invoke<string>("mask_url", { text }),
 
   // Sessions
-  /** By saved id, or by a pasted url (with optional ssh). */
-  connect: (target: { savedId: string } | { url: string; ssh?: SshConfig | null }) =>
+  /** By saved id, or by a pasted url (with optional ssh). Both: tries an edit of
+   *  that saved connection (the url may still show the mask) without saving it. */
+  connect: (target: { savedId: string } | { url: string; ssh?: SshConfig | null } | { savedId: string; url: string; ssh: SshConfig | null }) =>
     invoke<ConnectInfo>("connect", {
       url: "url" in target ? target.url : null,
       savedId: "savedId" in target ? target.savedId : null,

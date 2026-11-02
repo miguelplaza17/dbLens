@@ -19,7 +19,13 @@ pub enum Engine {
 }
 
 impl Engine {
-    pub const ALL: [Engine; 5] = [Engine::Postgres, Engine::Mysql, Engine::Sqlite, Engine::Redis, Engine::Mongodb];
+    pub const ALL: [Engine; 5] = [
+        Engine::Postgres,
+        Engine::Mysql,
+        Engine::Sqlite,
+        Engine::Redis,
+        Engine::Mongodb,
+    ];
 
     /// The name people know it by: "PostgreSQL".
     pub fn name(self) -> &'static str {
@@ -70,8 +76,14 @@ impl Engine {
         let lower = value.to_lowercase();
         let rules = RULES.get_or_init(|| {
             [
-                (r"^(jdbc:)?postgres(ql)?(\+[a-z0-9_]+)?://", Engine::Postgres),
-                (r"^(jdbc:)?(mysql|mariadb|mysqlx)(\+[a-z0-9_]+)?://", Engine::Mysql),
+                (
+                    r"^(jdbc:)?postgres(ql)?(\+[a-z0-9_]+)?://",
+                    Engine::Postgres,
+                ),
+                (
+                    r"^(jdbc:)?(mysql|mariadb|mysqlx)(\+[a-z0-9_]+)?://",
+                    Engine::Mysql,
+                ),
                 (r"^(sqlite3?|file):", Engine::Sqlite),
                 (r"^(rediss?|valkeys?)(\+[a-z]+)?://", Engine::Redis),
                 (r"^mongodb(\+srv)?://", Engine::Mongodb),
@@ -83,9 +95,13 @@ impl Engine {
         if let Some((_, engine)) = rules.iter().find(|(re, _)| re.is_match(&lower)) {
             return Some(*engine);
         }
-        let file = FILE.get_or_init(|| Regex::new(r"\.(db|db3|sqlite|sqlite3)$").expect("file rule"));
+        let file =
+            FILE.get_or_init(|| Regex::new(r"\.(db|db3|sqlite|sqlite3)$").expect("file rule"));
         if file.is_match(&lower)
-            && (lower.starts_with('/') || lower.starts_with('~') || lower.starts_with('.') || is_windows_absolute(&lower))
+            && (lower.starts_with('/')
+                || lower.starts_with('~')
+                || lower.starts_with('.')
+                || is_windows_absolute(&lower))
         {
             return Some(Engine::Sqlite);
         }
@@ -110,7 +126,10 @@ mod tests {
         let cases = [
             ("postgres://u:p@db/x", Engine::Postgres),
             ("jdbc:postgresql://db:5432/x?user=u", Engine::Postgres),
-            ("DATABASE_URL=\"postgresql+psycopg2://u@db/x\"", Engine::Postgres),
+            (
+                "DATABASE_URL=\"postgresql+psycopg2://u@db/x\"",
+                Engine::Postgres,
+            ),
             ("host=db dbname=x user=u", Engine::Postgres),
             ("mysql://root:pw@127.0.0.1:3306/shop", Engine::Mysql),
             ("mariadb://u@db/x", Engine::Mysql),
@@ -125,8 +144,14 @@ mod tests {
             ("rediss://default:pw@redis.example.com:6380", Engine::Redis),
             ("REDIS_URL=redis://localhost", Engine::Redis),
             ("valkey://localhost:6379", Engine::Redis),
-            ("mongodb://u:p@mongo:27017/app?authSource=admin", Engine::Mongodb),
-            ("mongodb+srv://u:p@cluster0.abcd.mongodb.net/app", Engine::Mongodb),
+            (
+                "mongodb://u:p@mongo:27017/app?authSource=admin",
+                Engine::Mongodb,
+            ),
+            (
+                "mongodb+srv://u:p@cluster0.abcd.mongodb.net/app",
+                Engine::Mongodb,
+            ),
         ];
         for (text, engine) in cases {
             assert_eq!(Engine::detect(text), Some(engine), "{text}");
@@ -142,7 +167,10 @@ mod tests {
 
     #[test]
     fn serializes_lowercase() {
-        assert_eq!(serde_json::to_string(&Engine::Mongodb).unwrap(), "\"mongodb\"");
+        assert_eq!(
+            serde_json::to_string(&Engine::Mongodb).unwrap(),
+            "\"mongodb\""
+        );
         assert_eq!(Engine::Postgres.default_port(), Some(5432));
         assert_eq!(Engine::Sqlite.default_port(), None);
     }

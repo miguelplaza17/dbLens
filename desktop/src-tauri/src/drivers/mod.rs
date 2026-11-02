@@ -8,8 +8,6 @@
 //! `url` is already cleaned (`url::clean`). `local_port` is Some when the
 //! connection goes through an SSH tunnel: connect to 127.0.0.1:<local_port>
 //! instead of the URL's host and port (keep the URL's host for TLS names).
-//! The stubs parse the URL and return a session whose methods all fail with
-//! `DbError::Unsupported`; each driver's owner replaces its file.
 
 pub mod mongo;
 pub mod mongo_shell;
@@ -17,10 +15,3 @@ pub mod mysql;
 pub mod postgres;
 pub mod redis;
 pub mod sqlite;
-
-use crate::session::DbError;
-
-/// What a stub method returns until its driver is written.
-pub(crate) fn not_yet() -> DbError {
-    DbError::Unsupported("not yet".into())
-}

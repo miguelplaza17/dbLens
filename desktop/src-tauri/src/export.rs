@@ -8,12 +8,24 @@ pub fn csv(result: &QueryResult) -> String {
     fn field(value: Option<&str>) -> String {
         match value {
             None => String::new(),
-            Some(v) if v.contains([',', '"', '\n', '\r']) => format!("\"{}\"", v.replace('"', "\"\"")),
+            Some(v) if v.contains([',', '"', '\n', '\r']) => {
+                format!("\"{}\"", v.replace('"', "\"\""))
+            }
             Some(v) => v.to_string(),
         }
     }
-    let mut lines = vec![result.columns.iter().map(|c| field(Some(&c.name))).collect::<Vec<_>>().join(",")];
-    lines.extend(result.rows.iter().map(|row| row.iter().map(|v| field(v.as_deref())).collect::<Vec<_>>().join(",")));
+    let mut lines = vec![result
+        .columns
+        .iter()
+        .map(|c| field(Some(&c.name)))
+        .collect::<Vec<_>>()
+        .join(",")];
+    lines.extend(result.rows.iter().map(|row| {
+        row.iter()
+            .map(|v| field(v.as_deref()))
+            .collect::<Vec<_>>()
+            .join(",")
+    }));
     lines.join("\r\n") + "\r\n"
 }
 
@@ -29,7 +41,15 @@ pub fn json(result: &QueryResult) -> String {
             let fields: Vec<String> = names
                 .iter()
                 .zip(row)
-                .map(|(name, value)| format!("{name}: {}", value.as_deref().map(string).unwrap_or_else(|| "null".into())))
+                .map(|(name, value)| {
+                    format!(
+                        "{name}: {}",
+                        value
+                            .as_deref()
+                            .map(string)
+                            .unwrap_or_else(|| "null".into())
+                    )
+                })
                 .collect();
             format!("  {{{}}}", fields.join(", "))
         })
@@ -49,7 +69,10 @@ mod tests {
     fn sample() -> QueryResult {
         QueryResult::rows(
             vec![Column::new("id", ""), Column::new("note", "")],
-            vec![vec![Some("1".into()), Some("a, \"b\"".into())], vec![Some("2".into()), None]],
+            vec![
+                vec![Some("1".into()), Some("a, \"b\"".into())],
+                vec![Some("2".into()), None],
+            ],
             "SELECT 2",
         )
     }

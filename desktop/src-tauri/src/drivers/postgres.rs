@@ -7,12 +7,12 @@
 //! transaction spans several calls; `cancel` never waits for it.
 
 use std::error::Error as StdError;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::{BufMut, BytesMut};
+use futures_util::TryStreamExt;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio::task::JoinHandle;
 use tokio_postgres::config::{ChannelBinding, SslMode as PgSslMode, TargetSessionAttrs};
@@ -24,8 +24,9 @@ use tokio_postgres_rustls::MakeRustlsConnect;
 use crate::connector::Summary;
 use crate::engine::Engine;
 use crate::session::{
-    like_pattern, CellValue, Column, ColumnSort, DatabaseSession, DbError, DbResult, EditOutcome, Execution,
-    QueryResult, Relation, RelationKind, RowKey, RowKeyKind, RowKeys, SchemaGraph, ROW_LIMIT,
+    like_pattern, Activity, CellValue, Column, ColumnSort, DatabaseSession, DbError, DbResult,
+    EditOutcome, Execution, QueryResult, Relation, RelationKind, RowKey, RowKeyKind, RowKeys,
+    SchemaGraph, ROW_LIMIT,
 };
 use crate::sql_script::{self, Dialect};
 use crate::url::{quote_ident, ConnectionUrl};
@@ -92,7 +93,12 @@ struct TlsSpec {
 /// The driver's settings from the URL, and the TLS choice. `local_port` aims the
 /// connection at an SSH tunnel while the URL's host stays the TLS server name.
 fn build_config(url: &ConnectionUrl, local_port: Option<u16>) -> DbResult<(Config, TlsSpec)> {
-    let setting = |key: &str| url.settings.get(key).map(String::as_str).filter(|v| !v.is_empty());
+    let setting = |key: &str| {
+        url.settings
+            .get(key)
+            .map(String::as_str)
+            .filter(|v| !v.is_empty())
+    };
     let mut config = Config::new();
 
     let user = setting("user")
@@ -102,7 +108,10 @@ fn build_config(url: &ConnectionUrl, local_port: Option<u16>) -> DbResult<(Confi
         .or_else(|| std::env::var("USERNAME").ok())
         .unwrap_or_else(|| "postgres".into());
     config.user(&user);
-    if let Some(password) = setting("password").map(String::from).or_else(|| std::env::var("PGPASSWORD").ok()) {
+    if let Some(password) = setting("password")
+        .map(String::from)
+        .or_else(|| std::env::var("PGPASSWORD").ok())
+    {
         config.password(password);
     }
     if let Some(dbname) = setting("dbname") {
@@ -117,11 +126,23 @@ fn build_config(url: &ConnectionUrl, local_port: Option<u16>) -> DbResult<(Confi
         Some(port) => {
             // The tunnel's end is on this computer; the name stays the URL's for TLS.
             let host = url.host();
-            let host = if host.starts_with('/') { "localhost".to_string() } else { host };
-            config.host(&host).hostaddr("127.0.0.1".parse().expect("loopback")).port(port);
+            let host = if host.starts_with('/') {
+                "localhost".to_string()
+            } else {
+                host
+            };
+            config
+                .host(&host)
+                .hostaddr("127.0.0.1".parse().expect("loopback"))
+                .port(port);
         }
         None => {
-            let hosts: Vec<&str> = url.hosts().split(',').map(str::trim).filter(|h| !h.is_empty()).collect();
+            let hosts: Vec<&str> = url
+                .hosts()
+                .split(',')
+                .map(str::trim)
+                .filter(|h| !h.is_empty())
+                .collect();
             if hosts.is_empty() {
                 if cfg!(unix) {
                     config.host("/var/run/postgresql").host("/tmp");
@@ -132,18 +153,23 @@ fn build_config(url: &ConnectionUrl, local_port: Option<u16>) -> DbResult<(Confi
             for host in hosts {
                 config.host(host);
             }
-            if let Some(hostaddr) = setting("hostaddr").and_then(|a| a.split(',').next()?.trim().parse().ok()) {
+            if let Some(hostaddr) =
+                setting("hostaddr").and_then(|a| a.split(',').next()?.trim().parse().ok())
+            {
                 config.hostaddr(hostaddr);
             }
-            let ports: Vec<u16> =
-                setting("port").map(|p| p.split(',').filter_map(|p| p.trim().parse().ok()).collect()).unwrap_or_default();
+            let ports: Vec<u16> = setting("port")
+                .map(|p| p.split(',').filter_map(|p| p.trim().parse().ok()).collect())
+                .unwrap_or_default();
             for port in ports {
                 config.port(port);
             }
         }
     }
 
-    let timeout = setting("connect_timeout").and_then(|t| t.parse::<u64>().ok()).unwrap_or(10);
+    let timeout = setting("connect_timeout")
+        .and_then(|t| t.parse::<u64>().ok())
+        .unwrap_or(10);
     if timeout > 0 {
         config.connect_timeout(Duration::from_secs(timeout.max(2)));
     }
@@ -173,7 +199,13 @@ fn build_config(url: &ConnectionUrl, local_port: Option<u16>) -> DbResult<(Confi
         _ => Ssl::Prefer,
     };
     config.ssl_mode(mode.pg());
-    Ok((config, TlsSpec { mode, root_cert: setting("sslrootcert").map(String::from) }))
+    Ok((
+        config,
+        TlsSpec {
+            mode,
+            root_cert: setting("sslrootcert").map(String::from),
+        },
+    ))
 }
 
 /// Accepts any certificate (`require`) or any that chains to a trusted root
@@ -193,10 +225,13 @@ impl rustls::client::danger::ServerCertVerifier for LenientVerifier {
         ocsp_response: &[u8],
         now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        let Some(chain) = &self.chain else { return Ok(rustls::client::danger::ServerCertVerified::assertion()) };
+        let Some(chain) = &self.chain else {
+            return Ok(rustls::client::danger::ServerCertVerified::assertion());
+        };
         match chain.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now) {
             Err(rustls::Error::InvalidCertificate(
-                rustls::CertificateError::NotValidForName | rustls::CertificateError::NotValidForNameContext { .. },
+                rustls::CertificateError::NotValidForName
+                | rustls::CertificateError::NotValidForNameContext { .. },
             )) => Ok(rustls::client::danger::ServerCertVerified::assertion()),
             other => other,
         }
@@ -208,7 +243,12 @@ impl rustls::client::danger::ServerCertVerifier for LenientVerifier {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn verify_tls13_signature(
@@ -217,11 +257,18 @@ impl rustls::client::danger::ServerCertVerifier for LenientVerifier {
         cert: &rustls::pki_types::CertificateDer<'_>,
         dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.provider.signature_verification_algorithms.supported_schemes()
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -231,14 +278,23 @@ fn root_store(spec: &TlsSpec) -> DbResult<rustls::RootCertStore> {
     let mut roots = rustls::RootCertStore::empty();
     match spec.root_cert.as_deref() {
         Some(path) if path != "system" => {
-            let bytes = std::fs::read(path)
-                .map_err(|e| DbError::msg(format!("could not read root certificate file \"{path}\": {e}")))?;
+            let bytes = std::fs::read(path).map_err(|e| {
+                DbError::msg(format!(
+                    "could not read root certificate file \"{path}\": {e}"
+                ))
+            })?;
             let certs = CertificateDer::pem_slice_iter(&bytes)
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| DbError::msg(format!("could not read root certificate file \"{path}\": {e}")))?;
+                .map_err(|e| {
+                    DbError::msg(format!(
+                        "could not read root certificate file \"{path}\": {e}"
+                    ))
+                })?;
             let (added, _) = roots.add_parsable_certificates(certs);
             if added == 0 {
-                return Err(DbError::msg(format!("no certificate found in root certificate file \"{path}\"")));
+                return Err(DbError::msg(format!(
+                    "no certificate found in root certificate file \"{path}\""
+                )));
             }
         }
         _ => roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
@@ -253,20 +309,31 @@ fn make_tls(spec: &TlsSpec) -> DbResult<MakeRustlsConnect> {
         .with_safe_default_protocol_versions()
         .map_err(|e| tls_error(&e))?;
     let config = match spec.mode {
-        Ssl::VerifyFull => builder.with_root_certificates(root_store(spec)?).with_no_client_auth(),
+        Ssl::VerifyFull => builder
+            .with_root_certificates(root_store(spec)?)
+            .with_no_client_auth(),
         Ssl::VerifyCa => {
-            let chain = rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(root_store(spec)?), provider.clone())
-                .build()
-                .map_err(|e| tls_error(&e))?;
+            let chain = rustls::client::WebPkiServerVerifier::builder_with_provider(
+                Arc::new(root_store(spec)?),
+                provider.clone(),
+            )
+            .build()
+            .map_err(|e| tls_error(&e))?;
             builder
                 .dangerous()
-                .with_custom_certificate_verifier(Arc::new(LenientVerifier { chain: Some(chain), provider }))
+                .with_custom_certificate_verifier(Arc::new(LenientVerifier {
+                    chain: Some(chain),
+                    provider,
+                }))
                 .with_no_client_auth()
         }
         // Disable never reaches the handshake; the rest take what the server shows.
         _ => builder
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(LenientVerifier { chain: None, provider }))
+            .with_custom_certificate_verifier(Arc::new(LenientVerifier {
+                chain: None,
+                provider,
+            }))
             .with_no_client_auth(),
     };
     Ok(MakeRustlsConnect::new(config))
@@ -277,12 +344,18 @@ pub async fn connect(url: &str, local_port: Option<u16>) -> DbResult<Box<dyn Dat
     let url = ConnectionUrl::new(url)?;
     let (config, spec) = build_config(&url, local_port)?;
     let tls = make_tls(&spec)?;
-    let (client, connection) = config.connect(tls.clone()).await.map_err(|e| DbError::Message(describe(&e)))?;
+    let (client, connection) = config
+        .connect(tls.clone())
+        .await
+        .map_err(|e| DbError::Message(describe(&e)))?;
     let task = tokio::spawn(async move {
         let _ = connection.await;
     });
 
-    let version = match client.simple_query("select current_setting('server_version_num')").await {
+    let version = match client
+        .simple_query("select current_setting('server_version_num')")
+        .await
+    {
         Ok(messages) => messages
             .iter()
             .find_map(|m| match m {
@@ -303,7 +376,7 @@ pub async fn connect(url: &str, local_port: Option<u16>) -> DbResult<Box<dyn Dat
         gate: Mutex::new(()),
         tls,
         runtime: tokio::runtime::Handle::current(),
-        cancel_requested: Arc::new(AtomicBool::new(false)),
+        activity: Arc::new(Activity::default()),
         connection: StdMutex::new(Some(task)),
         server_version: version,
     }))
@@ -344,7 +417,11 @@ fn describe(error: &tokio_postgres::Error) -> String {
 struct TextParam(Option<String>);
 
 impl ToSql for TextParam {
-    fn to_sql(&self, _ty: &Type, out: &mut BytesMut) -> Result<IsNull, Box<dyn StdError + Sync + Send>> {
+    fn to_sql(
+        &self,
+        _ty: &Type,
+        out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn StdError + Sync + Send>> {
         match &self.0 {
             Some(text) => {
                 out.put_slice(text.as_bytes());
@@ -406,8 +483,23 @@ fn command_tag(statement: &str, rows: u64, has_columns: bool) -> String {
         }
         "CREATE" | "ALTER" | "DROP" => {
             let words = sql_script::verb(statement, 8);
-            let noise = ["OR", "REPLACE", "TEMP", "TEMPORARY", "UNLOGGED", "UNIQUE", "GLOBAL", "LOCAL", "RECURSIVE", "CONCURRENTLY"];
-            let rest: Vec<&str> = words.split(' ').skip(1).filter(|w| !noise.contains(w)).collect();
+            let noise = [
+                "OR",
+                "REPLACE",
+                "TEMP",
+                "TEMPORARY",
+                "UNLOGGED",
+                "UNIQUE",
+                "GLOBAL",
+                "LOCAL",
+                "RECURSIVE",
+                "CONCURRENTLY",
+            ];
+            let rest: Vec<&str> = words
+                .split(' ')
+                .skip(1)
+                .filter(|w| !noise.contains(w))
+                .collect();
             match rest.as_slice() {
                 ["MATERIALIZED", "VIEW", ..] => format!("{first} MATERIALIZED VIEW"),
                 ["FOREIGN", "TABLE", ..] => format!("{first} FOREIGN TABLE"),
@@ -427,10 +519,14 @@ fn command_tag(statement: &str, rows: u64, has_columns: bool) -> String {
 /// `where` text for a row key, numbering parameters after `after` others.
 fn key_filter(key: &RowKey, after: usize) -> DbResult<(String, Vec<Option<String>>)> {
     if key.columns.is_empty() || key.columns.len() != key.values.len() {
-        return Err(DbError::msg("The row has no key to find it again. Reload the table."));
+        return Err(DbError::msg(
+            "The row has no key to find it again. Reload the table.",
+        ));
     }
     if key.kind == RowKeyKind::Rowid {
-        return Err(DbError::msg("A rowid does not identify rows in PostgreSQL."));
+        return Err(DbError::msg(
+            "A rowid does not identify rows in PostgreSQL.",
+        ));
     }
     let parts: Vec<String> = key
         .columns
@@ -478,23 +574,89 @@ pub struct PostgresSession {
     cancel_token: CancelToken,
     tls: MakeRustlsConnect,
     runtime: tokio::runtime::Handle,
-    /// Set by `cancel`, so a 57014 from our own cancel reads as cancelled and one
-    /// from a statement_timeout stays the server's message.
-    cancel_requested: Arc<AtomicBool>,
+    /// The running cancellable operation. `cancel` only reaches that one, and a
+    /// 57014 reads as cancelled only when it was asked for (one from a
+    /// statement_timeout stays the server's message).
+    activity: Arc<Activity>,
     connection: StdMutex<Option<JoinHandle<()>>>,
     server_version: String,
 }
 
+/// The session's turn for one cancellable operation; it ends when dropped.
+struct Turn<'a> {
+    _gate: MutexGuard<'a, ()>,
+    activity: &'a Activity,
+    id: u64,
+}
+
+impl Drop for Turn<'_> {
+    fn drop(&mut self) {
+        self.activity.finish(self.id);
+    }
+}
+
+/// Whether the connection is inside a transaction block (one the user opened in
+/// the SQL panel).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TxState {
+    Idle,
+    Open,
+    /// An error ended it; everything but ROLLBACK is refused.
+    Failed,
+}
+
+const TRANSACTION_OPEN: &str =
+    "A transaction is open in the SQL panel. Commit or roll it back first.";
+
 impl PostgresSession {
-    /// Waits for the session's turn and clears an old cancel request.
-    async fn turn(&self) -> MutexGuard<'_, ()> {
-        let guard = self.gate.lock().await;
-        self.cancel_requested.store(false, Ordering::SeqCst);
-        guard
+    /// Waits for the session's turn; `cancel` can stop what runs in it.
+    async fn turn(&self) -> Turn<'_> {
+        let gate = self.gate.lock().await;
+        let id = self.activity.start();
+        Turn {
+            _gate: gate,
+            activity: &self.activity,
+            id,
+        }
+    }
+
+    /// Waits for the session's turn for an edit, which `cancel` leaves alone so it
+    /// never lands between an edit's own statements.
+    async fn quiet_turn(&self) -> MutexGuard<'_, ()> {
+        self.gate.lock().await
+    }
+
+    /// Asks the server whether a transaction block is open: a savepoint is
+    /// refused outside one (25P01), and every statement inside a failed one (25P02).
+    async fn transaction_state(&self) -> DbResult<TxState> {
+        match self.client.batch_execute("savepoint dblens_probe").await {
+            Ok(()) => {
+                let _ = self
+                    .client
+                    .batch_execute("release savepoint dblens_probe")
+                    .await;
+                Ok(TxState::Open)
+            }
+            Err(e) if e.code() == Some(&SqlState::NO_ACTIVE_SQL_TRANSACTION) => Ok(TxState::Idle),
+            Err(e) if e.code() == Some(&SqlState::IN_FAILED_SQL_TRANSACTION) => Ok(TxState::Failed),
+            Err(e) => Err(self.fail(e)),
+        }
+    }
+
+    /// Refuses to start dbLens's own transaction inside the user's: its
+    /// rollback would undo the user's pending work too.
+    async fn require_no_transaction(&self) -> DbResult<()> {
+        match self.transaction_state().await? {
+            TxState::Idle => Ok(()),
+            TxState::Open => Err(DbError::msg(TRANSACTION_OPEN)),
+            TxState::Failed => Err(DbError::msg(
+                "The open transaction failed. Run ROLLBACK in the SQL panel first.",
+            )),
+        }
     }
 
     fn fail(&self, error: tokio_postgres::Error) -> DbError {
-        if error.code() == Some(&SqlState::QUERY_CANCELED) && self.cancel_requested.load(Ordering::SeqCst) {
+        if error.code() == Some(&SqlState::QUERY_CANCELED) && self.activity.current_cancelled() {
             DbError::Cancelled
         } else {
             DbError::Message(describe(&error))
@@ -503,7 +665,10 @@ impl PostgresSession {
 
     /// Statements that return nothing (begin, commit, rollback).
     async fn command(&self, sql: &str) -> DbResult<()> {
-        self.client.batch_execute(sql).await.map_err(|e| self.fail(e))
+        self.client
+            .batch_execute(sql)
+            .await
+            .map_err(|e| self.fail(e))
     }
 
     /// Ends a transaction we started; a failure here changes nothing for the caller.
@@ -513,29 +678,52 @@ impl PostgresSession {
 
     /// Runs the text as typed (one or more statements) and reads each result.
     /// `statements` is the text split, for the command tags.
+    /// The rows stream in and only the first `ROW_LIMIT` of each result are
+    /// kept, so a huge SELECT never sits in memory whole.
     async fn simple(&self, sql: &str, statements: &[String]) -> DbResult<Vec<QueryResult>> {
-        let messages = self.client.simple_query(sql).await.map_err(|e| self.fail(e))?;
+        let stream = self
+            .client
+            .simple_query_raw(sql)
+            .await
+            .map_err(|e| self.fail(e))?;
+        let mut stream = std::pin::pin!(stream);
         let mut results: Vec<QueryResult> = Vec::new();
         let mut columns: Option<Vec<Column>> = None;
         let mut rows: Vec<Vec<Option<String>>> = Vec::new();
         let mut seen: usize = 0;
-        for message in messages {
+        while let Some(message) = stream.try_next().await.map_err(|e| self.fail(e))? {
             match message {
                 SimpleQueryMessage::RowDescription(described) => {
-                    columns = Some(described.iter().map(|c| Column::new(c.name(), "")).collect());
+                    columns = Some(
+                        described
+                            .iter()
+                            .map(|c| Column::new(c.name(), ""))
+                            .collect(),
+                    );
                     rows.clear();
                     seen = 0;
                 }
                 SimpleQueryMessage::Row(row) => {
                     seen += 1;
                     if rows.len() < ROW_LIMIT {
-                        rows.push((0..row.len()).map(|i| row.get(i).map(String::from)).collect());
+                        rows.push(
+                            (0..row.len())
+                                .map(|i| row.get(i).map(String::from))
+                                .collect(),
+                        );
                     }
                 }
                 SimpleQueryMessage::CommandComplete(count) => {
-                    let statement = statements.get(results.len()).map(String::as_str).unwrap_or("");
+                    let statement = statements
+                        .get(results.len())
+                        .map(String::as_str)
+                        .unwrap_or("");
                     let has_columns = columns.is_some();
-                    let command = command_tag(statement, if has_columns { seen as u64 } else { count }, has_columns);
+                    let command = command_tag(
+                        statement,
+                        if has_columns { seen as u64 } else { count },
+                        has_columns,
+                    );
                     results.push(match columns.take() {
                         Some(columns) => QueryResult {
                             truncated: seen > rows.len(),
@@ -574,7 +762,10 @@ impl PostgresSession {
     }
 
     async fn primary_key(&self, relation: &Relation) -> DbResult<Vec<String>> {
-        if !matches!(relation.kind, RelationKind::Table | RelationKind::Partitioned) {
+        if !matches!(
+            relation.kind,
+            RelationKind::Table | RelationKind::Partitioned
+        ) {
             return Ok(vec![]);
         }
         let result = self
@@ -588,42 +779,93 @@ impl PostgresSession {
                 literal(&self.qualified(relation))
             ))
             .await?;
-        Ok(result.rows.into_iter().filter_map(|row| row.into_iter().next().flatten()).collect())
+        Ok(result
+            .rows
+            .into_iter()
+            .filter_map(|row| row.into_iter().next().flatten())
+            .collect())
+    }
+
+    /// Takes back an edit: to its savepoint inside the user's transaction, else
+    /// the transaction it ran in.
+    async fn undo_edit(&self, nested: bool) {
+        if nested {
+            let _ = self
+                .client
+                .batch_execute("rollback to savepoint dblens_edit; release savepoint dblens_edit")
+                .await;
+        } else {
+            self.rollback().await;
+        }
     }
 
     /// Runs one statement with text parameters. An edit meant for exactly one
     /// row is rolled back if it would touch more, and refused if it touches none.
-    async fn edit(&self, sql: String, params: Vec<Option<String>>, expect_one: bool, tag: fn(u64) -> String) -> DbResult<EditOutcome> {
-        if expect_one {
+    async fn edit(
+        &self,
+        sql: String,
+        params: Vec<Option<String>>,
+        expect_one: bool,
+        tag: fn(u64) -> String,
+    ) -> DbResult<EditOutcome> {
+        // Inside the user's open transaction the edit becomes part of it, behind a
+        // savepoint: a refused edit is undone alone, and the commit stays the user's.
+        let nested = match self.transaction_state().await? {
+            TxState::Idle => false,
+            TxState::Open => true,
+            TxState::Failed => {
+                return Err(DbError::msg(
+                    "The open transaction failed. Run ROLLBACK in the SQL panel first.",
+                ))
+            }
+        };
+        let guarded = nested || expect_one;
+        if nested {
+            self.command("savepoint dblens_edit").await?;
+        } else if expect_one {
             self.command("begin").await?;
         }
         let params: Vec<TextParam> = params.into_iter().map(TextParam).collect();
-        let refs: Vec<&(dyn ToSql + Sync)> = params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
+        let refs: Vec<&(dyn ToSql + Sync)> =
+            params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
         let affected = match self.client.execute(sql.as_str(), &refs).await {
             Ok(affected) => affected,
             Err(error) => {
                 let error = self.fail(error);
-                if expect_one {
-                    self.rollback().await;
+                if guarded {
+                    self.undo_edit(nested).await;
                 }
                 return Err(error);
             }
         };
         if expect_one {
             if affected > 1 {
-                self.rollback().await;
-                return Err(DbError::msg(format!("The change would have affected {affected} rows and was rolled back.")));
+                self.undo_edit(nested).await;
+                return Err(DbError::msg(format!(
+                    "The change would have affected {affected} rows and was rolled back."
+                )));
             }
             if affected != 1 {
-                self.rollback().await;
+                self.undo_edit(nested).await;
                 return Err(DbError::msg("The row changed or was deleted since it was loaded. Reload the table and try again."));
             }
-            if let Err(error) = self.command("commit").await {
-                self.rollback().await;
+        }
+        if guarded {
+            let end = if nested {
+                "release savepoint dblens_edit"
+            } else {
+                "commit"
+            };
+            if let Err(error) = self.command(end).await {
+                self.undo_edit(nested).await;
                 return Err(error);
             }
         }
-        Ok(EditOutcome { sql, command: tag(affected), affected })
+        Ok(EditOutcome {
+            sql,
+            command: tag(affected),
+            affected,
+        })
     }
 }
 
@@ -649,11 +891,18 @@ impl DatabaseSession for PostgresSession {
     }
 
     /// Stops the running query. Safe to call from any thread, never waits for the session.
+    /// Only the operation running when it is called is cancelled: if that one
+    /// has finished by the time the request would go out, nothing is sent.
     fn cancel(&self) {
-        self.cancel_requested.store(true, Ordering::SeqCst);
+        let Some(id) = self.activity.request_cancel() else {
+            return;
+        };
         let (token, tls) = (self.cancel_token.clone(), self.tls.clone());
+        let activity = self.activity.clone();
         self.runtime.spawn(async move {
-            let _ = token.cancel_query(tls).await;
+            if activity.is_running(id) {
+                let _ = token.cancel_query(tls).await;
+            }
         });
     }
 
@@ -666,8 +915,24 @@ impl DatabaseSession for PostgresSession {
         let _turn = self.turn().await;
         let start = Instant::now();
         let statements = sql_script::statements(sql, Dialect::Postgres);
-        let results = self.simple(sql, &statements).await?;
-        Ok(Execution::new(results, start.elapsed()))
+        match self.simple(sql, &statements).await {
+            Ok(results) => Ok(Execution::new(results, start.elapsed())),
+            Err(error) => {
+                // `begin; select 1/0` leaves the transaction failed, and every later
+                // call (the sidebar, the grid) would be refused until a ROLLBACK.
+                // Its work can only be rolled back anyway, so roll it back now.
+                if self.transaction_state().await.ok() == Some(TxState::Failed) {
+                    self.rollback().await;
+                    return Err(match error {
+                        DbError::Message(text) => DbError::Message(format!(
+                            "{text}\n\nThe transaction failed and was rolled back."
+                        )),
+                        other => other,
+                    });
+                }
+                Err(error)
+            }
+        }
     }
 
     /// One statement (a prepared statement refuses several, so a COMMIT can't
@@ -675,6 +940,7 @@ impl DatabaseSession for PostgresSession {
     async fn read_only(&self, text: &str) -> DbResult<Execution> {
         let _turn = self.turn().await;
         let start = Instant::now();
+        self.require_no_transaction().await?;
         self.command("begin transaction read only").await?;
         let outcome = async {
             self.client.prepare(text).await.map_err(|e| self.fail(e))?;
@@ -690,6 +956,7 @@ impl DatabaseSession for PostgresSession {
         let statements = sql_script::checked(text, Dialect::Postgres)?;
         let _turn = self.turn().await;
         let start = Instant::now();
+        self.require_no_transaction().await?;
         self.command("begin").await?;
         let outcome = sql_script::run(&statements, |statement| self.one(statement)).await;
         self.rollback().await;
@@ -701,6 +968,7 @@ impl DatabaseSession for PostgresSession {
         let statements = sql_script::checked(text, Dialect::Postgres)?;
         let _turn = self.turn().await;
         let start = Instant::now();
+        self.require_no_transaction().await?;
         self.command("begin").await?;
         let outcome = sql_script::run(&statements, |statement| self.one(statement)).await;
         match outcome {
@@ -766,16 +1034,31 @@ impl DatabaseSession for PostgresSession {
         } else {
             vec![]
         };
-        let mut terms: Vec<String> =
-            sort.map(|s| vec![format!("{} {} nulls last", quote_ident(&s.column), s.direction())]).unwrap_or_default();
+        let mut terms: Vec<String> = sort
+            .map(|s| {
+                vec![format!(
+                    "{} {} nulls last",
+                    quote_ident(&s.column),
+                    s.direction()
+                )]
+            })
+            .unwrap_or_default();
         terms.extend(keys);
-        let order = if terms.is_empty() { String::new() } else { format!(" order by {}", terms.join(", ")) };
+        let order = if terms.is_empty() {
+            String::new()
+        } else {
+            format!(" order by {}", terms.join(", "))
+        };
         // Without a primary key, a row is found by ctid, checked with xmin: if another
         // session changed or vacuumed it since, the ctid may point to another row.
         let mut result = self
             .query(&format!(
                 "select {}* from {} as t{}{} limit {} offset {}",
-                if uses_ctid { "ctid::text, xmin::text, " } else { "" },
+                if uses_ctid {
+                    "ctid::text, xmin::text, "
+                } else {
+                    ""
+                },
                 self.qualified(relation),
                 Self::filter(search),
                 order,
@@ -784,18 +1067,36 @@ impl DatabaseSession for PostgresSession {
             ))
             .await?;
         if uses_ctid && result.columns.len() >= 2 {
-            let keys: Vec<Vec<Option<String>>> = result.rows.iter().map(|row| row.iter().take(2).cloned().collect()).collect();
+            let keys: Vec<Vec<Option<String>>> = result
+                .rows
+                .iter()
+                .map(|row| row.iter().take(2).cloned().collect())
+                .collect();
             result.columns.drain(..2);
             for row in &mut result.rows {
                 row.drain(..2);
             }
-            result.keys = Some(RowKeys { columns: vec!["ctid".into(), "xmin".into()], kind: RowKeyKind::Ctid, values: keys });
+            result.keys = Some(RowKeys {
+                columns: vec!["ctid".into(), "xmin".into()],
+                kind: RowKeyKind::Ctid,
+                values: keys,
+            });
         } else if !primary_key.is_empty() {
-            let indexes: Vec<usize> =
-                primary_key.iter().filter_map(|name| result.columns.iter().position(|c| &c.name == name)).collect();
+            let indexes: Vec<usize> = primary_key
+                .iter()
+                .filter_map(|name| result.columns.iter().position(|c| &c.name == name))
+                .collect();
             if indexes.len() == primary_key.len() {
-                let values = result.rows.iter().map(|row| indexes.iter().map(|&i| row[i].clone()).collect()).collect();
-                result.keys = Some(RowKeys { columns: primary_key.clone(), kind: RowKeyKind::PrimaryKey, values });
+                let values = result
+                    .rows
+                    .iter()
+                    .map(|row| indexes.iter().map(|&i| row[i].clone()).collect())
+                    .collect();
+                result.keys = Some(RowKeys {
+                    columns: primary_key.clone(),
+                    kind: RowKeyKind::PrimaryKey,
+                    values,
+                });
             }
         }
         let types = self
@@ -825,47 +1126,93 @@ impl DatabaseSession for PostgresSession {
         }
         let _turn = self.turn().await;
         let result = self
-            .query(&format!("select count(*) from {} as t{}", self.qualified(relation), Self::filter(search)))
+            .query(&format!(
+                "select count(*) from {} as t{}",
+                self.qualified(relation),
+                Self::filter(search)
+            ))
             .await?;
-        Ok(result.rows.first().and_then(|row| row.first().cloned().flatten()).and_then(|n| n.parse().ok()))
+        Ok(result
+            .rows
+            .first()
+            .and_then(|row| row.first().cloned().flatten())
+            .and_then(|n| n.parse().ok()))
     }
 
     /// Changes one row. Postgres casts each text value to its column's type.
-    async fn update(&self, relation: &Relation, key: &RowKey, changes: &[CellValue]) -> DbResult<EditOutcome> {
+    async fn update(
+        &self,
+        relation: &Relation,
+        key: &RowKey,
+        changes: &[CellValue],
+    ) -> DbResult<EditOutcome> {
         if changes.is_empty() {
-            return Ok(EditOutcome { sql: String::new(), command: "UPDATE 0".into(), affected: 0 });
+            return Ok(EditOutcome {
+                sql: String::new(),
+                command: "UPDATE 0".into(),
+                affected: 0,
+            });
         }
-        let _turn = self.turn().await;
+        let _turn = self.quiet_turn().await;
         let mut params: Vec<Option<String>> = changes.iter().map(|c| c.value.clone()).collect();
-        let set: Vec<String> =
-            changes.iter().enumerate().map(|(i, c)| format!("{} = ${}", quote_ident(&c.column), i + 1)).collect();
+        let set: Vec<String> = changes
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("{} = ${}", quote_ident(&c.column), i + 1))
+            .collect();
         let (filter, key_params) = key_filter(key, params.len())?;
         params.extend(key_params);
-        let sql = format!("update {}{} set {} where {}", only(relation), self.qualified(relation), set.join(", "), filter);
-        self.edit(sql, params, true, |n| format!("UPDATE {n}")).await
+        let sql = format!(
+            "update {}{} set {} where {}",
+            only(relation),
+            self.qualified(relation),
+            set.join(", "),
+            filter
+        );
+        self.edit(sql, params, true, |n| format!("UPDATE {n}"))
+            .await
     }
 
     /// Adds a row. Columns left out get their default.
     async fn insert(&self, relation: &Relation, values: &[CellValue]) -> DbResult<EditOutcome> {
-        let _turn = self.turn().await;
+        let _turn = self.quiet_turn().await;
         let sql = if values.is_empty() {
             format!("insert into {} default values", self.qualified(relation))
         } else {
             format!(
                 "insert into {} ({}) values ({})",
                 self.qualified(relation),
-                values.iter().map(|v| quote_ident(&v.column)).collect::<Vec<_>>().join(", "),
-                (1..=values.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(", ")
+                values
+                    .iter()
+                    .map(|v| quote_ident(&v.column))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                (1..=values.len())
+                    .map(|i| format!("${i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         };
-        self.edit(sql, values.iter().map(|v| v.value.clone()).collect(), false, |n| format!("INSERT 0 {n}")).await
+        self.edit(
+            sql,
+            values.iter().map(|v| v.value.clone()).collect(),
+            false,
+            |n| format!("INSERT 0 {n}"),
+        )
+        .await
     }
 
     async fn delete(&self, relation: &Relation, key: &RowKey) -> DbResult<EditOutcome> {
-        let _turn = self.turn().await;
+        let _turn = self.quiet_turn().await;
         let (filter, params) = key_filter(key, 0)?;
-        let sql = format!("delete from {}{} where {}", only(relation), self.qualified(relation), filter);
-        self.edit(sql, params, true, |n| format!("DELETE {n}")).await
+        let sql = format!(
+            "delete from {}{} where {}",
+            only(relation),
+            self.qualified(relation),
+            filter
+        );
+        self.edit(sql, params, true, |n| format!("DELETE {n}"))
+            .await
     }
 
     async fn schema_graph(&self) -> DbResult<SchemaGraph> {
@@ -935,18 +1282,56 @@ mod tests {
     #[test]
     fn tags_follow_the_statement() {
         assert_eq!(command_tag("select 1", 3, true), "SELECT 3");
-        assert_eq!(command_tag("insert into t values (1)", 1, false), "INSERT 0 1");
-        assert_eq!(command_tag("-- c\nupdate t set a = 1", 2, false), "UPDATE 2");
-        assert_eq!(command_tag("create table t(a int)", 0, false), "CREATE TABLE");
-        assert_eq!(command_tag("create or replace temp view v as select 1", 0, false), "CREATE VIEW");
-        assert_eq!(command_tag("drop table if exists t", 0, false), "DROP TABLE");
-        assert_eq!(command_tag("create unique index concurrently i on t(a)", 0, false), "CREATE INDEX");
-        assert_eq!(command_tag("create materialized view m as select 1", 0, false), "CREATE MATERIALIZED VIEW");
+        assert_eq!(
+            command_tag("insert into t values (1)", 1, false),
+            "INSERT 0 1"
+        );
+        assert_eq!(
+            command_tag("-- c\nupdate t set a = 1", 2, false),
+            "UPDATE 2"
+        );
+        assert_eq!(
+            command_tag("create table t(a int)", 0, false),
+            "CREATE TABLE"
+        );
+        assert_eq!(
+            command_tag("create or replace temp view v as select 1", 0, false),
+            "CREATE VIEW"
+        );
+        assert_eq!(
+            command_tag("drop table if exists t", 0, false),
+            "DROP TABLE"
+        );
+        assert_eq!(
+            command_tag("create unique index concurrently i on t(a)", 0, false),
+            "CREATE INDEX"
+        );
+        assert_eq!(
+            command_tag("create materialized view m as select 1", 0, false),
+            "CREATE MATERIALIZED VIEW"
+        );
         assert_eq!(command_tag("truncate t", 0, false), "TRUNCATE TABLE");
         assert_eq!(command_tag("set search_path = public", 0, false), "SET");
-        assert_eq!(command_tag("with x as (select 1) select * from x", 1, true), "SELECT 1");
-        assert_eq!(command_tag("with x as (select 1) insert into t select * from x", 1, false), "INSERT 0 1");
-        assert_eq!(command_tag("with d as (delete from t returning *) select * from d", 2, true), "DELETE 2");
+        assert_eq!(
+            command_tag("with x as (select 1) select * from x", 1, true),
+            "SELECT 1"
+        );
+        assert_eq!(
+            command_tag(
+                "with x as (select 1) insert into t select * from x",
+                1,
+                false
+            ),
+            "INSERT 0 1"
+        );
+        assert_eq!(
+            command_tag(
+                "with d as (delete from t returning *) select * from d",
+                2,
+                true
+            ),
+            "DELETE 2"
+        );
         assert_eq!(command_tag("", 0, false), "");
     }
 
@@ -969,10 +1354,26 @@ mod tests {
 
     #[test]
     fn key_filters_number_their_parameters() {
-        let (sql, params) = key_filter(&key(RowKeyKind::PrimaryKey, &["a", "b\"c"], &[Some("1"), Some("2")]), 2).unwrap();
+        let (sql, params) = key_filter(
+            &key(
+                RowKeyKind::PrimaryKey,
+                &["a", "b\"c"],
+                &[Some("1"), Some("2")],
+            ),
+            2,
+        )
+        .unwrap();
         assert_eq!(sql, "\"a\" = $3 and \"b\"\"c\" = $4");
         assert_eq!(params, vec![Some("1".to_string()), Some("2".to_string())]);
-        let (sql, _) = key_filter(&key(RowKeyKind::Ctid, &["ctid", "xmin"], &[Some("(0,1)"), Some("7")]), 0).unwrap();
+        let (sql, _) = key_filter(
+            &key(
+                RowKeyKind::Ctid,
+                &["ctid", "xmin"],
+                &[Some("(0,1)"), Some("7")],
+            ),
+            0,
+        )
+        .unwrap();
         assert_eq!(sql, "ctid = $1::tid and xmin::text = $2");
         assert!(key_filter(&key(RowKeyKind::Rowid, &["rowid"], &[Some("1")]), 0).is_err());
         assert!(key_filter(&key(RowKeyKind::PrimaryKey, &["a"], &[]), 0).is_err());
@@ -1001,7 +1402,13 @@ mod tests {
         assert_eq!(config.get_password(), Some(&b"s3cret"[..]));
         assert_eq!(config.get_dbname(), Some("loja"));
         assert_eq!(config.get_ports(), &[6543]);
-        assert_eq!(spec, TlsSpec { mode: Ssl::VerifyCa, root_cert: Some("/x/root.crt".into()) });
+        assert_eq!(
+            spec,
+            TlsSpec {
+                mode: Ssl::VerifyCa,
+                root_cert: Some("/x/root.crt".into())
+            }
+        );
         assert_eq!(config.get_ssl_mode(), PgSslMode::Require);
         assert_eq!(config.get_application_name(), Some("dbLens"));
     }
@@ -1018,11 +1425,17 @@ mod tests {
 
     #[test]
     fn tunnels_keep_the_host_name_for_tls() {
-        let (config, _) = build_config(&parsed("postgres://u@db.example.com:5432/db"), Some(40123)).unwrap();
+        let (config, _) =
+            build_config(&parsed("postgres://u@db.example.com:5432/db"), Some(40123)).unwrap();
         assert_eq!(config.get_hosts().len(), 1);
-        assert_eq!(config.get_hostaddrs(), &["127.0.0.1".parse::<std::net::IpAddr>().unwrap()]);
+        assert_eq!(
+            config.get_hostaddrs(),
+            &["127.0.0.1".parse::<std::net::IpAddr>().unwrap()]
+        );
         assert_eq!(config.get_ports(), &[40123]);
-        assert!(matches!(&config.get_hosts()[0], tokio_postgres::config::Host::Tcp(h) if h == "db.example.com"));
+        assert!(
+            matches!(&config.get_hosts()[0], tokio_postgres::config::Host::Tcp(h) if h == "db.example.com")
+        );
     }
 
     #[test]
@@ -1034,10 +1447,25 @@ mod tests {
     #[test]
     fn tls_configs_build_for_every_mode() {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        for mode in [Ssl::Disable, Ssl::Allow, Ssl::Prefer, Ssl::Require, Ssl::VerifyCa, Ssl::VerifyFull] {
-            make_tls(&TlsSpec { mode, root_cert: None }).unwrap_or_else(|e| panic!("{mode:?}: {e}"));
+        for mode in [
+            Ssl::Disable,
+            Ssl::Allow,
+            Ssl::Prefer,
+            Ssl::Require,
+            Ssl::VerifyCa,
+            Ssl::VerifyFull,
+        ] {
+            make_tls(&TlsSpec {
+                mode,
+                root_cert: None,
+            })
+            .unwrap_or_else(|e| panic!("{mode:?}: {e}"));
         }
-        assert!(make_tls(&TlsSpec { mode: Ssl::VerifyFull, root_cert: Some("/no/such/root.crt".into()) }).is_err());
+        assert!(make_tls(&TlsSpec {
+            mode: Ssl::VerifyFull,
+            root_cert: Some("/no/such/root.crt".into())
+        })
+        .is_err());
     }
 
     #[test]
@@ -1052,9 +1480,20 @@ mod tests {
     #[test]
     fn text_params_encode_as_text() {
         let mut out = BytesMut::new();
-        assert!(matches!(TextParam(Some("héllo".into())).to_sql(&Type::INT4, &mut out).unwrap(), IsNull::No));
+        assert!(matches!(
+            TextParam(Some("héllo".into()))
+                .to_sql(&Type::INT4, &mut out)
+                .unwrap(),
+            IsNull::No
+        ));
         assert_eq!(&out[..], "héllo".as_bytes());
-        assert!(matches!(TextParam(None).to_sql(&Type::TEXT, &mut out).unwrap(), IsNull::Yes));
-        assert!(matches!(TextParam(None).encode_format(&Type::INT4), Format::Text));
+        assert!(matches!(
+            TextParam(None).to_sql(&Type::TEXT, &mut out).unwrap(),
+            IsNull::Yes
+        ));
+        assert!(matches!(
+            TextParam(None).encode_format(&Type::INT4),
+            Format::Text
+        ));
     }
 }

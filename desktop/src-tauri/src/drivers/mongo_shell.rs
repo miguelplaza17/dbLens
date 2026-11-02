@@ -20,7 +20,10 @@ pub enum Statement {
     /// use shop
     Use(String),
     /// db.runCommand({…}), db.getCollectionNames(), …
-    Database { method: String, arguments: Vec<String> },
+    Database {
+        method: String,
+        arguments: Vec<String>,
+    },
     /// db.users.find({…}).sort({…}).limit(5), db.getCollection("x").drop(), …
     Collection { name: String, calls: Vec<Call> },
 }
@@ -34,14 +37,23 @@ pub struct Call {
 
 impl Call {
     pub fn new(name: &str, arguments: &[&str]) -> Self {
-        Self { name: name.into(), arguments: arguments.iter().map(|a| a.to_string()).collect() }
+        Self {
+            name: name.into(),
+            arguments: arguments.iter().map(|a| a.to_string()).collect(),
+        }
     }
 }
 
 /// The error for a statement dbLens doesn't know.
 pub fn unsupported(statement: &str) -> DbError {
-    let line = statement.split('\n').find(|l| !l.is_empty()).unwrap_or(statement);
-    DbError::msg(format!("dbLens can't run this yet: {}", line.trim_matches(|c| c == ' ' || c == '\t')))
+    let line = statement
+        .split('\n')
+        .find(|l| !l.is_empty())
+        .unwrap_or(statement);
+    DbError::msg(format!(
+        "dbLens can't run this yet: {}",
+        line.trim_matches(|c| c == ' ' || c == '\t')
+    ))
 }
 
 // MARK: Statements
@@ -56,7 +68,12 @@ pub fn statements(text: &str) -> Vec<String> {
     let mut depth: i32 = 0;
     let mut last: Option<char> = None;
     let mut i = 0;
-    fn flush(out: &mut Vec<String>, current: &mut String, last: &mut Option<char>, depth: &mut i32) {
+    fn flush(
+        out: &mut Vec<String>,
+        current: &mut String,
+        last: &mut Option<char>,
+        depth: &mut i32,
+    ) {
         let statement = current.trim();
         if !statement.is_empty() {
             out.push(statement.to_string());
@@ -189,15 +206,23 @@ fn parse_chain(reader: &mut Lexer) -> Result<Statement, Failure> {
             if !reader.at_end() {
                 return Err(Failure::default());
             }
-            return Ok(Statement::Database { method: name, arguments: args });
+            return Ok(Statement::Database {
+                method: name,
+                arguments: args,
+            });
         }
         if collection.is_none() {
             collection = Some(parts.join("."));
         }
-        calls.push(Call { name, arguments: args });
+        calls.push(Call {
+            name,
+            arguments: args,
+        });
     }
     match collection {
-        Some(name) if !name.is_empty() && !calls.is_empty() => Ok(Statement::Collection { name, calls }),
+        Some(name) if !name.is_empty() && !calls.is_empty() => {
+            Ok(Statement::Collection { name, calls })
+        }
         _ => Err(Failure::default()),
     }
 }
@@ -273,7 +298,11 @@ pub fn double_text(value: f64) -> String {
         return "NaN".into();
     }
     if value.is_infinite() {
-        return if value < 0.0 { "-Infinity".into() } else { "Infinity".into() };
+        return if value < 0.0 {
+            "-Infinity".into()
+        } else {
+            "Infinity".into()
+        };
     }
     let text = format!("{value:?}");
     match text.find('e') {
@@ -314,9 +343,19 @@ pub fn iso_date_milliseconds(text: &str) -> Option<i64> {
     let m = pattern.captures(value)?;
     let group = |i: usize| m.get(i).map(|g| g.as_str());
     let number = |i: usize| group(i).map_or(Some(0), |g| g.parse::<i64>().ok());
-    let (year, month, day) = (group(1)?.parse::<i64>().ok()?, group(2)?.parse::<i64>().ok()?, group(3)?.parse::<i64>().ok()?);
+    let (year, month, day) = (
+        group(1)?.parse::<i64>().ok()?,
+        group(2)?.parse::<i64>().ok()?,
+        group(3)?.parse::<i64>().ok()?,
+    );
     let (hour, minute, second) = (number(4)?, number(5)?, number(6)?);
-    if !(1..=12).contains(&month) || day < 1 || day > days_in(month, year) || hour > 23 || minute > 59 || second > 59 {
+    if !(1..=12).contains(&month)
+        || day < 1
+        || day > days_in(month, year)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
         return None;
     }
     let fraction = format!("{}000", group(7).unwrap_or(""));
@@ -326,13 +365,18 @@ pub fn iso_date_milliseconds(text: &str) -> Option<i64> {
         let sign = if zone.starts_with('-') { -1 } else { 1 };
         let digits = zone[1..].replace(':', "");
         let hours: i64 = digits.get(..2).and_then(|d| d.parse().ok()).unwrap_or(0);
-        let minutes: i64 = if digits.len() > 2 { digits[2..].parse().unwrap_or(0) } else { 0 };
+        let minutes: i64 = if digits.len() > 2 {
+            digits[2..].parse().unwrap_or(0)
+        } else {
+            0
+        };
         if hours > 23 || minutes > 59 {
             return None;
         }
         offset = sign * (hours * 3600 + minutes * 60);
     }
-    let seconds = days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second - offset;
+    let seconds =
+        days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second - offset;
     Some(seconds * 1000 + millis)
 }
 
@@ -405,7 +449,9 @@ struct Failure {
 
 impl Failure {
     fn say(message: String) -> Self {
-        Self { message: Some(message) }
+        Self {
+            message: Some(message),
+        }
     }
 }
 
@@ -442,7 +488,10 @@ fn is_identifier_part(c: char) -> bool {
 
 impl Lexer {
     fn new(text: &str) -> Self {
-        Self { s: text.chars().collect(), position: 0 }
+        Self {
+            s: text.chars().collect(),
+            position: 0,
+        }
     }
 
     fn at_end(&self) -> bool {
@@ -605,7 +654,10 @@ impl Lexer {
         }
         let start = self.position;
         // Lenient: a.b and numbers are taken as they are.
-        while self.peek().is_some_and(|c| is_identifier_part(c) || c == '.' || c == '-') {
+        while self
+            .peek()
+            .is_some_and(|c| is_identifier_part(c) || c == '.' || c == '-')
+        {
             self.position += 1;
         }
         if self.position == start {
@@ -652,7 +704,10 @@ impl Lexer {
             if let Some(high) = *pending_high {
                 *pending_high = None;
                 if (0xDC00..=0xDFFF).contains(&value) {
-                    out.push(char::from_u32(0x10000 + ((high - 0xD800) << 10) + (value - 0xDC00)).unwrap_or('\u{FFFD}'));
+                    out.push(
+                        char::from_u32(0x10000 + ((high - 0xD800) << 10) + (value - 0xDC00))
+                            .unwrap_or('\u{FFFD}'),
+                    );
                     return;
                 }
                 out.push('\u{FFFD}');
@@ -675,7 +730,9 @@ impl Lexer {
                 append(&mut out, &mut pending_high, c as u32);
                 continue;
             }
-            let Some(&e) = self.s.get(self.position) else { break };
+            let Some(&e) = self.s.get(self.position) else {
+                break;
+            };
             self.position += 1;
             match e {
                 'n' => append(&mut out, &mut pending_high, 0x0A),
@@ -700,7 +757,8 @@ impl Lexer {
                         if !self.consume('}') {
                             return Err(Failure::default());
                         }
-                        let value = u32::from_str_radix(&digits, 16).map_err(|_| Failure::default())?;
+                        let value =
+                            u32::from_str_radix(&digits, 16).map_err(|_| Failure::default())?;
                         append(&mut out, &mut pending_high, value);
                     } else {
                         let value = self.hex(4).ok_or_else(Failure::default)?;
@@ -729,7 +787,10 @@ impl Lexer {
     /// /pattern/flags. MongoDB keeps the flags i, m, s, x, u and l, sorted.
     fn regex(&mut self) -> Result<String, Failure> {
         let end = regex_end(&self.s, self.position);
-        let close = (self.position..end).rev().find(|&i| self.s[i] == '/').filter(|&i| i > self.position);
+        let close = (self.position..end)
+            .rev()
+            .find(|&i| self.s[i] == '/')
+            .filter(|&i| i > self.position);
         let close = close.ok_or_else(Failure::default)?;
         let pattern = self.text(self.position + 1, close);
         let flags = self.text(close + 1, end);
@@ -747,7 +808,9 @@ impl Lexer {
         self.skip_space();
         if self.peek().is_some_and(is_identifier_start) {
             return match self.identifier().as_deref() {
-                Some("Infinity") => Ok(Value::Json(format!(r#"{{"$numberDouble":"{sign}Infinity"}}"#))),
+                Some("Infinity") => Ok(Value::Json(format!(
+                    r#"{{"$numberDouble":"{sign}Infinity"}}"#
+                ))),
                 _ => Err(Failure::default()),
             };
         }
@@ -757,7 +820,8 @@ impl Lexer {
             while self.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
                 self.position += 1;
             }
-            let value = i64::from_str_radix(&self.text(start, self.position), 16).map_err(|_| Failure::default())?;
+            let value = i64::from_str_radix(&self.text(start, self.position), 16)
+                .map_err(|_| Failure::default())?;
             return Ok(Value::Number(format!("{sign}{value}")));
         }
         let digits = |lexer: &mut Lexer| {
@@ -844,7 +908,10 @@ fn bad(name: &str, args: &[Value]) -> Failure {
 /// An integer from text, also when written as a whole double (5.0, 1e3).
 fn exact_integer<T: TryFrom<i64> + std::str::FromStr>(text: &str) -> Option<T> {
     text.parse::<T>().ok().or_else(|| {
-        let d = text.parse::<f64>().ok().filter(|d| d.is_finite() && d.fract() == 0.0 && d.abs() < 9.2e18)?;
+        let d = text
+            .parse::<f64>()
+            .ok()
+            .filter(|d| d.is_finite() && d.fract() == 0.0 && d.abs() < 9.2e18)?;
         T::try_from(d as i64).ok()
     })
 }
@@ -877,65 +944,104 @@ fn helper(name: &str, args: Option<Vec<Value>>) -> Result<Value, Failure> {
                 if !list.is_empty() {
                     return Err(bad(name, &list));
                 }
-                return Ok(Value::Json(format!(r#"{{"$oid":"{}"}}"#, mongodb::bson::oid::ObjectId::new().to_hex())));
+                return Ok(Value::Json(format!(
+                    r#"{{"$oid":"{}"}}"#,
+                    mongodb::bson::oid::ObjectId::new().to_hex()
+                )));
             };
             if hex.chars().count() != 24 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
                 return Err(bad(name, &list));
             }
-            Ok(Value::Json(format!(r#"{{"$oid":"{}"}}"#, hex.to_lowercase())))
+            Ok(Value::Json(format!(
+                r#"{{"$oid":"{}"}}"#,
+                hex.to_lowercase()
+            )))
         }
         "ISODate" | "Date" => {
             if list.is_empty() {
-                return Ok(Value::Json(date_json(chrono::Utc::now().timestamp_millis())));
+                return Ok(Value::Json(date_json(
+                    chrono::Utc::now().timestamp_millis(),
+                )));
             }
             if let Value::Number(ms) = &list[0] {
-                if let Some(value) = ms.parse::<i64>().ok().or_else(|| ms.parse::<f64>().ok().map(|d| d as i64)) {
+                if let Some(value) = ms
+                    .parse::<i64>()
+                    .ok()
+                    .or_else(|| ms.parse::<f64>().ok().map(|d| d as i64))
+                {
                     return Ok(Value::Json(date_json(value)));
                 }
             }
-            let ms = text(0).and_then(|v| iso_date_milliseconds(&v)).ok_or_else(|| bad(name, &list))?;
+            let ms = text(0)
+                .and_then(|v| iso_date_milliseconds(&v))
+                .ok_or_else(|| bad(name, &list))?;
             Ok(Value::Json(date_json(ms)))
         }
         "NumberLong" | "Long" => {
-            let number = text(0).and_then(|v| exact_integer::<i64>(&v)).ok_or_else(|| bad(name, &list))?;
+            let number = text(0)
+                .and_then(|v| exact_integer::<i64>(&v))
+                .ok_or_else(|| bad(name, &list))?;
             Ok(Value::Json(format!(r#"{{"$numberLong":"{number}"}}"#)))
         }
         "NumberInt" | "Int32" => {
-            let number = text(0).and_then(|v| exact_integer::<i32>(&v)).ok_or_else(|| bad(name, &list))?;
+            let number = text(0)
+                .and_then(|v| exact_integer::<i32>(&v))
+                .ok_or_else(|| bad(name, &list))?;
             Ok(Value::Json(format!(r#"{{"$numberInt":"{number}"}}"#)))
         }
         "NumberDecimal" | "Decimal128" => {
-            let value = text(0).filter(|v| is_decimal(v)).ok_or_else(|| bad(name, &list))?;
+            let value = text(0)
+                .filter(|v| is_decimal(v))
+                .ok_or_else(|| bad(name, &list))?;
             Ok(Value::Json(format!(r#"{{"$numberDecimal":"{value}"}}"#)))
         }
         "Double" => {
-            let number = text(0).and_then(|v| v.parse::<f64>().ok()).ok_or_else(|| bad(name, &list))?;
-            Ok(Value::Json(format!(r#"{{"$numberDouble":"{}"}}"#, double_text(number))))
+            let number = text(0)
+                .and_then(|v| v.parse::<f64>().ok())
+                .ok_or_else(|| bad(name, &list))?;
+            Ok(Value::Json(format!(
+                r#"{{"$numberDouble":"{}"}}"#,
+                double_text(number)
+            )))
         }
         "UUID" => {
-            let hex = if list.is_empty() { uuid::Uuid::new_v4().to_string() } else { text(0).unwrap_or_default() };
+            let hex = if list.is_empty() {
+                uuid::Uuid::new_v4().to_string()
+            } else {
+                text(0).unwrap_or_default()
+            };
             let digits = hex.replace('-', "");
             if digits.len() != 32 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
                 return Err(bad(name, &list));
             }
-            let bytes: Vec<u8> = (0..16).map(|i| u8::from_str_radix(&digits[i * 2..i * 2 + 2], 16).unwrap_or(0)).collect();
+            let bytes: Vec<u8> = (0..16)
+                .map(|i| u8::from_str_radix(&digits[i * 2..i * 2 + 2], 16).unwrap_or(0))
+                .collect();
             let base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-            Ok(Value::Json(format!(r#"{{"$binary":{{"base64":"{base64}","subType":"04"}}}}"#)))
+            Ok(Value::Json(format!(
+                r#"{{"$binary":{{"base64":"{base64}","subType":"04"}}}}"#
+            )))
         }
         "BinData" => {
             let subtype = text(0).and_then(|v| v.parse::<u8>().ok());
-            let base64 = text(1).filter(|b| base64::engine::general_purpose::STANDARD.decode(b).is_ok());
+            let base64 =
+                text(1).filter(|b| base64::engine::general_purpose::STANDARD.decode(b).is_ok());
             match (list.len(), subtype, base64) {
-                (2, Some(subtype), Some(base64)) => {
-                    Ok(Value::Json(format!(r#"{{"$binary":{{"base64":"{base64}","subType":"{subtype:02x}"}}}}"#)))
-                }
+                (2, Some(subtype), Some(base64)) => Ok(Value::Json(format!(
+                    r#"{{"$binary":{{"base64":"{base64}","subType":"{subtype:02x}"}}}}"#
+                ))),
                 _ => Err(bad(name, &list)),
             }
         }
         "Timestamp" => {
             if list.len() == 2 {
-                if let (Some(t), Some(i)) = (text(0).and_then(|v| v.parse::<u32>().ok()), text(1).and_then(|v| v.parse::<u32>().ok())) {
-                    return Ok(Value::Json(format!(r#"{{"$timestamp":{{"t":{t},"i":{i}}}}}"#)));
+                if let (Some(t), Some(i)) = (
+                    text(0).and_then(|v| v.parse::<u32>().ok()),
+                    text(1).and_then(|v| v.parse::<u32>().ok()),
+                ) {
+                    return Ok(Value::Json(format!(
+                        r#"{{"$timestamp":{{"t":{t},"i":{i}}}}}"#
+                    )));
                 }
             }
             if let [Value::Json(object)] = list.as_slice() {
@@ -947,7 +1053,10 @@ fn helper(name: &str, args: Option<Vec<Value>>) -> Result<Value, Failure> {
         }
         "RegExp" => {
             let pattern = text(0).ok_or_else(|| bad(name, &list))?;
-            Ok(Value::Json(regex_json(&pattern, &text(1).unwrap_or_default())))
+            Ok(Value::Json(regex_json(
+                &pattern,
+                &text(1).unwrap_or_default(),
+            )))
         }
         _ => Err(Failure::say(format!("dbLens can't read {name}(…) here."))),
     }
@@ -959,7 +1068,10 @@ fn regex_json(pattern: &str, flags: &str) -> String {
     options.sort_unstable();
     options.dedup();
     let options: String = options.into_iter().collect();
-    format!(r#"{{"$regularExpression":{{"pattern":{},"options":"{options}"}}}}"#, json_string(pattern))
+    format!(
+        r#"{{"$regularExpression":{{"pattern":{},"options":"{options}"}}}}"#,
+        json_string(pattern)
+    )
 }
 
 // MARK: Scanning
@@ -1070,7 +1182,10 @@ mod tests {
     use super::*;
 
     fn collection(name: &str, calls: Vec<Call>) -> Statement {
-        Statement::Collection { name: name.into(), calls }
+        Statement::Collection {
+            name: name.into(),
+            calls,
+        }
     }
 
     #[test]
@@ -1088,7 +1203,10 @@ mod tests {
             ]
         );
         assert!(statements("  \n // nothing\n ;; ").is_empty());
-        assert_eq!(statements("db.a.find().\nlimit(1)"), vec!["db.a.find(). limit(1)"]);
+        assert_eq!(
+            statements("db.a.find().\nlimit(1)"),
+            vec!["db.a.find(). limit(1)"]
+        );
         assert_eq!(statements("db.a.find({x: 'it''s'}); db.b.find()").len(), 2);
     }
 
@@ -1097,28 +1215,58 @@ mod tests {
         let c = Call::new;
         assert_eq!(parse("show dbs").unwrap(), Statement::ShowDatabases);
         assert_eq!(parse("show databases;").unwrap(), Statement::ShowDatabases);
-        assert_eq!(parse("show collections").unwrap(), Statement::ShowCollections);
+        assert_eq!(
+            parse("show collections").unwrap(),
+            Statement::ShowCollections
+        );
         assert_eq!(parse("show TABLES").unwrap(), Statement::ShowCollections);
         assert_eq!(parse("use other").unwrap(), Statement::Use("other".into()));
-        assert_eq!(parse("use 'other'").unwrap(), Statement::Use("other".into()));
-        assert_eq!(parse("db.users.find()").unwrap(), collection("users", vec![c("find", &[])]));
         assert_eq!(
-            parse("db.users.find({a: 1, b: [1, 2]}, {a: 1}).sort({a: -1}).limit(5).skip(2)").unwrap(),
+            parse("use 'other'").unwrap(),
+            Statement::Use("other".into())
+        );
+        assert_eq!(
+            parse("db.users.find()").unwrap(),
+            collection("users", vec![c("find", &[])])
+        );
+        assert_eq!(
+            parse("db.users.find({a: 1, b: [1, 2]}, {a: 1}).sort({a: -1}).limit(5).skip(2)")
+                .unwrap(),
             collection(
                 "users",
-                vec![c("find", &["{a: 1, b: [1, 2]}", "{a: 1}"]), c("sort", &["{a: -1}"]), c("limit", &["5"]), c("skip", &["2"])]
+                vec![
+                    c("find", &["{a: 1, b: [1, 2]}", "{a: 1}"]),
+                    c("sort", &["{a: -1}"]),
+                    c("limit", &["5"]),
+                    c("skip", &["2"])
+                ]
             )
         );
-        assert_eq!(parse(r#"db.getCollection("my-things").drop()"#).unwrap(), collection("my-things", vec![c("drop", &[])]));
-        assert_eq!(parse(r#"db["odd name"].findOne({})"#).unwrap(), collection("odd name", vec![c("findOne", &["{}"])]));
-        assert_eq!(parse("db.system.users.find()").unwrap(), collection("system.users", vec![c("find", &[])]));
+        assert_eq!(
+            parse(r#"db.getCollection("my-things").drop()"#).unwrap(),
+            collection("my-things", vec![c("drop", &[])])
+        );
+        assert_eq!(
+            parse(r#"db["odd name"].findOne({})"#).unwrap(),
+            collection("odd name", vec![c("findOne", &["{}"])])
+        );
+        assert_eq!(
+            parse("db.system.users.find()").unwrap(),
+            collection("system.users", vec![c("find", &[])])
+        );
         assert_eq!(
             parse("db.runCommand({ping: 1})").unwrap(),
-            Statement::Database { method: "runCommand".into(), arguments: vec!["{ping: 1}".into()] }
+            Statement::Database {
+                method: "runCommand".into(),
+                arguments: vec!["{ping: 1}".into()]
+            }
         );
         assert_eq!(
             parse("db.getCollectionNames()").unwrap(),
-            Statement::Database { method: "getCollectionNames".into(), arguments: vec![] }
+            Statement::Database {
+                method: "getCollectionNames".into(),
+                arguments: vec![]
+            }
         );
         assert_eq!(
             parse(r#"db.users.distinct("city", {a: ")"})"#).unwrap(),
@@ -1128,8 +1276,14 @@ mod tests {
             parse("db.users.insertMany([{a: 1}, {a: 2},])").unwrap(),
             collection("users", vec![c("insertMany", &["[{a: 1}, {a: 2},]"])])
         );
-        assert_eq!(parse("db.users.find({a: /x)/})").unwrap(), collection("users", vec![c("find", &["{a: /x)/}"])]));
-        assert_eq!(parse("db.users.find(1, 2,)").unwrap(), collection("users", vec![c("find", &["1", "2"])]));
+        assert_eq!(
+            parse("db.users.find({a: /x)/})").unwrap(),
+            collection("users", vec![c("find", &["{a: /x)/}"])])
+        );
+        assert_eq!(
+            parse("db.users.find(1, 2,)").unwrap(),
+            collection("users", vec![c("find", &["1", "2"])])
+        );
         for text in [
             "SELECT 1",
             "db",
@@ -1145,8 +1299,14 @@ mod tests {
         ] {
             assert!(parse(text).is_err(), "{text}");
         }
-        assert_eq!(parse("print('x')").unwrap_err().message(), "dbLens can't run this yet: print('x')");
-        assert_eq!(parse("foo(1)\nbar").unwrap_err().message(), "dbLens can't run this yet: foo(1)");
+        assert_eq!(
+            parse("print('x')").unwrap_err().message(),
+            "dbLens can't run this yet: print('x')"
+        );
+        assert_eq!(
+            parse("foo(1)\nbar").unwrap_err().message(),
+            "dbLens can't run this yet: foo(1)"
+        );
     }
 
     #[test]
@@ -1155,41 +1315,98 @@ mod tests {
             ("{}", "{}"),
             ("[]", "[]"),
             ("{a: 1}", r#"{"a":1}"#),
-            ("{ 'a b': 'c' , $set : {x:true}, }", r#"{"a b":"c","$set":{"x":true}}"#),
+            (
+                "{ 'a b': 'c' , $set : {x:true}, }",
+                r#"{"a b":"c","$set":{"x":true}}"#,
+            ),
             (r#"{"a": "b", "n": null}"#, r#"{"a":"b","n":null}"#),
-            ("{a: [1, 2.5, -3, 1e3, .5, 5., +7, 0x1F, 007,]}", r#"{"a":[1,2.5,-3,1e3,0.5,5.0,7,31,7]}"#),
-            (r#"{s: 'it\'s', d: "say \"hi\"", t: `tpl`}"#, r#"{"s":"it's","d":"say \"hi\"","t":"tpl"}"#),
+            (
+                "{a: [1, 2.5, -3, 1e3, .5, 5., +7, 0x1F, 007,]}",
+                r#"{"a":[1,2.5,-3,1e3,0.5,5.0,7,31,7]}"#,
+            ),
+            (
+                r#"{s: 'it\'s', d: "say \"hi\"", t: `tpl`}"#,
+                r#"{"s":"it's","d":"say \"hi\"","t":"tpl"}"#,
+            ),
             (r"{u: 'é\x41\n\t\\'}", r#"{"u":"éA\n\t\\"}"#),
             ("{e: 'café ☕'}", r#"{"e":"café ☕"}"#),
             ("{p: '😀'}", r#"{"p":"😀"}"#),
             (r"{p: '😀', q: '\u{1F600}'}", r#"{"p":"😀","q":"😀"}"#),
-            (r#"{_id: ObjectId("65A1b2c3d4e5f60718293a4b")}"#, r#"{"_id":{"$oid":"65a1b2c3d4e5f60718293a4b"}}"#),
-            (r#"{d: ISODate("2024-05-01T10:30:00.250Z")}"#, r#"{"d":{"$date":{"$numberLong":"1714559400250"}}}"#),
-            (r#"{d: new Date("2024-05-01")}"#, r#"{"d":{"$date":{"$numberLong":"1714521600000"}}}"#),
+            (
+                r#"{_id: ObjectId("65A1b2c3d4e5f60718293a4b")}"#,
+                r#"{"_id":{"$oid":"65a1b2c3d4e5f60718293a4b"}}"#,
+            ),
+            (
+                r#"{d: ISODate("2024-05-01T10:30:00.250Z")}"#,
+                r#"{"d":{"$date":{"$numberLong":"1714559400250"}}}"#,
+            ),
+            (
+                r#"{d: new Date("2024-05-01")}"#,
+                r#"{"d":{"$date":{"$numberLong":"1714521600000"}}}"#,
+            ),
             ("{d: new Date(0)}", r#"{"d":{"$date":{"$numberLong":"0"}}}"#),
-            (r#"{d: Date("1969-12-31T23:59:59.999Z")}"#, r#"{"d":{"$date":{"$numberLong":"-1"}}}"#),
+            (
+                r#"{d: Date("1969-12-31T23:59:59.999Z")}"#,
+                r#"{"d":{"$date":{"$numberLong":"-1"}}}"#,
+            ),
             ("{n: NumberLong(5)}", r#"{"n":{"$numberLong":"5"}}"#),
-            (r#"{n: NumberLong("9007199254740993")}"#, r#"{"n":{"$numberLong":"9007199254740993"}}"#),
+            (
+                r#"{n: NumberLong("9007199254740993")}"#,
+                r#"{"n":{"$numberLong":"9007199254740993"}}"#,
+            ),
             ("{n: NumberInt(42)}", r#"{"n":{"$numberInt":"42"}}"#),
-            (r#"{n: NumberDecimal("9.99")}"#, r#"{"n":{"$numberDecimal":"9.99"}}"#),
-            (r#"{n: Decimal128("1E+3")}"#, r#"{"n":{"$numberDecimal":"1E+3"}}"#),
-            ("{a: true, b: false, c: null, d: undefined}", r#"{"a":true,"b":false,"c":null,"d":{"$undefined":true}}"#),
+            (
+                r#"{n: NumberDecimal("9.99")}"#,
+                r#"{"n":{"$numberDecimal":"9.99"}}"#,
+            ),
+            (
+                r#"{n: Decimal128("1E+3")}"#,
+                r#"{"n":{"$numberDecimal":"1E+3"}}"#,
+            ),
+            (
+                "{a: true, b: false, c: null, d: undefined}",
+                r#"{"a":true,"b":false,"c":null,"d":{"$undefined":true}}"#,
+            ),
             (
                 "{a: Infinity, b: -Infinity, c: NaN}",
                 r#"{"a":{"$numberDouble":"Infinity"},"b":{"$numberDouble":"-Infinity"},"c":{"$numberDouble":"NaN"}}"#,
             ),
-            ("{name: /^an.a$/i}", r#"{"name":{"$regularExpression":{"pattern":"^an.a$","options":"i"}}}"#),
-            (r"{name: /a\/b[/]c/gmi}", r#"{"name":{"$regularExpression":{"pattern":"a\\/b[/]c","options":"im"}}}"#),
-            (r#"{r: RegExp("x+", "s")}"#, r#"{"r":{"$regularExpression":{"pattern":"x+","options":"s"}}}"#),
-            ("{k: MinKey, m: MaxKey()}", r#"{"k":{"$minKey":1},"m":{"$maxKey":1}}"#),
-            ("{t: Timestamp(1700000000, 1)}", r#"{"t":{"$timestamp":{"t":1700000000,"i":1}}}"#),
-            ("{t: Timestamp({t: 1, i: 2})}", r#"{"t":{"$timestamp":{"t":1,"i":2}}}"#),
-            (r#"{b: BinData(0, "AQID")}"#, r#"{"b":{"$binary":{"base64":"AQID","subType":"00"}}}"#),
+            (
+                "{name: /^an.a$/i}",
+                r#"{"name":{"$regularExpression":{"pattern":"^an.a$","options":"i"}}}"#,
+            ),
+            (
+                r"{name: /a\/b[/]c/gmi}",
+                r#"{"name":{"$regularExpression":{"pattern":"a\\/b[/]c","options":"im"}}}"#,
+            ),
+            (
+                r#"{r: RegExp("x+", "s")}"#,
+                r#"{"r":{"$regularExpression":{"pattern":"x+","options":"s"}}}"#,
+            ),
+            (
+                "{k: MinKey, m: MaxKey()}",
+                r#"{"k":{"$minKey":1},"m":{"$maxKey":1}}"#,
+            ),
+            (
+                "{t: Timestamp(1700000000, 1)}",
+                r#"{"t":{"$timestamp":{"t":1700000000,"i":1}}}"#,
+            ),
+            (
+                "{t: Timestamp({t: 1, i: 2})}",
+                r#"{"t":{"$timestamp":{"t":1,"i":2}}}"#,
+            ),
+            (
+                r#"{b: BinData(0, "AQID")}"#,
+                r#"{"b":{"$binary":{"base64":"AQID","subType":"00"}}}"#,
+            ),
             (
                 r#"{u: UUID("0e4f7a3c-1b2d-4e5f-8a9b-0c1d2e3f4a5b")}"#,
                 r#"{"u":{"$binary":{"base64":"Dk96PBstTl+KmwwdLj9KWw==","subType":"04"}}}"#,
             ),
-            (r#"{x: {"$oid": "65a1b2c3d4e5f60718293a4b"}}"#, r#"{"x":{"$oid":"65a1b2c3d4e5f60718293a4b"}}"#),
+            (
+                r#"{x: {"$oid": "65a1b2c3d4e5f60718293a4b"}}"#,
+                r#"{"x":{"$oid":"65a1b2c3d4e5f60718293a4b"}}"#,
+            ),
             (r#"{"a.b": 1, c.d: 2}"#, r#"{"a.b":1,"c.d":2}"#),
             ("{a: 1, // one\n b: /* two */ 2}", r#"{"a":1,"b":2}"#),
             (
@@ -1209,9 +1426,18 @@ mod tests {
     #[test]
     fn helpers_make_values() {
         let id = extended_json("ObjectId()").unwrap();
-        assert!(Regex::new(r#"^\{"\$oid":"[0-9a-f]{24}"\}$"#).unwrap().is_match(&id), "{id}");
-        assert!(extended_json("new Date()").unwrap().starts_with(r#"{"$date":{"$numberLong":""#));
-        assert!(extended_json("UUID()").unwrap().ends_with(r#""subType":"04"}}"#));
+        assert!(
+            Regex::new(r#"^\{"\$oid":"[0-9a-f]{24}"\}$"#)
+                .unwrap()
+                .is_match(&id),
+            "{id}"
+        );
+        assert!(extended_json("new Date()")
+            .unwrap()
+            .starts_with(r#"{"$date":{"$numberLong":""#));
+        assert!(extended_json("UUID()")
+            .unwrap()
+            .ends_with(r#""subType":"04"}}"#));
     }
 
     #[test]
@@ -1237,25 +1463,52 @@ mod tests {
         ] {
             assert!(extended_json(literal).is_err(), "{literal}");
         }
-        assert_eq!(extended_json("{a: ObjectId('xyz')}").unwrap_err().message(), r#"This isn't a valid ObjectId("xyz")."#);
-        assert_eq!(extended_json("{a: Foo(1)}").unwrap_err().message(), "dbLens can't read Foo(…) here.");
-        assert_eq!(extended_json("{a: 1} extra").unwrap_err().message(), "This isn't a value dbLens can read: {a: 1} extra");
+        assert_eq!(
+            extended_json("{a: ObjectId('xyz')}").unwrap_err().message(),
+            r#"This isn't a valid ObjectId("xyz")."#
+        );
+        assert_eq!(
+            extended_json("{a: Foo(1)}").unwrap_err().message(),
+            "dbLens can't read Foo(…) here."
+        );
+        assert_eq!(
+            extended_json("{a: 1} extra").unwrap_err().message(),
+            "This isn't a value dbLens can read: {a: 1} extra"
+        );
         let long = format!("{{a: '{}", "x".repeat(100));
-        assert!(extended_json(&long).unwrap_err().message().ends_with("xxx…"));
+        assert!(extended_json(&long)
+            .unwrap_err()
+            .message()
+            .ends_with("xxx…"));
     }
 
     #[test]
     fn reads_iso_dates() {
         assert_eq!(iso_date_milliseconds("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(iso_date_milliseconds("2024-05-01T10:30:00.250Z"), Some(1_714_559_400_250));
-        assert_eq!(iso_date_milliseconds("2024-05-01T12:30:00.250+02:00"), Some(1_714_559_400_250));
-        assert_eq!(iso_date_milliseconds("2024-05-01 10:30:00.250"), Some(1_714_559_400_250));
-        assert_eq!(iso_date_milliseconds("2024-05-01T10:30Z"), Some(1_714_559_400_000));
+        assert_eq!(
+            iso_date_milliseconds("2024-05-01T10:30:00.250Z"),
+            Some(1_714_559_400_250)
+        );
+        assert_eq!(
+            iso_date_milliseconds("2024-05-01T12:30:00.250+02:00"),
+            Some(1_714_559_400_250)
+        );
+        assert_eq!(
+            iso_date_milliseconds("2024-05-01 10:30:00.250"),
+            Some(1_714_559_400_250)
+        );
+        assert_eq!(
+            iso_date_milliseconds("2024-05-01T10:30Z"),
+            Some(1_714_559_400_000)
+        );
         assert_eq!(iso_date_milliseconds("2024-02-29"), Some(1_709_164_800_000));
         assert_eq!(iso_date_milliseconds("2023-02-29"), None);
         assert_eq!(iso_date_milliseconds("2024-13-01"), None);
         assert_eq!(iso_date_milliseconds("May 1"), None);
-        assert_eq!(iso_date(1_714_559_400_250).as_deref(), Some("2024-05-01T10:30:00.250Z"));
+        assert_eq!(
+            iso_date(1_714_559_400_250).as_deref(),
+            Some("2024-05-01T10:30:00.250Z")
+        );
         assert_eq!(iso_date(-1).as_deref(), Some("1969-12-31T23:59:59.999Z"));
         assert_eq!(iso_date(0).as_deref(), Some("1970-01-01T00:00:00.000Z"));
         assert_eq!(iso_date(253_402_300_800_000), None);

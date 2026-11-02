@@ -13,16 +13,25 @@ async fn open() -> Option<Box<dyn DatabaseSession>> {
 }
 
 fn cell(column: &str, value: Option<&str>) -> CellValue {
-    CellValue { column: column.into(), value: value.map(String::from) }
+    CellValue {
+        column: column.into(),
+        value: value.map(String::from),
+    }
 }
 
 fn key(id: &str) -> RowKey {
-    RowKey { columns: vec!["id".into()], kind: RowKeyKind::PrimaryKey, values: vec![Some(id.into())] }
+    RowKey {
+        columns: vec!["id".into()],
+        kind: RowKeyKind::PrimaryKey,
+        values: vec![Some(id.into())],
+    }
 }
 
 /// Makes `name` fresh with a few rows; the database name comes from the server.
 async fn fixture(s: &dyn DatabaseSession, name: &str) -> Relation {
-    s.execute(&format!("drop table if exists `{name}`")).await.unwrap();
+    s.execute(&format!("drop table if exists `{name}`"))
+        .await
+        .unwrap();
     s.execute(&format!(
         "create table `{name}` (id int primary key, title varchar(40), note text, price decimal(8,2) null)"
     ))
@@ -33,7 +42,9 @@ async fn fixture(s: &dyn DatabaseSession, name: &str) -> Relation {
     ))
     .await
     .unwrap();
-    let db = s.execute("select database()").await.unwrap().results[0].rows[0][0].clone().unwrap();
+    let db = s.execute("select database()").await.unwrap().results[0].rows[0][0]
+        .clone()
+        .unwrap();
     Relation::new(db, name, RelationKind::Table, -1.0)
 }
 
@@ -45,13 +56,21 @@ async fn drop_table(s: &dyn DatabaseSession, name: &str) {
 async fn connects_and_runs_multiple_statements() {
     let Some(s) = open().await else { return };
     assert!(!s.server_version().is_empty());
-    let run = s.execute("select 1 as a, 'x' as b; update_nothing_here_is_skipped").await;
+    let run = s
+        .execute("select 1 as a, 'x' as b; update_nothing_here_is_skipped")
+        .await;
     assert!(run.is_err());
-    let run = s.execute("select 1 as a, 'x' as b; select 2; set @x = 1").await.unwrap();
+    let run = s
+        .execute("select 1 as a, 'x' as b; select 2; set @x = 1")
+        .await
+        .unwrap();
     assert_eq!(run.results.len(), 3);
     assert_eq!(run.results[0].columns[0].name, "a");
     assert_eq!(run.results[0].columns[0].type_name, "int");
-    assert_eq!(run.results[0].rows, vec![vec![Some("1".to_string()), Some("x".to_string())]]);
+    assert_eq!(
+        run.results[0].rows,
+        vec![vec![Some("1".to_string()), Some("x".to_string())]]
+    );
     assert_eq!(run.results[0].command, "SELECT 1");
     assert_eq!(run.results[2].command, "SET");
     let err = s.execute("selec 1").await.unwrap_err();
@@ -62,7 +81,10 @@ async fn connects_and_runs_multiple_statements() {
 #[tokio::test]
 async fn shows_binary_and_null_values() {
     let Some(s) = open().await else { return };
-    let run = s.execute("select x'DEAD01' as b, null as n, 'é' as t").await.unwrap();
+    let run = s
+        .execute("select x'DEAD01' as b, null as n, 'é' as t")
+        .await
+        .unwrap();
     let row = &run.results[0].rows[0];
     assert_eq!(row[0].as_deref(), Some("0xDEAD01"));
     assert_eq!(row[1], None);
@@ -112,11 +134,17 @@ async fn searches_and_sorts() {
     assert_eq!(s.count(&rel, "nothing like this").await.unwrap(), Some(0));
 
     // Sort by a column, NULL last in both directions, then by key.
-    let asc = ColumnSort { column: "price".into(), ascending: true };
+    let asc = ColumnSort {
+        column: "price".into(),
+        ascending: true,
+    };
     let rows = s.page(&rel, 10, 0, "", Some(&asc)).await.unwrap().rows;
     let ids: Vec<_> = rows.iter().map(|r| r[0].clone().unwrap()).collect();
     assert_eq!(ids, ["1", "3", "10", "2"]);
-    let desc = ColumnSort { column: "price".into(), ascending: false };
+    let desc = ColumnSort {
+        column: "price".into(),
+        ascending: false,
+    };
     let rows = s.page(&rel, 10, 0, "", Some(&desc)).await.unwrap().rows;
     let ids: Vec<_> = rows.iter().map(|r| r[0].clone().unwrap()).collect();
     assert_eq!(ids, ["10", "3", "1", "2"]);
@@ -128,7 +156,14 @@ async fn edits_exactly_one_row() {
     let Some(s) = open().await else { return };
     let rel = fixture(&*s, "dbl_edit").await;
 
-    let out = s.update(&rel, &key("1"), &[cell("title", Some("A'\\ \"x\"")), cell("note", None)]).await.unwrap();
+    let out = s
+        .update(
+            &rel,
+            &key("1"),
+            &[cell("title", Some("A'\\ \"x\"")), cell("note", None)],
+        )
+        .await
+        .unwrap();
     assert_eq!(out.affected, 1);
     assert!(out.sql.contains("`title` = ?"));
     assert!(!out.sql.contains("A'"));
@@ -137,24 +172,48 @@ async fn edits_exactly_one_row() {
     assert_eq!(page.rows[0][2], None);
 
     // Setting the same value still counts as the one matched row.
-    assert_eq!(s.update(&rel, &key("1"), &[cell("title", Some("A'\\ \"x\""))]).await.unwrap().affected, 1);
+    assert_eq!(
+        s.update(&rel, &key("1"), &[cell("title", Some("A'\\ \"x\""))])
+            .await
+            .unwrap()
+            .affected,
+        1
+    );
 
     // A row that is gone is refused.
-    let err = s.update(&rel, &key("99"), &[cell("title", Some("z"))]).await.unwrap_err();
+    let err = s
+        .update(&rel, &key("99"), &[cell("title", Some("z"))])
+        .await
+        .unwrap_err();
     assert!(err.message().contains("changed or was deleted"));
 
     // A key that matches several rows is rolled back.
-    let wide = RowKey { columns: vec!["note".into()], kind: RowKeyKind::PrimaryKey, values: vec![None] };
-    s.execute("insert into dbl_edit (id, title) values (20, 'x'), (21, 'y')").await.unwrap();
-    let err = s.update(&rel, &wide, &[cell("title", Some("all"))]).await.unwrap_err();
+    let wide = RowKey {
+        columns: vec!["note".into()],
+        kind: RowKeyKind::PrimaryKey,
+        values: vec![None],
+    };
+    s.execute("insert into dbl_edit (id, title) values (20, 'x'), (21, 'y')")
+        .await
+        .unwrap();
+    let err = s
+        .update(&rel, &wide, &[cell("title", Some("all"))])
+        .await
+        .unwrap_err();
     assert!(err.message().contains("rolled back"), "{}", err.message());
-    let titles = s.execute("select count(*) from dbl_edit where title = 'all'").await.unwrap();
+    let titles = s
+        .execute("select count(*) from dbl_edit where title = 'all'")
+        .await
+        .unwrap();
     assert_eq!(titles.results[0].rows[0][0].as_deref(), Some("0"));
     let err = s.delete(&rel, &wide).await.unwrap_err();
     assert!(err.message().contains("rolled back"));
 
     // Insert (omitted columns take their default) and delete.
-    let out = s.insert(&rel, &[cell("id", Some("30")), cell("title", Some("new"))]).await.unwrap();
+    let out = s
+        .insert(&rel, &[cell("id", Some("30")), cell("title", Some("new"))])
+        .await
+        .unwrap();
     assert_eq!(out.affected, 1);
     assert!(out.command.starts_with("INSERT"));
     assert_eq!(s.delete(&rel, &key("30")).await.unwrap().affected, 1);
@@ -173,7 +232,9 @@ async fn read_only_is_refused_by_the_database() {
     assert!(s.read_only("select 1; select 2").await.is_err());
     // The session is writable again afterwards, and nothing changed.
     assert_eq!(s.count(&rel, "").await.unwrap(), Some(4));
-    s.execute("update dbl_ro set title = 'ok' where id = 1").await.unwrap();
+    s.execute("update dbl_ro set title = 'ok' where id = 1")
+        .await
+        .unwrap();
     drop_table(&*s, "dbl_ro").await;
 }
 
@@ -183,27 +244,49 @@ async fn rehearse_rolls_back_and_atomic_commits_or_not_at_all() {
     let rel = fixture(&*s, "dbl_tx").await;
     let sizes = || async { s.count(&rel, "").await.unwrap().unwrap() };
 
-    let rehearsal = s.rehearse("delete from dbl_tx where id = 1; delete from dbl_tx where id = 2").await.unwrap();
+    let rehearsal = s
+        .rehearse("delete from dbl_tx where id = 1; delete from dbl_tx where id = 2")
+        .await
+        .unwrap();
     assert_eq!(rehearsal.results.len(), 2);
     assert_eq!(rehearsal.results[0].command, "DELETE 1");
     assert_eq!(sizes().await, 4);
 
     // DDL commits by itself: not rehearsable, not atomic.
-    let err = s.rehearse("alter table dbl_tx add column z int").await.unwrap_err();
+    let err = s
+        .rehearse("alter table dbl_tx add column z int")
+        .await
+        .unwrap_err();
     assert!(err.message().contains("commits by itself"));
-    let err = s.execute_atomically("delete from dbl_tx; drop table dbl_tx").await.unwrap_err();
+    let err = s
+        .execute_atomically("delete from dbl_tx; drop table dbl_tx")
+        .await
+        .unwrap_err();
     assert!(matches!(err, DbError::NotAtomic(_)), "{err:?}");
     assert_eq!(sizes().await, 4);
 
     // A failing statement undoes the ones before it and is named.
-    let err = s.execute_atomically("delete from dbl_tx where id = 1; insert into dbl_tx (id) values (2)").await.unwrap_err();
-    assert!(err.message().contains("Statement 2 of 2 failed"), "{}", err.message());
+    let err = s
+        .execute_atomically("delete from dbl_tx where id = 1; insert into dbl_tx (id) values (2)")
+        .await
+        .unwrap_err();
+    assert!(
+        err.message().contains("Statement 2 of 2 failed"),
+        "{}",
+        err.message()
+    );
     assert_eq!(sizes().await, 4);
 
     // Transaction control is the app's.
-    assert!(s.execute_atomically("delete from dbl_tx; commit").await.is_err());
+    assert!(s
+        .execute_atomically("delete from dbl_tx; commit")
+        .await
+        .is_err());
 
-    let done = s.execute_atomically("delete from dbl_tx where id = 1; delete from dbl_tx where id = 2").await.unwrap();
+    let done = s
+        .execute_atomically("delete from dbl_tx where id = 1; delete from dbl_tx where id = 2")
+        .await
+        .unwrap();
     assert_eq!(done.results.len(), 2);
     assert_eq!(sizes().await, 2);
     drop_table(&*s, "dbl_tx").await;
@@ -233,7 +316,9 @@ async fn schema_graph_has_foreign_keys() {
     let Some(s) = open().await else { return };
     s.execute("drop table if exists dbl_child").await.unwrap();
     s.execute("drop table if exists dbl_parent").await.unwrap();
-    s.execute("create table dbl_parent (a int, b int, name varchar(10), primary key (a, b))").await.unwrap();
+    s.execute("create table dbl_parent (a int, b int, name varchar(10), primary key (a, b))")
+        .await
+        .unwrap();
     s.execute(
         "create table dbl_child (id int primary key, pa int not null, pb int null, \
          constraint fk_child_parent foreign key (pa, pb) references dbl_parent (a, b))",
@@ -241,11 +326,25 @@ async fn schema_graph_has_foreign_keys() {
     .await
     .unwrap();
     let graph = s.schema_graph().await.unwrap();
-    let child = graph.tables.iter().find(|t| t.name == "dbl_child").expect("child");
-    assert!(child.columns.iter().any(|c| c.name == "id" && c.is_primary_key && !c.is_nullable));
-    assert!(child.columns.iter().any(|c| c.name == "pb" && c.is_nullable));
+    let child = graph
+        .tables
+        .iter()
+        .find(|t| t.name == "dbl_child")
+        .expect("child");
+    assert!(child
+        .columns
+        .iter()
+        .any(|c| c.name == "id" && c.is_primary_key && !c.is_nullable));
+    assert!(child
+        .columns
+        .iter()
+        .any(|c| c.name == "pb" && c.is_nullable));
     assert!(!child.is_view);
-    let link = graph.links.iter().find(|l| l.name == "fk_child_parent").expect("link");
+    let link = graph
+        .links
+        .iter()
+        .find(|l| l.name == "fk_child_parent")
+        .expect("link");
     assert!(link.from.ends_with(".dbl_child") && link.to.ends_with(".dbl_parent"));
     assert_eq!(link.from_columns, ["pa", "pb"]);
     assert_eq!(link.to_columns, ["a", "b"]);
@@ -258,16 +357,26 @@ async fn views_are_read_only_and_calls_return_their_sets() {
     let Some(s) = open().await else { return };
     let rel = fixture(&*s, "dbl_view_src").await;
     s.execute("drop view if exists dbl_view").await.unwrap();
-    s.execute("create view dbl_view as select id, title from dbl_view_src").await.unwrap();
+    s.execute("create view dbl_view as select id, title from dbl_view_src")
+        .await
+        .unwrap();
     let all = s.relations().await.unwrap();
-    let view = all.iter().find(|r| r.name == "dbl_view").expect("view listed").clone();
+    let view = all
+        .iter()
+        .find(|r| r.name == "dbl_view")
+        .expect("view listed")
+        .clone();
     assert_eq!(view.kind, RelationKind::View);
     let page = s.page(&view, 10, 0, "", None).await.unwrap();
     assert_eq!(page.rows.len(), 4);
     assert!(page.keys.is_none());
     // A procedure's result sets come before its own status.
-    s.execute("drop procedure if exists dbl_proc").await.unwrap();
-    s.execute("create procedure dbl_proc() begin select 1 as one; select 2 as two; end").await.unwrap();
+    s.execute("drop procedure if exists dbl_proc")
+        .await
+        .unwrap();
+    s.execute("create procedure dbl_proc() begin select 1 as one; select 2 as two; end")
+        .await
+        .unwrap();
     let run = s.execute("call dbl_proc()").await.unwrap();
     assert!(run.results.len() >= 2);
     assert_eq!(run.results[0].columns[0].name, "one");
@@ -281,9 +390,95 @@ async fn views_are_read_only_and_calls_return_their_sets() {
 
 #[tokio::test]
 async fn bad_logins_carry_the_servers_message() {
-    let Ok(url) = std::env::var("DBLENS_TEST_MYSQL_URL") else { return };
+    let Ok(url) = std::env::var("DBLENS_TEST_MYSQL_URL") else {
+        return;
+    };
     let _ = rustls::crypto::ring::default_provider().install_default();
     let bad = url.replacen("dblens:dblens@", "dblens:wrong-password@", 1);
-    let Err(error) = mysql::connect(&bad, None).await else { panic!("login should fail") };
-    assert!(error.message().to_lowercase().contains("access denied"), "{}", error.message());
+    let Err(error) = mysql::connect(&bad, None).await else {
+        panic!("login should fail")
+    };
+    assert!(
+        error.message().to_lowercase().contains("access denied"),
+        "{}",
+        error.message()
+    );
+}
+
+fn first_key(page: &dblens_lib::session::QueryResult, row: usize) -> RowKey {
+    let keys = page.keys.clone().expect("keys");
+    RowKey {
+        columns: keys.columns,
+        kind: keys.kind,
+        values: keys.values[row].clone(),
+    }
+}
+
+#[tokio::test]
+async fn edits_rows_keyed_by_bytes_floats_and_bits() {
+    let Some(s) = open().await else { return };
+    let db = s.execute("select database()").await.unwrap().results[0].rows[0][0]
+        .clone()
+        .unwrap();
+    for (name, ddl, insert) in [
+        (
+            "dbl_my_kbin",
+            "create table dbl_my_kbin (id binary(16) primary key, v text)",
+            "insert into dbl_my_kbin values (unhex('000102030405060708090A0B0C0D0E0F'), 'a')",
+        ),
+        (
+            "dbl_my_kflt",
+            "create table dbl_my_kflt (id float primary key, v text)",
+            "insert into dbl_my_kflt values (0.1, 'a')",
+        ),
+        (
+            "dbl_my_kbit",
+            "create table dbl_my_kbit (id bit(5) primary key, v text)",
+            "insert into dbl_my_kbit values (b'101', 'a')",
+        ),
+    ] {
+        drop_table(&*s, name).await;
+        s.execute(ddl).await.unwrap();
+        s.execute(insert).await.unwrap();
+        let relation = Relation::new(db.clone(), name, RelationKind::Table, -1.0);
+        let page = s.page(&relation, 50, 0, "", None).await.unwrap();
+        assert_eq!(
+            page.columns.len(),
+            2,
+            "{name}: hidden key columns are taken off"
+        );
+        assert_eq!(page.columns[0].name, "id");
+        let key = first_key(&page, 0);
+        s.update(&relation, &key, &[cell("v", Some("edited"))])
+            .await
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let page = s.page(&relation, 50, 0, "", None).await.unwrap();
+        assert_eq!(page.rows[0][1].as_deref(), Some("edited"), "{name}");
+        s.delete(&relation, &first_key(&page, 0))
+            .await
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(s.count(&relation, "").await.unwrap(), Some(0), "{name}");
+        drop_table(&*s, name).await;
+    }
+}
+
+#[tokio::test]
+async fn grid_edits_inside_a_user_transaction_leave_the_commit_to_the_user() {
+    let Some(s) = open().await else { return };
+    let relation = fixture(&*s, "dbl_my_tx").await;
+    s.execute("start transaction").await.unwrap();
+    s.execute("insert into dbl_my_tx values (20, 'user-pending', null, null)")
+        .await
+        .unwrap();
+    s.update(&relation, &key("1"), &[cell("title", Some("edited"))])
+        .await
+        .unwrap();
+    assert!(s.delete(&relation, &key("999")).await.is_err());
+    assert!(s.rehearse("select 1").await.is_err());
+    assert!(s.read_only("select 1").await.is_err());
+    s.execute("rollback").await.unwrap();
+    assert_eq!(s.count(&relation, "").await.unwrap(), Some(4));
+    let page = s.page(&relation, 50, 0, "", None).await.unwrap();
+    assert_eq!(page.rows[0][1].as_deref(), Some("Alpha"));
+    drop_table(&*s, "dbl_my_tx").await;
 }

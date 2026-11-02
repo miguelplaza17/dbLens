@@ -11,17 +11,17 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use rusqlite::fallible_iterator::FallibleIterator;
-use rusqlite::{params_from_iter, Batch, Connection, InterruptHandle, OpenFlags, Statement};
 use rusqlite::types::ValueRef;
+use rusqlite::{params_from_iter, Batch, Connection, InterruptHandle, OpenFlags, Statement};
 
 use crate::connector::Summary;
 use crate::engine::Engine;
+use crate::session::like_pattern;
 use crate::session::{
-    CellValue, Column, ColumnSort, DatabaseSession, DbError, DbResult, EditOutcome, Execution, QueryResult,
-    Relation, RelationKind, RowKey, RowKeyKind, RowKeys, SchemaGraph, ROW_LIMIT,
+    CellValue, Column, ColumnSort, DatabaseSession, DbError, DbResult, EditOutcome, Execution,
+    QueryResult, Relation, RelationKind, RowKey, RowKeyKind, RowKeys, SchemaGraph, ROW_LIMIT,
 };
 use crate::sql_script::{self, Dialect};
-use crate::session::like_pattern;
 use crate::url::{quote_ident, SqliteLocation};
 
 /// The file for the connection sheet.
@@ -65,7 +65,9 @@ fn closed() -> DbError {
 fn err(error: rusqlite::Error) -> DbError {
     use rusqlite::ffi::ErrorCode;
     match error {
-        rusqlite::Error::SqliteFailure(e, _) if e.code == ErrorCode::OperationInterrupted => DbError::Cancelled,
+        rusqlite::Error::SqliteFailure(e, _) if e.code == ErrorCode::OperationInterrupted => {
+            DbError::Cancelled
+        }
         rusqlite::Error::SqliteFailure(_, Some(message)) => DbError::Message(message),
         other => DbError::Message(other.to_string()),
     }
@@ -85,8 +87,11 @@ impl SqliteSession {
         let (conn, mut read_only) = match Connection::open_with_flags(&location.path, write) {
             Ok(conn) => (conn, false),
             Err(_) => (
-                Connection::open_with_flags(&location.path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
-                    .map_err(err)?,
+                Connection::open_with_flags(
+                    &location.path,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )
+                .map_err(err)?,
                 true,
             ),
         };
@@ -94,14 +99,17 @@ impl SqliteSession {
         if conn.is_readonly("main").unwrap_or(false) {
             read_only = true;
         }
-        conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(err)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(err)?;
         // A file that isn't a database only fails on first use; fail now.
-        conn.execute_batch("pragma foreign_keys = on").map_err(err)?;
-        conn.query_row("select 1 from sqlite_schema limit 1", [], |_| Ok(())).or_else(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => Ok(()),
-            other => Err(other),
-        })
-        .map_err(err)?;
+        conn.execute_batch("pragma foreign_keys = on")
+            .map_err(err)?;
+        conn.query_row("select 1 from sqlite_schema limit 1", [], |_| Ok(()))
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(()),
+                other => Err(other),
+            })
+            .map_err(err)?;
         Ok(Self {
             interrupt: conn.get_interrupt_handle(),
             conn: Arc::new(Mutex::new(Some(conn))),
@@ -152,7 +160,11 @@ pub(crate) fn real_text(v: f64) -> String {
         return "NaN".into();
     }
     if v == 0.0 {
-        return if v.is_sign_negative() { "-0.0".into() } else { "0.0".into() };
+        return if v.is_sign_negative() {
+            "-0.0".into()
+        } else {
+            "0.0".into()
+        };
     }
     let scientific = format!("{v:.14e}");
     let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
@@ -220,14 +232,19 @@ pub(crate) fn first_keyword(sql: &str) -> String {
             break;
         }
     }
-    rest.chars().take_while(|c| c.is_alphabetic()).collect::<String>().to_uppercase()
+    rest.chars()
+        .take_while(|c| c.is_alphabetic())
+        .collect::<String>()
+        .to_uppercase()
 }
 
 /// Steps a statement to the end and gathers its rows (cut at `ROW_LIMIT`).
 fn read(conn: &Connection, stmt: &mut Statement<'_>) -> DbResult<QueryResult> {
     let count = stmt.column_count();
-    let columns: Vec<Column> =
-        stmt.columns().map(|c| Column::new(c.name(), c.decl_type().unwrap_or(""))).collect();
+    let columns: Vec<Column> = stmt
+        .columns()
+        .map(|c| Column::new(c.name(), c.decl_type().unwrap_or("")))
+        .collect();
     let sql = stmt.expanded_sql().unwrap_or_default();
     let mut rows: Vec<Vec<Option<String>>> = Vec::new();
     let mut total: u64 = 0;
@@ -290,9 +307,22 @@ fn read_only_run(conn: &Connection, sql: &str) -> DbResult<QueryResult> {
     }
     // stmt_readonly passes these too: they change the connection, not the file.
     let keyword = first_keyword(sql);
-    let blocked = ["ATTACH", "DETACH", "PRAGMA", "BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE", "VACUUM"];
+    let blocked = [
+        "ATTACH",
+        "DETACH",
+        "PRAGMA",
+        "BEGIN",
+        "COMMIT",
+        "END",
+        "ROLLBACK",
+        "SAVEPOINT",
+        "RELEASE",
+        "VACUUM",
+    ];
     if blocked.contains(&keyword.as_str()) || !stmt.readonly() {
-        return Err(DbError::msg("This statement would change the database; read-only queries can't."));
+        return Err(DbError::msg(
+            "This statement would change the database; read-only queries can't.",
+        ));
     }
     conn.execute_batch("pragma query_only = on").map_err(err)?;
     let result = read(conn, &mut stmt);
@@ -300,12 +330,27 @@ fn read_only_run(conn: &Connection, sql: &str) -> DbResult<QueryResult> {
     result
 }
 
+/// Refused while the user has a transaction open in the SQL panel: SQLite
+/// can't start another, and dbLens's rollback would undo the user's work.
+fn require_no_transaction(conn: &Connection) -> DbResult<()> {
+    if conn.is_autocommit() {
+        Ok(())
+    } else {
+        Err(DbError::msg(
+            "A transaction is open in the SQL panel. Commit or roll it back first.",
+        ))
+    }
+}
+
 fn in_transaction(conn: &Connection, sql: &str, commit: bool) -> DbResult<Vec<QueryResult>> {
     let statements = sql_script::checked(sql, Dialect::Sqlite)?;
+    require_no_transaction(conn)?;
     for statement in &statements {
         let verb = sql_script::verb(statement, 1);
         if ["VACUUM", "ATTACH", "DETACH"].contains(&verb.as_str()) {
-            return Err(DbError::msg(format!("{verb} can't run inside a transaction.")));
+            return Err(DbError::msg(format!(
+                "{verb} can't run inside a transaction."
+            )));
         }
     }
     conn.execute_batch("begin").map_err(err)?;
@@ -339,14 +384,27 @@ struct TableInfo {
 
 /// Column names and declared types, in table order, plus the primary key in key order.
 fn table_info(conn: &Connection, relation: &Relation) -> DbResult<TableInfo> {
-    let rows = single(conn, &format!("pragma table_info({})", quote_ident(&relation.name)))?.rows;
+    let rows = single(
+        conn,
+        &format!("pragma table_info({})", quote_ident(&relation.name)),
+    )?
+    .rows;
     // cid, name, type, notnull, dflt_value, pk
-    let mut info = TableInfo { types: BTreeMap::new(), primary_key: vec![], columns: vec![] };
+    let mut info = TableInfo {
+        types: BTreeMap::new(),
+        primary_key: vec![],
+        columns: vec![],
+    };
     let mut keyed: Vec<(i64, String)> = Vec::new();
     for row in rows {
         let name = row[1].clone().unwrap_or_default();
-        info.types.insert(name.clone(), row[2].clone().unwrap_or_default());
-        if let Some(order) = row[5].as_deref().and_then(|p| p.parse::<i64>().ok()).filter(|o| *o > 0) {
+        info.types
+            .insert(name.clone(), row[2].clone().unwrap_or_default());
+        if let Some(order) = row[5]
+            .as_deref()
+            .and_then(|p| p.parse::<i64>().ok())
+            .filter(|o| *o > 0)
+        {
             keyed.push((order, name.clone()));
         }
         info.columns.push(name);
@@ -357,7 +415,11 @@ fn table_info(conn: &Connection, relation: &Relation) -> DbResult<TableInfo> {
 }
 
 fn qualified(relation: &Relation) -> String {
-    format!("{}.{}", quote_ident(&relation.schema), quote_ident(&relation.name))
+    format!(
+        "{}.{}",
+        quote_ident(&relation.schema),
+        quote_ident(&relation.name)
+    )
 }
 
 /// Every column joined into one text and matched with LIKE (case-insensitive for ASCII).
@@ -365,7 +427,11 @@ fn filter(search: &str, columns: &[String]) -> String {
     if search.is_empty() || columns.is_empty() {
         return String::new();
     }
-    let joined = columns.iter().map(|c| format!("coalesce({}, '')", quote_ident(c))).collect::<Vec<_>>().join(" || ' ' || ");
+    let joined = columns
+        .iter()
+        .map(|c| format!("coalesce({}, '')", quote_ident(c)))
+        .collect::<Vec<_>>()
+        .join(" || ' ' || ");
     let pattern = like_pattern(search).replace('\'', "''");
     format!(" where ({joined}) like '{pattern}' escape '\\'")
 }
@@ -382,38 +448,65 @@ fn page_of(
     let is_table = relation.kind == RelationKind::Table;
     let use_rowid = is_table && info.primary_key.is_empty();
     let keys: Vec<String> = if info.primary_key.is_empty() {
-        if use_rowid { vec!["rowid".into()] } else { vec![] }
+        if use_rowid {
+            vec!["t.rowid".into()]
+        } else {
+            vec![]
+        }
     } else {
         info.primary_key.iter().map(|k| quote_ident(k)).collect()
     };
-    let mut terms: Vec<String> =
-        sort.map(|s| format!("{} {} nulls last", quote_ident(&s.column), s.direction())).into_iter().collect();
+    // Key columns come first, read with their storage class (see `key_select`),
+    // and are taken off before the rows are shown.
+    let hidden: Vec<String> = if use_rowid {
+        vec!["t.rowid as \"dblens_key_0\", ".into()]
+    } else if is_table {
+        info.primary_key
+            .iter()
+            .enumerate()
+            .map(|(i, k)| format!("{} as \"dblens_key_{i}\", ", key_select(k)))
+            .collect()
+    } else {
+        vec![]
+    };
+    let mut terms: Vec<String> = sort
+        .map(|s| format!("{} {} nulls last", quote_ident(&s.column), s.direction()))
+        .into_iter()
+        .collect();
     terms.extend(keys);
-    let order = if terms.is_empty() { String::new() } else { format!(" order by {}", terms.join(", ")) };
+    let order = if terms.is_empty() {
+        String::new()
+    } else {
+        format!(" order by {}", terms.join(", "))
+    };
     let sql = format!(
-        "select {}* from {}{}{order} limit {limit} offset {offset}",
-        if use_rowid { "rowid, " } else { "" },
+        "select {}t.* from {} as t{}{order} limit {limit} offset {offset}",
+        hidden.concat(),
         qualified(relation),
         filter(search, &info.columns),
     );
     let mut result = single(conn, &sql)?;
-    if use_rowid {
-        let values = result.rows.iter().map(|r| vec![r[0].clone()]).collect();
-        result.columns.remove(0);
-        for row in &mut result.rows {
-            row.remove(0);
-        }
-        result.keys = Some(RowKeys { columns: vec!["rowid".into()], kind: RowKeyKind::Rowid, values });
-    } else if is_table {
-        let indexes: Vec<usize> =
-            info.primary_key.iter().filter_map(|n| result.columns.iter().position(|c| &c.name == n)).collect();
-        if indexes.len() == info.primary_key.len() {
-            result.keys = Some(RowKeys {
+    let n = hidden.len();
+    if n > 0 && result.columns.len() >= n {
+        let values = result
+            .rows
+            .iter_mut()
+            .map(|row| row.drain(..n).collect())
+            .collect();
+        result.columns.drain(..n);
+        result.keys = Some(if use_rowid {
+            RowKeys {
+                columns: vec!["rowid".into()],
+                kind: RowKeyKind::Rowid,
+                values,
+            }
+        } else {
+            RowKeys {
                 columns: info.primary_key.clone(),
                 kind: RowKeyKind::PrimaryKey,
-                values: result.rows.iter().map(|row| indexes.iter().map(|i| row[*i].clone()).collect()).collect(),
-            });
-        }
+                values,
+            }
+        });
     }
     for column in &mut result.columns {
         if let Some(declared) = info.types.get(&column.name) {
@@ -425,27 +518,93 @@ fn page_of(
 
 // MARK: - Editing
 
+/// A new cell value: text, or NULL. The column's affinity converts it.
+fn text_value(value: Option<&str>) -> rusqlite::types::Value {
+    match value {
+        Some(text) => rusqlite::types::Value::Text(text.to_string()),
+        None => rusqlite::types::Value::Null,
+    }
+}
+
+/// A key column read with its storage class, since a column without a declared
+/// type (or a BLOB) compares only with a value of the same class: "i:1",
+/// "r:0.1" (exact, from quote), "t:text", "b:0102" (every byte as hex).
+fn key_select(column: &str) -> String {
+    let c = format!("t.{}", quote_ident(column));
+    format!(
+        "case typeof({c}) when 'null' then null when 'integer' then 'i:' || {c} \
+         when 'real' then 'r:' || quote({c}) when 'blob' then 'b:' || hex({c}) else 't:' || {c} end"
+    )
+}
+
+/// The value to bind for a key from `key_select`; text without a tag stays text.
+fn key_value(text: &str) -> DbResult<rusqlite::types::Value> {
+    use rusqlite::types::Value;
+    let bad = || DbError::msg("The row key is not valid. Reload the table and try again.");
+    Ok(match text.split_at_checked(2) {
+        Some(("i:", n)) => Value::Integer(n.parse().map_err(|_| bad())?),
+        Some(("r:", n)) => Value::Real(n.parse().map_err(|_| bad())?),
+        Some(("t:", t)) => Value::Text(t.to_string()),
+        Some(("b:", hex)) => {
+            if hex.len() % 2 != 0 || !hex.is_ascii() {
+                return Err(bad());
+            }
+            let bytes = (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
+                .collect::<Result<Vec<u8>, _>>()
+                .map_err(|_| bad())?;
+            Value::Blob(bytes)
+        }
+        _ => Value::Text(text.to_string()),
+    })
+}
+
 /// `"col" = ?` per key column; a NULL key value compares with `is null` and binds nothing.
-fn where_clause(key: &RowKey) -> (String, Vec<Option<String>>) {
+fn where_clause(key: &RowKey) -> DbResult<(String, Vec<rusqlite::types::Value>)> {
     let mut parts = Vec::new();
     let mut params = Vec::new();
     for (name, v) in key.columns.iter().zip(&key.values) {
-        let column = if key.kind == RowKeyKind::Rowid { name.clone() } else { quote_ident(name) };
+        let column = if key.kind == RowKeyKind::Rowid {
+            name.clone()
+        } else {
+            quote_ident(name)
+        };
         match v {
             Some(v) => {
                 parts.push(format!("{column} = ?"));
-                params.push(Some(v.clone()));
+                params.push(if key.kind == RowKeyKind::Rowid {
+                    rusqlite::types::Value::Integer(v.parse().map_err(|_| {
+                        DbError::msg("The row key is not valid. Reload the table and try again.")
+                    })?)
+                } else {
+                    key_value(v)?
+                });
             }
             None => parts.push(format!("{column} is null")),
         }
     }
-    (parts.join(" and "), params)
+    Ok((parts.join(" and "), params))
 }
 
 /// Runs one statement with bound text. An edit meant for exactly one row is
 /// rolled back if it would touch more, and refused if it touches none.
-fn edit(conn: &Connection, sql: String, params: Vec<Option<String>>, verb: &str, expect_one: bool) -> DbResult<EditOutcome> {
-    conn.execute_batch("begin").map_err(err)?;
+/// Inside the user's open transaction the edit becomes part of it, behind a
+/// savepoint: a refused edit is undone alone, and the commit stays the user's.
+fn edit(
+    conn: &Connection,
+    sql: String,
+    params: Vec<rusqlite::types::Value>,
+    verb: &str,
+    expect_one: bool,
+) -> DbResult<EditOutcome> {
+    let nested = !conn.is_autocommit();
+    conn.execute_batch(if nested {
+        "savepoint dblens_edit"
+    } else {
+        "begin"
+    })
+    .map_err(err)?;
     let attempt = (|| -> DbResult<u64> {
         let mut stmt = conn.prepare(&sql).map_err(err)?;
         let mut rows = stmt.query(params_from_iter(params.iter())).map_err(err)?;
@@ -454,7 +613,9 @@ fn edit(conn: &Connection, sql: String, params: Vec<Option<String>>, verb: &str,
         let affected = conn.changes();
         if expect_one {
             if affected > 1 {
-                return Err(DbError::msg(format!("The change would have affected {affected} rows and was rolled back.")));
+                return Err(DbError::msg(format!(
+                    "The change would have affected {affected} rows and was rolled back."
+                )));
             }
             if affected != 1 {
                 return Err(DbError::msg(
@@ -462,13 +623,26 @@ fn edit(conn: &Connection, sql: String, params: Vec<Option<String>>, verb: &str,
                 ));
             }
         }
-        conn.execute_batch("commit").map_err(err)?;
+        conn.execute_batch(if nested {
+            "release dblens_edit"
+        } else {
+            "commit"
+        })
+        .map_err(err)?;
         Ok(affected)
     })();
     match attempt {
-        Ok(affected) => Ok(EditOutcome { sql, command: format!("{verb} {affected}"), affected }),
+        Ok(affected) => Ok(EditOutcome {
+            sql,
+            command: format!("{verb} {affected}"),
+            affected,
+        }),
         Err(error) => {
-            let _ = conn.execute_batch("rollback");
+            let _ = conn.execute_batch(if nested {
+                "rollback to dblens_edit; release dblens_edit"
+            } else {
+                "rollback"
+            });
             Err(error)
         }
     }
@@ -509,14 +683,18 @@ impl DatabaseSession for SqliteSession {
     async fn rehearse(&self, text: &str) -> DbResult<Execution> {
         let sql = text.to_string();
         let start = Instant::now();
-        let results = self.with(move |conn| in_transaction(conn, &sql, false)).await?;
+        let results = self
+            .with(move |conn| in_transaction(conn, &sql, false))
+            .await?;
         Ok(Execution::new(results, start.elapsed()))
     }
 
     async fn execute_atomically(&self, text: &str) -> DbResult<Execution> {
         let sql = text.to_string();
         let start = Instant::now();
-        let results = self.with(move |conn| in_transaction(conn, &sql, true)).await?;
+        let results = self
+            .with(move |conn| in_transaction(conn, &sql, true))
+            .await?;
         Ok(Execution::new(results, start.elapsed()))
     }
 
@@ -548,31 +726,61 @@ impl DatabaseSession for SqliteSession {
         sort: Option<&ColumnSort>,
     ) -> DbResult<QueryResult> {
         let (relation, search, sort) = (relation.clone(), search.to_string(), sort.cloned());
-        self.with(move |conn| page_of(conn, &relation, limit, offset, &search, sort.as_ref())).await
+        self.with(move |conn| page_of(conn, &relation, limit, offset, &search, sort.as_ref()))
+            .await
     }
 
     /// Exact count; SQLite keeps no estimate.
     async fn count(&self, relation: &Relation, search: &str) -> DbResult<Option<u64>> {
         let (relation, search) = (relation.clone(), search.to_string());
         self.with(move |conn| {
-            let clause = if search.is_empty() { String::new() } else { filter(&search, &table_info(conn, &relation)?.columns) };
-            let result = single(conn, &format!("select count(*) from {}{clause}", qualified(&relation)))?;
-            Ok(result.rows.first().and_then(|r| r.first()).and_then(|v| v.as_deref()).and_then(|v| v.parse().ok()))
+            let clause = if search.is_empty() {
+                String::new()
+            } else {
+                filter(&search, &table_info(conn, &relation)?.columns)
+            };
+            let result = single(
+                conn,
+                &format!("select count(*) from {}{clause}", qualified(&relation)),
+            )?;
+            Ok(result
+                .rows
+                .first()
+                .and_then(|r| r.first())
+                .and_then(|v| v.as_deref())
+                .and_then(|v| v.parse().ok()))
         })
         .await
     }
 
-    async fn update(&self, relation: &Relation, key: &RowKey, changes: &[CellValue]) -> DbResult<EditOutcome> {
+    async fn update(
+        &self,
+        relation: &Relation,
+        key: &RowKey,
+        changes: &[CellValue],
+    ) -> DbResult<EditOutcome> {
         if changes.is_empty() {
-            return Ok(EditOutcome { sql: String::new(), command: "UPDATE 0".into(), affected: 0 });
+            return Ok(EditOutcome {
+                sql: String::new(),
+                command: "UPDATE 0".into(),
+                affected: 0,
+            });
         }
         self.require_writable()?;
-        let set = changes.iter().map(|c| format!("{} = ?", quote_ident(&c.column))).collect::<Vec<_>>().join(", ");
-        let (clause, key_params) = where_clause(key);
+        let set = changes
+            .iter()
+            .map(|c| format!("{} = ?", quote_ident(&c.column)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (clause, key_params) = where_clause(key)?;
         let sql = format!("update {} set {set} where {clause}", qualified(relation));
-        let mut params: Vec<Option<String>> = changes.iter().map(|c| c.value.clone()).collect();
+        let mut params: Vec<rusqlite::types::Value> = changes
+            .iter()
+            .map(|c| text_value(c.value.as_deref()))
+            .collect();
         params.extend(key_params);
-        self.with(move |conn| edit(conn, sql, params, "UPDATE", true)).await
+        self.with(move |conn| edit(conn, sql, params, "UPDATE", true))
+            .await
     }
 
     /// Adds a row. Columns left out get their default.
@@ -584,19 +792,28 @@ impl DatabaseSession for SqliteSession {
             format!(
                 "insert into {} ({}) values ({})",
                 qualified(relation),
-                values.iter().map(|v| quote_ident(&v.column)).collect::<Vec<_>>().join(", "),
+                values
+                    .iter()
+                    .map(|v| quote_ident(&v.column))
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 values.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
             )
         };
-        let params = values.iter().map(|v| v.value.clone()).collect();
-        self.with(move |conn| edit(conn, sql, params, "INSERT", false)).await
+        let params = values
+            .iter()
+            .map(|v| text_value(v.value.as_deref()))
+            .collect();
+        self.with(move |conn| edit(conn, sql, params, "INSERT", false))
+            .await
     }
 
     async fn delete(&self, relation: &Relation, key: &RowKey) -> DbResult<EditOutcome> {
         self.require_writable()?;
-        let (clause, params) = where_clause(key);
+        let (clause, params) = where_clause(key)?;
         let sql = format!("delete from {} where {clause}", qualified(relation));
-        self.with(move |conn| edit(conn, sql, params, "DELETE", true)).await
+        self.with(move |conn| edit(conn, sql, params, "DELETE", true))
+            .await
     }
 
     async fn schema_graph(&self) -> DbResult<SchemaGraph> {
@@ -703,7 +920,10 @@ mod tests {
     #[test]
     fn finds_the_first_keyword() {
         assert_eq!(first_keyword("  select 1"), "SELECT");
-        assert_eq!(first_keyword(";; -- note\n /* x */ insert into t"), "INSERT");
+        assert_eq!(
+            first_keyword(";; -- note\n /* x */ insert into t"),
+            "INSERT"
+        );
         assert_eq!(first_keyword("/* open"), "");
         assert_eq!(first_keyword(""), "");
     }
@@ -725,11 +945,43 @@ mod tests {
             kind: RowKeyKind::PrimaryKey,
             values: vec![Some("1".into()), None],
         };
-        let (sql, params) = where_clause(&key);
+        use rusqlite::types::Value;
+        let (sql, params) = where_clause(&key).unwrap();
         assert_eq!(sql, "\"a\" = ? and \"b\" is null");
-        assert_eq!(params, vec![Some("1".to_string())]);
-        let rowid = RowKey { columns: vec!["rowid".into()], kind: RowKeyKind::Rowid, values: vec![Some("7".into())] };
-        assert_eq!(where_clause(&rowid).0, "rowid = ?");
+        assert_eq!(params, vec![Value::Text("1".into())]);
+        let rowid = RowKey {
+            columns: vec!["rowid".into()],
+            kind: RowKeyKind::Rowid,
+            values: vec![Some("7".into())],
+        };
+        let (sql, params) = where_clause(&rowid).unwrap();
+        assert_eq!(sql, "rowid = ?");
+        assert_eq!(params, vec![Value::Integer(7)]);
+        let tagged = RowKey {
+            columns: vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            kind: RowKeyKind::PrimaryKey,
+            values: vec![
+                Some("i:1".into()),
+                Some("r:0.33333333333333332".into()),
+                Some("t:i:x".into()),
+                Some("b:01ff".into()),
+            ],
+        };
+        assert_eq!(
+            where_clause(&tagged).unwrap().1,
+            vec![
+                Value::Integer(1),
+                Value::Real(1.0 / 3.0),
+                Value::Text("i:x".into()),
+                Value::Blob(vec![1, 255]),
+            ]
+        );
+        let bad = RowKey {
+            values: vec![Some("b:0x01".into())],
+            columns: vec!["a".into()],
+            kind: RowKeyKind::PrimaryKey,
+        };
+        assert!(where_clause(&bad).is_err());
     }
 
     #[test]

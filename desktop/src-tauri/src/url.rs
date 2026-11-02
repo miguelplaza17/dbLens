@@ -15,8 +15,24 @@ use crate::session::DbError;
 /// What stands in for a saved password on screen.
 pub const MASK: &str = "•••";
 
-/// Settings whose values are secret.
-const SECRET_KEYS: [&str; 2] = ["password", "sslpassword"];
+/// Settings whose values are secret: libpq's, and MongoDB's key file and proxy
+/// passwords (also the old `sslPEMKeyPassword` spelling).
+const SECRET_KEYS: [&str; 5] = [
+    "password",
+    "sslpassword",
+    "tlsCertificateKeyFilePassword",
+    "sslPEMKeyPassword",
+    "proxyPassword",
+];
+
+/// The AWS session token, one entry of MongoDB's `authMechanismProperties`
+/// list (`AWS_SESSION_TOKEN:…`, the colon maybe as %3A). Group 2 is the token.
+fn aws_token_pattern(value: &str) -> Regex {
+    Regex::new(&format!(
+        r"(?i)([?&]authMechanismProperties=(?:[^&#]*?(?:,|%2C))?AWS_SESSION_TOKEN(?::|%3A))({value})()"
+    ))
+    .expect("token pattern")
+}
 
 fn re(cell: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
     cell.get_or_init(|| Regex::new(pattern).expect("valid regex"))
@@ -41,7 +57,9 @@ pub fn clean(text: &str) -> String {
             value = after;
         }
     }
-    let mut value = value.trim_matches(|c: char| c == ' ' || c == '\t').to_string();
+    let mut value = value
+        .trim_matches(|c: char| c == ' ' || c == '\t')
+        .to_string();
     let chars: Vec<char> = value.chars().collect();
     if chars.len() >= 2 {
         let (first, last) = (chars[0], chars[chars.len() - 1]);
@@ -53,11 +71,18 @@ pub fn clean(text: &str) -> String {
 }
 
 fn decode(text: &str) -> String {
-    percent_decode_str(text).decode_utf8().map(|s| s.into_owned()).unwrap_or_else(|_| text.to_string())
+    percent_decode_str(text)
+        .decode_utf8()
+        .map(|s| s.into_owned())
+        .unwrap_or_else(|_| text.to_string())
 }
 
 /// Everything but RFC 3986's unreserved characters is percent-encoded.
-const UNRESERVED: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
+const UNRESERVED: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
 
 pub fn encode(text: &str) -> String {
     utf8_percent_encode(text, UNRESERVED).to_string()
@@ -112,17 +137,57 @@ pub struct ConnectionUrl {
 
 /// The settings libpq knows (PostgreSQL 16–18). Anything else is dropped.
 const LIBPQ_KEYS: [&str; 46] = [
-    "host", "hostaddr", "port", "dbname", "user", "password", "passfile", "channel_binding",
-    "connect_timeout", "client_encoding", "options", "application_name", "fallback_application_name",
-    "keepalives", "keepalives_idle", "keepalives_interval", "keepalives_count", "tcp_user_timeout",
-    "replication", "gssencmode", "sslmode", "requiressl", "sslcompression", "sslcert", "sslkey",
-    "sslpassword", "sslcertmode", "sslrootcert", "sslcrl", "sslcrldir", "sslsni", "requirepeer",
-    "ssl_min_protocol_version", "ssl_max_protocol_version", "krbsrvname", "gsslib", "gssdelegation",
-    "service", "target_session_attrs", "load_balance_hosts", "sslnegotiation", "require_auth",
-    "sslkeylogfile", "scram_client_key", "scram_server_key", "oauth_issuer",
+    "host",
+    "hostaddr",
+    "port",
+    "dbname",
+    "user",
+    "password",
+    "passfile",
+    "channel_binding",
+    "connect_timeout",
+    "client_encoding",
+    "options",
+    "application_name",
+    "fallback_application_name",
+    "keepalives",
+    "keepalives_idle",
+    "keepalives_interval",
+    "keepalives_count",
+    "tcp_user_timeout",
+    "replication",
+    "gssencmode",
+    "sslmode",
+    "requiressl",
+    "sslcompression",
+    "sslcert",
+    "sslkey",
+    "sslpassword",
+    "sslcertmode",
+    "sslrootcert",
+    "sslcrl",
+    "sslcrldir",
+    "sslsni",
+    "requirepeer",
+    "ssl_min_protocol_version",
+    "ssl_max_protocol_version",
+    "krbsrvname",
+    "gsslib",
+    "gssdelegation",
+    "service",
+    "target_session_attrs",
+    "load_balance_hosts",
+    "sslnegotiation",
+    "require_auth",
+    "sslkeylogfile",
+    "scram_client_key",
+    "scram_server_key",
+    "oauth_issuer",
 ];
 
-const PREFERRED: [&str; 7] = ["host", "hostaddr", "port", "dbname", "user", "password", "sslmode"];
+const PREFERRED: [&str; 7] = [
+    "host", "hostaddr", "port", "dbname", "user", "password", "sslmode",
+];
 
 impl ConnectionUrl {
     pub fn new(text: &str) -> Result<Self, UrlProblem> {
@@ -137,13 +202,18 @@ impl ConnectionUrl {
         } else {
             None
         };
-        let parsed = parsed.filter(|p| !p.is_empty()).ok_or(UrlProblem::NotPostgres)?;
+        let parsed = parsed
+            .filter(|p| !p.is_empty())
+            .ok_or(UrlProblem::NotPostgres)?;
         let settings = normalize(&parsed);
         // key=value text with no setting libpq knows is not a connection.
         if settings.is_empty() {
             return Err(UrlProblem::NotPostgres);
         }
-        Ok(Self { raw: cleaned, settings })
+        Ok(Self {
+            raw: cleaned,
+            settings,
+        })
     }
 
     /// All hosts, comma separated, as libpq takes them. Empty means the local socket.
@@ -228,12 +298,19 @@ impl ConnectionUrl {
 }
 
 fn libpq(mut values: BTreeMap<String, String>) -> String {
-    values.entry("connect_timeout".into()).or_insert_with(|| "10".into());
+    values
+        .entry("connect_timeout".into())
+        .or_insert_with(|| "10".into());
     ordered(&values)
 }
 
 fn ordered(values: &BTreeMap<String, String>) -> String {
-    let rank = |key: &str| PREFERRED.iter().position(|p| *p == key).unwrap_or(PREFERRED.len());
+    let rank = |key: &str| {
+        PREFERRED
+            .iter()
+            .position(|p| *p == key)
+            .unwrap_or(PREFERRED.len())
+    };
     let mut pairs: Vec<(&String, &String)> = values.iter().collect();
     pairs.sort_by(|a, b| rank(a.0).cmp(&rank(b.0)).then_with(|| a.0.cmp(b.0)));
     pairs
@@ -246,7 +323,9 @@ fn ordered(values: &BTreeMap<String, String>) -> String {
 /// The part after the scheme, for postgres://, postgresql://, jdbc:… and postgresql+driver://.
 fn url_form(text: &str) -> Option<&str> {
     static FORM: OnceLock<Regex> = OnceLock::new();
-    re(&FORM, r"^(?i)(jdbc:)?postgres(ql)?(\+[a-z0-9_]+)?://").find(text).map(|m| &text[m.end()..])
+    re(&FORM, r"^(?i)(jdbc:)?postgres(ql)?(\+[a-z0-9_]+)?://")
+        .find(text)
+        .map(|m| &text[m.end()..])
 }
 
 /// scheme-less `user:pass@host1:1,host2:2/db?k=v#frag` into libpq-style keys
@@ -285,7 +364,10 @@ pub(crate) fn parse_url(rest: &str) -> BTreeMap<String, String> {
             hosts.push(entry[1..close].to_string());
             let after = &entry[close + 1..];
             ports.push(after.strip_prefix(':').unwrap_or("").to_string());
-        } else if let Some(colon) = entry.rfind(':').filter(|c| entry[c + 1..].chars().all(char::is_numeric)) {
+        } else if let Some(colon) = entry
+            .rfind(':')
+            .filter(|c| entry[c + 1..].chars().all(char::is_numeric))
+        {
             hosts.push(decode(&entry[..colon]));
             ports.push(entry[colon + 1..].to_string());
         } else {
@@ -384,14 +466,23 @@ fn normalize(input: &BTreeMap<String, String>) -> BTreeMap<String, String> {
             }
             "schema" | "currentschema" | "search_path" => schema = Some(value.clone()),
             "ssl" => {
-                if ["true", "1", "on", "require"].contains(&value.to_lowercase().as_str()) && !has_sslmode {
+                if ["true", "1", "on", "require"].contains(&value.to_lowercase().as_str())
+                    && !has_sslmode
+                {
                     values.insert("sslmode".into(), "require".into());
                 }
             }
             "sslmode" => {
                 // node-postgres' no-verify: encrypted, certificate not checked = libpq's require.
                 let mode = value.to_lowercase();
-                values.insert("sslmode".into(), if mode == "no-verify" { "require".into() } else { mode });
+                values.insert(
+                    "sslmode".into(),
+                    if mode == "no-verify" {
+                        "require".into()
+                    } else {
+                        mode
+                    },
+                );
             }
             _ => {
                 if LIBPQ_KEYS.contains(&key.as_str()) {
@@ -466,7 +557,9 @@ pub fn redact(raw: &str) -> String {
                 .into_owned();
         }
     }
-    text
+    aws_token_pattern(r"[^,&#]*")
+        .replace_all(&text, |c: &Captures| format!("{}{MASK}", &c[1]))
+        .into_owned()
 }
 
 /// The password and sslpassword in any connection text.
@@ -477,12 +570,30 @@ pub fn secrets(text: &str) -> BTreeMap<String, String> {
     }
     let mut found = BTreeMap::new();
     if let Some(parts) = UrlParts::new(text) {
-        let query = |key: &str| parts.query.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)).map(|(_, v)| v.clone());
+        let query = |key: &str| {
+            parts
+                .query
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                .map(|(_, v)| v.clone())
+        };
         if let Some(password) = parts.password.clone().or_else(|| query("password")) {
             found.insert("password".into(), password);
         }
-        if let Some(value) = query("sslpassword") {
-            found.insert("sslpassword".into(), value);
+        for key in &SECRET_KEYS[1..] {
+            if let Some(value) = query(key) {
+                found.insert((*key).into(), value);
+            }
+        }
+        if let Some(token) = query("authMechanismProperties").and_then(|list| {
+            list.split(',').find_map(|entry| {
+                let (name, value) = entry.split_once(':')?;
+                name.trim()
+                    .eq_ignore_ascii_case("AWS_SESSION_TOKEN")
+                    .then(|| value.to_string())
+            })
+        }) {
+            found.insert("AWS_SESSION_TOKEN".into(), token);
         }
     }
     found
@@ -499,7 +610,9 @@ pub fn unmask(text: &str, original: &str) -> String {
     let masked = regex::escape(MASK);
     let mut result = text.to_string();
     for key in SECRET_KEYS {
-        let Some(secret) = secrets.get(key) else { continue };
+        let Some(secret) = secrets.get(key) else {
+            continue;
+        };
         for place in Place::all_for(key) {
             let value = if *place == Place::KeyValue {
                 format!("'{}'", secret.replace('\\', "\\\\").replace('\'', "\\'"))
@@ -511,6 +624,12 @@ pub fn unmask(text: &str, original: &str) -> String {
                 .replace_all(&result, |c: &Captures| format!("{}{value}{}", &c[1], &c[3]))
                 .into_owned();
         }
+    }
+    if let Some(token) = secrets.get("AWS_SESSION_TOKEN") {
+        let value = encode(token);
+        result = aws_token_pattern(&masked)
+            .replace_all(&result, |c: &Captures| format!("{}{value}", &c[1]))
+            .into_owned();
     }
     result
 }
@@ -531,13 +650,21 @@ pub fn compose(
     let mut auth = encode(user);
     if !password.is_empty() {
         auth.push(':');
-        auth.push_str(&if mask_password { MASK.to_string() } else { encode(password) });
+        auth.push_str(&if mask_password {
+            MASK.to_string()
+        } else {
+            encode(password)
+        });
     }
     if !auth.is_empty() {
         auth.push('@');
     }
     let port = port.trim();
-    let host_part = if host.contains(':') && !host.starts_with('[') { format!("[{host}]") } else { host.to_string() };
+    let host_part = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
     let mut url = format!("{scheme}://{auth}{host_part}");
     if !port.is_empty() {
         url.push(':');
@@ -593,21 +720,37 @@ impl UrlParts {
             }
         }
         let mut values = parse_url(&cleaned[m.end()..]);
-        let names: Vec<String> = values.get("host").map(|h| h.split(',').map(String::from).collect()).unwrap_or_else(|| vec![String::new()]);
-        let ports: Vec<String> = values.get("port").map(|p| p.split(',').map(String::from).collect()).unwrap_or_default();
+        let names: Vec<String> = values
+            .get("host")
+            .map(|h| h.split(',').map(String::from).collect())
+            .unwrap_or_else(|| vec![String::new()]);
+        let ports: Vec<String> = values
+            .get("port")
+            .map(|p| p.split(',').map(String::from).collect())
+            .unwrap_or_default();
         let single = names.len() == 1;
         let hosts = names
             .iter()
             .enumerate()
             .filter(|(_, name)| !(name.is_empty() && single))
-            .map(|(i, name)| UrlHost { name: name.clone(), port: ports.get(i).and_then(|p| p.parse().ok()) })
+            .map(|(i, name)| UrlHost {
+                name: name.clone(),
+                port: ports.get(i).and_then(|p| p.parse().ok()),
+            })
             .collect();
         let user = values.remove("user");
         let password = values.remove("password");
         let path = values.remove("dbname").unwrap_or_default();
         values.remove("host");
         values.remove("port");
-        Some(Self { scheme, user, password, hosts, path, query: values })
+        Some(Self {
+            scheme,
+            user,
+            password,
+            hosts,
+            path,
+            query: values,
+        })
     }
 
     pub fn first_host(&self) -> Option<&UrlHost> {
@@ -628,7 +771,14 @@ pub struct SqliteLocation {
 
 const SQLITE_EXTENSIONS: [&str; 4] = ["db", "db3", "sqlite", "sqlite3"];
 /// Longest first, so "sqlite3://" is not read as "sqlite3:" plus "//".
-const SQLITE_SCHEMES: [&str; 6] = ["sqlite3://", "sqlite://", "sqlite3:", "sqlite:", "file://", "file:"];
+const SQLITE_SCHEMES: [&str; 6] = [
+    "sqlite3://",
+    "sqlite://",
+    "sqlite3:",
+    "sqlite:",
+    "file://",
+    "file:",
+];
 
 impl SqliteLocation {
     pub fn new(text: &str) -> Result<Self, DbError> {
@@ -642,7 +792,10 @@ impl SqliteLocation {
 
     /// The file name, "app.db", for the sidebar.
     pub fn suggested_name(&self) -> String {
-        Path::new(&self.path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| self.path.clone())
+        Path::new(&self.path)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| self.path.clone())
     }
 }
 
@@ -651,13 +804,18 @@ fn not_sqlite() -> DbError {
 }
 
 fn starts_like_path(text: &str) -> bool {
-    text.starts_with('/') || text.starts_with('~') || text.starts_with('.') || is_windows_absolute(text)
+    text.starts_with('/')
+        || text.starts_with('~')
+        || text.starts_with('.')
+        || is_windows_absolute(text)
 }
 
 /// `DB_PATH=/x/app.db` and `DB=~/app.db`: clean() only strips the name before a URL.
 fn strip_env_name(text: &str) -> String {
     static ENV: OnceLock<Regex> = OnceLock::new();
-    let Some(m) = re(&ENV, r"^[A-Za-z_][A-Za-z0-9_]*\s*=\s*").find(text) else { return text.to_string() };
+    let Some(m) = re(&ENV, r"^[A-Za-z_][A-Za-z0-9_]*\s*=\s*").find(text) else {
+        return text.to_string();
+    };
     let rest = text[m.end()..].trim_matches(|c| c == '"' || c == '\'' || c == ' ' || c == '\t');
     if starts_like_path(rest) {
         rest.to_string()
@@ -669,7 +827,10 @@ fn strip_env_name(text: &str) -> String {
 fn resolve(text: &str) -> Result<String, DbError> {
     let lower = text.to_lowercase();
     let Some(scheme) = SQLITE_SCHEMES.iter().find(|s| lower.starts_with(*s)) else {
-        let ext = Path::new(text).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let ext = Path::new(text)
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
         if !starts_like_path(text) || !SQLITE_EXTENSIONS.contains(&ext.as_str()) {
             return Err(not_sqlite());
         }
@@ -701,7 +862,9 @@ fn resolve(text: &str) -> Result<String, DbError> {
 }
 
 fn home() -> PathBuf {
-    directories::BaseDirs::new().map(|d| d.home_dir().to_path_buf()).unwrap_or_else(|| PathBuf::from("/"))
+    directories::BaseDirs::new()
+        .map(|d| d.home_dir().to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 /// ~ expanded; a relative path is relative to the home folder (an app has no
@@ -735,7 +898,10 @@ mod tests {
 
     #[test]
     fn accepts_full_urls() {
-        let url = ConnectionUrl::new("  postgresql://ana:s%40nha@db.example.com:6543/loja?sslmode=require ").unwrap();
+        let url = ConnectionUrl::new(
+            "  postgresql://ana:s%40nha@db.example.com:6543/loja?sslmode=require ",
+        )
+        .unwrap();
         assert_eq!(url.host(), "db.example.com");
         assert_eq!(url.port(), Some(6543));
         assert_eq!(url.user(), Some("ana"));
@@ -752,18 +918,33 @@ mod tests {
     #[test]
     fn rejects_other_input() {
         assert_eq!(ConnectionUrl::new("   "), Err(UrlProblem::Empty));
-        assert_eq!(ConnectionUrl::new("mysql://a@b/c"), Err(UrlProblem::NotPostgres));
+        assert_eq!(
+            ConnectionUrl::new("mysql://a@b/c"),
+            Err(UrlProblem::NotPostgres)
+        );
         assert_eq!(ConnectionUrl::new("só texto"), Err(UrlProblem::NotPostgres));
     }
 
     #[test]
     fn database_defaults_to_user() {
-        assert_eq!(ConnectionUrl::new("postgres://ana@localhost").unwrap().database(), "ana");
+        assert_eq!(
+            ConnectionUrl::new("postgres://ana@localhost")
+                .unwrap()
+                .database(),
+            "ana"
+        );
     }
 
     #[test]
     fn pasted_formats() {
-        type Case = (&'static str, &'static str, Option<u16>, &'static str, Option<&'static str>, Option<&'static str>);
+        type Case = (
+            &'static str,
+            &'static str,
+            Option<u16>,
+            &'static str,
+            Option<&'static str>,
+            Option<&'static str>,
+        );
         let cases: [Case; 12] = [
             ("jdbc:postgresql://db.x.com:5433/loja?user=ana&password=pw&ssl=true", "db.x.com", Some(5433), "loja", Some("ana"), Some("require")),
             ("postgresql+psycopg2://ana:pw@db.x.com/loja", "db.x.com", None, "loja", Some("ana"), None),
@@ -785,8 +966,19 @@ mod tests {
             assert_eq!(url.database(), database, "{text}");
             assert_eq!(url.user(), user, "{text}");
             assert_eq!(url.sslmode(), sslmode, "{text}");
-            for bad in ["schema", "connection_limit", "pgbouncer", "ssl=", "username", "database="] {
-                assert!(!url.for_libpq().contains(bad), "{bad} in {}", url.for_libpq());
+            for bad in [
+                "schema",
+                "connection_limit",
+                "pgbouncer",
+                "ssl=",
+                "username",
+                "database=",
+            ] {
+                assert!(
+                    !url.for_libpq().contains(bad),
+                    "{bad} in {}",
+                    url.for_libpq()
+                );
             }
         }
     }
@@ -794,7 +986,10 @@ mod tests {
     #[test]
     fn driver_options_become_libpq_ones() {
         let prisma = ConnectionUrl::new("postgresql://ana@db.x.com/loja?schema=vendas").unwrap();
-        assert_eq!(prisma.settings.get("options").map(String::as_str), Some("-c search_path=vendas"));
+        assert_eq!(
+            prisma.settings.get("options").map(String::as_str),
+            Some("-c search_path=vendas")
+        );
         let kv = ConnectionUrl::new("host=db.x.com dbname=loja password='it\\'s secret'").unwrap();
         assert_eq!(kv.password(), Some("it's secret"));
         assert!(kv.for_libpq().contains("password='it\\'s secret'"));
@@ -806,8 +1001,20 @@ mod tests {
 
     #[test]
     fn composes_urls_from_fields() {
-        let text = compose("postgresql", "db.x.com", "5433", "minha loja", "ana", "p@ss:w/rd", "require", false);
-        assert_eq!(text, "postgresql://ana:p%40ss%3Aw%2Frd@db.x.com:5433/minha%20loja?sslmode=require");
+        let text = compose(
+            "postgresql",
+            "db.x.com",
+            "5433",
+            "minha loja",
+            "ana",
+            "p@ss:w/rd",
+            "require",
+            false,
+        );
+        assert_eq!(
+            text,
+            "postgresql://ana:p%40ss%3Aw%2Frd@db.x.com:5433/minha%20loja?sslmode=require"
+        );
         let url = ConnectionUrl::new(&text).unwrap();
         assert_eq!(url.password(), Some("p@ss:w/rd"));
         assert_eq!(url.database(), "minha loja");
@@ -816,7 +1023,8 @@ mod tests {
 
     #[test]
     fn tunnel_settings() {
-        let url = ConnectionUrl::new("postgres://ana:pw@localhost:5433/loja?sslmode=disable").unwrap();
+        let url =
+            ConnectionUrl::new("postgres://ana:pw@localhost:5433/loja?sslmode=disable").unwrap();
         assert_eq!(
             url.for_libpq_through_local_port(61000),
             "host='127.0.0.1' port='61000' dbname='loja' user='ana' password='pw' sslmode='disable' connect_timeout='10'"
@@ -838,7 +1046,10 @@ mod tests {
         ] {
             let saved = ConnectionUrl::new(original).unwrap();
             let shown = saved.redacted();
-            assert!(!shown.contains("p@ss") && !shown.contains("p%40ss"), "{shown}");
+            assert!(
+                !shown.contains("p@ss") && !shown.contains("p%40ss"),
+                "{shown}"
+            );
             let back = ConnectionUrl::new(&unmask(&shown, original)).unwrap();
             assert_eq!(back.password(), Some("p@ss"), "{original}");
             let edited = shown.replace("loja", "outra");
@@ -846,7 +1057,12 @@ mod tests {
             assert_eq!(back.password(), Some("p@ss"));
             assert_eq!(back.database(), "outra");
             let typed = edited.replace(MASK, "nova");
-            assert_eq!(ConnectionUrl::new(&unmask(&typed, original)).unwrap().password(), Some("nova"));
+            assert_eq!(
+                ConnectionUrl::new(&unmask(&typed, original))
+                    .unwrap()
+                    .password(),
+                Some("nova")
+            );
         }
     }
 
@@ -855,7 +1071,10 @@ mod tests {
         for (text, secret) in [
             ("postgres://u:p@ss@db.x.com/loja", "p@ss"),
             ("postgres://u@db.x.com/loja?PASSWORD=segredo", "segredo"),
-            ("postgres://u:pw@db.x.com/loja?sslpassword=chave&sslmode=require", "chave"),
+            (
+                "postgres://u:pw@db.x.com/loja?sslpassword=chave&sslmode=require",
+                "chave",
+            ),
             ("host=db user=u Password=segredo dbname=loja", "segredo"),
         ] {
             let url = ConnectionUrl::new(text).unwrap();
@@ -867,29 +1086,88 @@ mod tests {
 
     #[test]
     fn redacts_other_engines() {
-        assert_eq!(redact("mongodb+srv://ana:secret@c.x.net/shop"), "mongodb+srv://ana:•••@c.x.net/shop");
-        assert_eq!(redact("redis://:pw@cache:6379/0"), "redis://:•••@cache:6379/0");
+        assert_eq!(
+            redact("mongodb+srv://ana:secret@c.x.net/shop"),
+            "mongodb+srv://ana:•••@c.x.net/shop"
+        );
+        assert_eq!(
+            redact("redis://:pw@cache:6379/0"),
+            "redis://:•••@cache:6379/0"
+        );
+        for (text, secret) in [
+            (
+                "mongodb://u@h/db?tlsCertificateKeyFilePassword=PW3&tls=true",
+                "PW3",
+            ),
+            ("mongodb://u@h/db?sslPEMKeyPassword=PW4", "PW4"),
+            ("mongodb://u@h/db?proxyHost=p&proxyPassword=PW5", "PW5"),
+            (
+                "mongodb://h/db?authMechanism=MONGODB-AWS&authMechanismProperties=AWS_SESSION_TOKEN:Zq9%2Bx",
+                "Zq9",
+            ),
+            (
+                "mongodb://h/db?authMechanismProperties=SERVICE_NAME:m,AWS_SESSION_TOKEN%3AZq9&x=1",
+                "Zq9",
+            ),
+        ] {
+            let shown = redact(text);
+            assert!(!shown.contains(secret), "{shown}");
+            assert!(shown.contains(MASK), "{shown}");
+            let back = unmask(&shown, text);
+            assert_eq!(
+                secrets(&back),
+                secrets(text),
+                "{text} came back as {back}"
+            );
+            assert!(back.contains(secret), "{back}");
+        }
         let masked = redact("mysql://root:p%40ss@127.0.0.1:3306/shop");
-        assert_eq!(unmask(&masked, "mysql://root:p%40ss@127.0.0.1:3306/shop"), "mysql://root:p%40ss@127.0.0.1:3306/shop");
+        assert_eq!(
+            unmask(&masked, "mysql://root:p%40ss@127.0.0.1:3306/shop"),
+            "mysql://root:p%40ss@127.0.0.1:3306/shop"
+        );
     }
 
     #[test]
     fn url_parts() {
-        let parts = UrlParts::new("jdbc:mysql+pymysql://ana:p%40ss@h1:3307,h2/shop?ssl-mode=REQUIRED").unwrap();
+        let parts =
+            UrlParts::new("jdbc:mysql+pymysql://ana:p%40ss@h1:3307,h2/shop?ssl-mode=REQUIRED")
+                .unwrap();
         assert_eq!(parts.scheme, "mysql");
         assert_eq!(parts.user.as_deref(), Some("ana"));
         assert_eq!(parts.password.as_deref(), Some("p@ss"));
-        assert_eq!(parts.hosts, vec![UrlHost { name: "h1".into(), port: Some(3307) }, UrlHost { name: "h2".into(), port: None }]);
+        assert_eq!(
+            parts.hosts,
+            vec![
+                UrlHost {
+                    name: "h1".into(),
+                    port: Some(3307)
+                },
+                UrlHost {
+                    name: "h2".into(),
+                    port: None
+                }
+            ]
+        );
         assert_eq!(parts.path, "shop");
-        assert_eq!(parts.query.get("ssl-mode").map(String::as_str), Some("REQUIRED"));
-        assert_eq!(UrlParts::new("mongodb+srv://c.x.net/app").unwrap().scheme, "mongodb+srv");
+        assert_eq!(
+            parts.query.get("ssl-mode").map(String::as_str),
+            Some("REQUIRED")
+        );
+        assert_eq!(
+            UrlParts::new("mongodb+srv://c.x.net/app").unwrap().scheme,
+            "mongodb+srv"
+        );
         assert!(UrlParts::new("redis:///0").unwrap().hosts.is_empty());
         assert!(UrlParts::new("host=x").is_none());
     }
 
     #[test]
     fn cleans_env_lines() {
-        assert_eq!(clean("  DATABASE_URL=\"postgres://a@b/c\"\n"), "postgres://a@b/c");
+        assert_eq!(
+            clean("  DATABASE_URL=\"postgres://a@b/c\"\n"),
+            "postgres://a@b/c"
+        );
         assert_eq!(clean("export REDIS_URL='redis://x'"), "redis://x");
         assert_eq!(clean("host=a dbname=b"), "host=a dbname=b");
     }
@@ -900,9 +1178,20 @@ mod tests {
         let loc = SqliteLocation::new("sqlite:///tmp/x/../app.db").unwrap();
         assert_eq!(loc.path, "/tmp/app.db");
         assert_eq!(loc.suggested_name(), "app.db");
-        assert_eq!(SqliteLocation::new("file://localhost/tmp/a%20b.db").unwrap().path, "/tmp/a b.db");
-        assert_eq!(SqliteLocation::new("~/data.sqlite3").unwrap().path, home.join("data.sqlite3").to_string_lossy());
-        assert_eq!(SqliteLocation::new("DB_PATH=./app.db").unwrap().path, home.join("app.db").to_string_lossy());
+        assert_eq!(
+            SqliteLocation::new("file://localhost/tmp/a%20b.db")
+                .unwrap()
+                .path,
+            "/tmp/a b.db"
+        );
+        assert_eq!(
+            SqliteLocation::new("~/data.sqlite3").unwrap().path,
+            home.join("data.sqlite3").to_string_lossy()
+        );
+        assert_eq!(
+            SqliteLocation::new("DB_PATH=./app.db").unwrap().path,
+            home.join("app.db").to_string_lossy()
+        );
         assert!(SqliteLocation::new("/tmp/notes.txt").is_err());
         assert!(SqliteLocation::new("sqlite:").is_err());
         assert!(SqliteLocation::new("postgres://a@b/c").is_err());

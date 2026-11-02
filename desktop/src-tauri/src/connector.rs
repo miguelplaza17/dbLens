@@ -58,16 +58,20 @@ pub async fn connect(text: &str, ssh: Option<&SshConfig>) -> DbResult<Connection
 }
 
 async fn open(text: &str, ssh: Option<&SshConfig>) -> DbResult<Connection> {
-    let engine = Engine::detect(text).ok_or_else(|| DbError::msg("This doesn't look like a database URL."))?;
+    let engine = Engine::detect(text)
+        .ok_or_else(|| DbError::msg("This doesn't look like a database URL."))?;
     let url = clean(text);
     let ssh = ssh.filter(|c| !c.host.trim().is_empty());
     let tunnel = match ssh {
         None => None,
         Some(_) if engine == Engine::Sqlite => {
-            return Err(DbError::msg("A SQLite file is on this computer; SSH doesn't apply."));
+            return Err(DbError::msg(
+                "A SQLite file is on this computer; SSH doesn't apply.",
+            ));
         }
         Some(config) => {
-            let summary = summary(&url).ok_or_else(|| DbError::msg("This doesn't look like a database URL."))?;
+            let summary = summary(&url)
+                .ok_or_else(|| DbError::msg("This doesn't look like a database URL."))?;
             let host = summary.host.clone().unwrap_or_else(|| "localhost".into());
             let port = summary.port.or(engine.default_port()).unwrap_or(0);
             Some(SshTunnel::open(config, &host, port).await?)
@@ -81,7 +85,10 @@ async fn open(text: &str, ssh: Option<&SshConfig>) -> DbResult<Connection> {
         Engine::Redis => drivers::redis::connect(&url, local_port).await?,
         Engine::Mongodb => drivers::mongo::connect(&url, local_port).await?,
     };
-    Ok(Connection { session: Arc::from(session), tunnel })
+    Ok(Connection {
+        session: Arc::from(session),
+        tunnel,
+    })
 }
 
 #[cfg(test)]
@@ -91,16 +98,31 @@ mod tests {
     #[test]
     fn summarizes_every_engine() {
         let pg = summary("postgres://ana:pw@db.x.com:6543/loja?sslmode=require").unwrap();
-        assert_eq!((pg.engine, pg.database.as_str(), pg.port, pg.tls.as_deref()), (Engine::Postgres, "loja", Some(6543), Some("require")));
+        assert_eq!(
+            (pg.engine, pg.database.as_str(), pg.port, pg.tls.as_deref()),
+            (Engine::Postgres, "loja", Some(6543), Some("require"))
+        );
         assert_eq!(pg.suggested_name, "loja @ db.x.com");
         let my = summary("mysql://root:pw@127.0.0.1:3306/shop").unwrap();
-        assert_eq!((my.engine, my.database.as_str(), my.user.as_deref()), (Engine::Mysql, "shop", Some("root")));
+        assert_eq!(
+            (my.engine, my.database.as_str(), my.user.as_deref()),
+            (Engine::Mysql, "shop", Some("root"))
+        );
         let redis = summary("rediss://default:pw@cache.x.com:6380/2").unwrap();
-        assert_eq!((redis.database.as_str(), redis.tls.as_deref()), ("db 2", Some("TLS")));
+        assert_eq!(
+            (redis.database.as_str(), redis.tls.as_deref()),
+            ("db 2", Some("TLS"))
+        );
         let mongo = summary("mongodb+srv://u:p@cluster0.x.net/app").unwrap();
-        assert_eq!((mongo.engine, mongo.database.as_str()), (Engine::Mongodb, "app"));
+        assert_eq!(
+            (mongo.engine, mongo.database.as_str()),
+            (Engine::Mongodb, "app")
+        );
         let lite = summary("sqlite:///tmp/app.db").unwrap();
-        assert_eq!((lite.engine, lite.suggested_name.as_str()), (Engine::Sqlite, "app.db"));
+        assert_eq!(
+            (lite.engine, lite.suggested_name.as_str()),
+            (Engine::Sqlite, "app.db")
+        );
         assert!(summary("hello").is_none());
     }
 
@@ -108,7 +130,10 @@ mod tests {
     async fn refuses_text_that_is_no_url() {
         let error = connect("hello", None).await.err().unwrap();
         assert_eq!(error.to_string(), "This doesn't look like a database URL.");
-        let ssh = SshConfig { host: "bastion".into(), ..Default::default() };
+        let ssh = SshConfig {
+            host: "bastion".into(),
+            ..Default::default()
+        };
         assert!(connect("sqlite:///tmp/x.db", Some(&ssh)).await.is_err());
     }
 }

@@ -3,7 +3,7 @@
 // Redis and MongoDB switch it to commands: no rehearsal, no all-or-nothing.
 
 import { useCallback } from "react";
-import { t } from "../i18n";
+import { language, t } from "../i18n";
 import { useModel } from "../model";
 import { copyText } from "../format";
 import { keyLabel, withKeys } from "../shortcuts";
@@ -121,7 +121,7 @@ function LogCard() {
         {entry ? (
           <div className="log-entry">
             <div className="log-line">
-              <span className="tertiary">{entry.date.toLocaleTimeString()}</span>
+              <span className="tertiary">{entry.date.toLocaleTimeString(language)}</span>
               <span className={entry.isError ? "log-icon error" : "log-icon ok"}>
                 <Icon name={entry.isError ? "xCircle" : "checkCircle"} size={12} />
               </span>

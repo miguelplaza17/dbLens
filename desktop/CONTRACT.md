@@ -15,36 +15,37 @@ Enclave, SwiftUI design rules) do not apply here. These do:
   matches. Database data (names, SQL, values, server messages) is never translated.
 - Never test against real user databases. Integration tests read the env vars
   below and return early (skip) when they are unset.
-- Do not touch files outside `desktop/`. Do not commit: the coordinator does.
 - `cargo clippy --all-targets -- -D warnings` stays clean, on Linux and for
   `--target x86_64-pc-windows-gnu`.
 
-## Layout and ownership
+## Layout
 
-| Path | What | Owner |
-|---|---|---|
-| `src-tauri/src/engine.rs` | `Engine`, `Engine::detect` | core (done) |
-| `src-tauri/src/url.rs` | `clean`, `ConnectionUrl` (Postgres), `UrlParts` (any scheme), `SqliteLocation`, `redact`/`unmask`/`MASK`, `quote_ident`, `compose` | core (done) |
-| `src-tauri/src/session.rs` | `DatabaseSession` trait, all shared types, `DbError` | core (done; changes need the coordinator) |
-| `src-tauri/src/sql_script.rs` | statement splitter, `verb`, `checked`, `run` (for rehearse/atomic) | core (done) |
-| `src-tauri/src/export.rs` | CSV and JSON of a `QueryResult` | core (done) |
-| `src-tauri/src/connection_problem.rs` | one-line cause for a failed connect | core (done) |
-| `src-tauri/src/connector.rs` | `summary`, `connect` (SSH tunnel, then driver) | core (done) |
-| `src-tauri/src/drivers/postgres.rs` | Postgres driver (tokio-postgres + rustls) | Postgres agent |
-| `src-tauri/src/drivers/mysql.rs` | MySQL/MariaDB driver (mysql_async) | MySQL agent |
-| `src-tauri/src/drivers/sqlite.rs` | SQLite driver (rusqlite, bundled) | SQLite agent |
-| `src-tauri/src/drivers/redis.rs` | Redis/Valkey driver (redis-rs) | Redis agent |
-| `src-tauri/src/drivers/mongo.rs` | MongoDB driver (official mongodb) | Mongo agent |
-| `src-tauri/src/ssh.rs` | SSH tunnel via system `ssh` (implemented; Windows polish) | SSH/store agent |
-| `src-tauri/src/store.rs` | saved connections, folders, sealed URLs (implemented) | SSH/store agent |
-| `src-tauri/src/commands.rs`, `lib.rs` | IPC commands and wiring | core; UI agent may add commands |
-| `src/api.ts` | typed IPC wrappers and TS types | core; keep in sync with Rust |
-| `src/i18n.ts` | `t()` over `../Localization/*.json` | UI agent |
-| `src/App.tsx`, `src/styles.css`, new `src/**` | the real UI (placeholder now) | UI agent |
+What works and what is missing: see "Status" in [README.md](README.md).
 
-A driver agent owns only its driver file (plus driver-only helper modules it
-adds under `drivers/<engine>/` if it splits the file). Shared types change only
-through the coordinator, and then in Rust and `src/api.ts` together.
+| Path | What |
+|---|---|
+| `src-tauri/src/engine.rs` | `Engine`, `Engine::detect` |
+| `src-tauri/src/url.rs` | `clean`, `ConnectionUrl` (Postgres), `UrlParts` (any scheme), `SqliteLocation`, `redact`/`unmask`/`MASK`, `quote_ident`, `compose` |
+| `src-tauri/src/session.rs` | `DatabaseSession` trait, all shared types, `DbError` |
+| `src-tauri/src/sql_script.rs` | statement splitter, `verb`, `checked`, `run` (for rehearse/atomic) |
+| `src-tauri/src/export.rs` | CSV and JSON of a `QueryResult` |
+| `src-tauri/src/connection_problem.rs` | one-line cause for a failed connect |
+| `src-tauri/src/connector.rs` | `summary`, `connect` (SSH tunnel, then driver) |
+| `src-tauri/src/drivers/postgres.rs` | Postgres (tokio-postgres + rustls) |
+| `src-tauri/src/drivers/mysql.rs` | MySQL/MariaDB (mysql_async) |
+| `src-tauri/src/drivers/sqlite.rs` | SQLite (rusqlite, bundled) |
+| `src-tauri/src/drivers/redis.rs` | Redis/Valkey (own RESP client on tokio, like `Redis.swift`) |
+| `src-tauri/src/drivers/mongo.rs`, `mongo_shell.rs` | MongoDB (official mongodb crate) and the mongosh parser |
+| `src-tauri/src/ssh.rs` | SSH tunnel via the system `ssh` |
+| `src-tauri/src/store.rs` | saved connections, folders, sealed URLs |
+| `src-tauri/src/commands.rs`, `lib.rs` | IPC commands and wiring |
+| `src-tauri/tests/*.rs` | one integration file per engine, plus `contract.rs` (the JSON shape `api.ts` expects) |
+| `src/api.ts` | typed IPC wrappers and TS types; keep in sync with Rust |
+| `src/mock.ts` | answers every command in a plain browser (vite dev without Tauri) |
+| `src/i18n.ts`, `src/i18n/*.json` | `t()`; English source, `pt-BR` |
+| `src/App.tsx`, `src/components/`, `src/theme.css`, `src/styles.css` | the UI |
+
+Shared types change in Rust, `src/api.ts` and `tests/contract.rs` together.
 
 ## Driver interface
 
@@ -59,9 +60,7 @@ pub fn summary(text: &str) -> Option<Summary>;
 pub async fn connect(url: &str, local_port: Option<u16>) -> DbResult<Box<dyn DatabaseSession>>;
 ```
 
-Today `summary` is real and `connect` returns a stub session whose methods all
-fail with `DbError::Unsupported("not yet")`. Error messages from `connect`
-should carry the server's own text (`DbError::Message`); `connector::connect`
+Error messages from `connect` carry the server's own text (`DbError::Message`); `connector::connect`
 adds the headline (refused, unknown host, timeout, login, missing database, TLS).
 
 ## The trait (`src-tauri/src/session.rs`)
@@ -124,6 +123,7 @@ All structs serialize camelCase. `Option` is `null`.
 | `RowKeyKind` | `"primaryKey" \| "ctid" \| "rowid"` |
 | `RowKeys { columns, kind, values: Vec<Vec<Option<String>>> }` | `{ columns, kind, values: Cell[][] }` |
 | `RowKey { columns, kind, values: Vec<Option<String>> }` | one row of `RowKeys` (`rowKey(keys, i)` in TS) |
+| | Key values are the driver's exact form, not what the grid shows (MySQL binary keys as full hex, SQLite values tagged `i:`/`r:`/`t:`/`b:` with their storage class). Send them back as they came; reload the page after an edit that can change a key. |
 | `CellValue { column, value }` | `{ column, value: string \| null }` |
 | `QueryResult { columns, rows, command, truncated, total_rows, keys, note }` | `{ columns, rows, command, truncated, totalRows, keys, note }` |
 | `Execution { results, duration_ms }` | `{ results, durationMs }` |
@@ -155,7 +155,7 @@ JS argument names are camelCase (Tauri maps them to the snake_case parameters).
 | `detect_engine` | `text` | `Engine \| null` |
 | `summarize_url` | `text` | `Summary \| null` |
 | `mask_url` | `text` | `string` (passwords → •••) |
-| `connect` | `url?`, `savedId?`, `ssh?` | `ConnectInfo` (by saved id: URL and SSH come from the store, last used is updated) |
+| `connect` | `url?`, `savedId?`, `ssh?` | `ConnectInfo` (by saved id: URL and SSH come from the store, last used is updated; with `url` too: tries that edit of the saved connection, masked passwords filled in, nothing saved) |
 | `disconnect` | `sessionId` | `void` |
 | `cancel` | `sessionId` | `void` (sync; never waits) |
 | `relations` | `sessionId` | `Relation[]` |
@@ -213,7 +213,7 @@ uuid, chrono, percent-encoding, futures-util;
 tokio-postgres 0.7.18 + tokio-postgres-rustls 0.14 (ring, webpki-roots),
 rustls 0.23 (ring; the process-wide provider is installed in `lib.rs`),
 mysql_async 0.37 (`default-rustls-ring`), rusqlite 0.41 (`bundled`),
-redis 1.8 (`tokio-comp`, `tokio-rustls-comp`, webpki roots),
+tokio-rustls 0.26 and webpki-roots (the Redis driver's own TLS),
 mongodb 3.9 (rustls, dns-resolver);
 aes-gcm 0.10, base64 0.22, keyring 3.6 (`windows-native`, `async-secret-service`,
 `async-io`, `crypto-rust`), directories 6. No OpenSSL and no aws-lc anywhere.
@@ -240,7 +240,11 @@ Integration test env vars (throwaway servers only):
 DBLENS_TEST_URL=postgres://dblens:dblens@127.0.0.1:5432/dblens_test
 DBLENS_TEST_MYSQL_URL=mysql://dblens:dblens@127.0.0.1:3306/dblens_test
 DBLENS_TEST_REDIS_URL=redis://127.0.0.1:6379/15
-DBLENS_TEST_MONGO_URL=mongodb://…              (skip when unset)
+DBLENS_TEST_MONGO_URL=mongodb://…              (Docker mongo:8; skip when unset)
 ```
+
+`DBLENS_TEST_MARIADB_URL` and `DBLENS_TEST_VALKEY_URL` (set by CI) are read by
+no test yet: to test MariaDB or Valkey, point `DBLENS_TEST_MYSQL_URL` or
+`DBLENS_TEST_REDIS_URL` at them and run `cargo test --test mysql` / `--test redis`.
 
 SQLite tests always use temp files (`tempfile` is a dev-dependency).

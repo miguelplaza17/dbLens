@@ -22,7 +22,10 @@ pub fn explain(error: &DbError, url: &str, via_ssh: bool) -> DbError {
 }
 
 fn compose(headline: String, hints: Vec<String>) -> String {
-    std::iter::once(headline).chain(hints.into_iter().map(|h| format!("• {h}"))).collect::<Vec<_>>().join("\n")
+    std::iter::once(headline)
+        .chain(hints.into_iter().map(|h| format!("• {h}")))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn default_port(engine: Engine) -> u16 {
@@ -33,7 +36,9 @@ pub fn headline(raw: &str, summary: Option<&Summary>, text: &str, via_ssh: bool)
     let message = raw.to_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|n| message.contains(&n.to_lowercase()));
     // Mongo's host may carry its port ("db:27017"); one host is enough for the sentence.
-    let mut host = summary.and_then(|s| s.host.clone()).unwrap_or_else(|| "localhost".into());
+    let mut host = summary
+        .and_then(|s| s.host.clone())
+        .unwrap_or_else(|| "localhost".into());
     if summary.and_then(|s| s.port).is_none() && !host.contains(']') {
         if let Some(colon) = host.rfind(':') {
             host.truncate(colon);
@@ -44,12 +49,28 @@ pub fn headline(raw: &str, summary: Option<&Summary>, text: &str, via_ssh: bool)
         None => host.clone(),
     };
     let user = summary.and_then(|s| s.user.clone()).unwrap_or_default();
-    let database = summary.map(|s| s.database.replace("db ", "")).unwrap_or_default();
-    let tunnel = if via_ssh { " (through the SSH tunnel)" } else { "" };
+    let database = summary
+        .map(|s| s.database.replace("db ", ""))
+        .unwrap_or_default();
+    let tunnel = if via_ssh {
+        " (through the SSH tunnel)"
+    } else {
+        ""
+    };
     let lower_text = text.to_lowercase();
-    let tls_url = lower_text.starts_with("rediss://") || has(&["sslmode=require", "tls=true", "ssl=true"]);
+    let tls_url =
+        lower_text.starts_with("rediss://") || has(&["sslmode=require", "tls=true", "ssl=true"]);
 
-    if has(&["ssl", "tls"]) && has(&["not support", "não oferece suporte", "does not support", "wrong version", "handshake", "requires"]) {
+    if has(&["ssl", "tls"])
+        && has(&[
+            "not support",
+            "não oferece suporte",
+            "does not support",
+            "wrong version",
+            "handshake",
+            "requires",
+        ])
+    {
         return Some(format!("TLS didn't work with {place}: the server and the URL disagree on encryption. Check the URL's TLS/SSL setting."));
     }
     let local = ["localhost", "127.0.0.1", "::1"].contains(&host.as_str());
@@ -69,18 +90,34 @@ pub fn headline(raw: &str, summary: Option<&Summary>, text: &str, via_ssh: bool)
         }
         if let Some(port) = summary.and_then(|s| s.port) {
             if default_port > 0 && port != default_port {
-                hints.push(format!("The URL uses port {port}; this database's usual port is {default_port}."));
+                hints.push(format!(
+                    "The URL uses port {port}; this database's usual port is {default_port}."
+                ));
             }
         }
-        return Some(compose(format!("Nothing answered at {place}{tunnel}: the connection was refused."), hints));
+        return Some(compose(
+            format!("Nothing answered at {place}{tunnel}: the connection was refused."),
+            hints,
+        ));
     }
     if has(&["invalid srv service name"]) {
-        return Some(format!("\"{host}\" isn't a valid cluster name for mongodb+srv://. Check the URL's host."));
+        return Some(format!(
+            "\"{host}\" isn't a valid cluster name for mongodb+srv://. Check the URL's host."
+        ));
     }
     if has(&[
-        "could not translate host", "traduzir o nome", "unknown server host", "nosuchrecord", "failed to resolve",
-        "nodename nor servname", "failed to look up srv", "host not found", "name or service not known",
-        "failed to lookup address", "no such host", "temporary failure in name resolution",
+        "could not translate host",
+        "traduzir o nome",
+        "unknown server host",
+        "nosuchrecord",
+        "failed to resolve",
+        "nodename nor servname",
+        "failed to look up srv",
+        "host not found",
+        "name or service not known",
+        "failed to lookup address",
+        "no such host",
+        "temporary failure in name resolution",
     ]) {
         // A name without a dot (a Docker service, a LAN machine) only resolves inside its own network.
         if !host.contains('.') && !host.contains(':') && host != "localhost" {
@@ -99,7 +136,14 @@ pub fn headline(raw: &str, summary: Option<&Summary>, text: &str, via_ssh: bool)
             vec!["Check the name, and whether this computer can reach that network (some need a VPN).".into()],
         ));
     }
-    if has(&["timeout", "tempo limite", "timed out", "(60)", "within", "10060"]) {
+    if has(&[
+        "timeout",
+        "tempo limite",
+        "timed out",
+        "(60)",
+        "within",
+        "10060",
+    ]) {
         if tls_url && lower_text.starts_with("rediss://") {
             return Some(format!("{place} didn't answer TLS. If the server doesn't use TLS, use redis:// instead of rediss://."));
         }
@@ -112,11 +156,19 @@ pub fn headline(raw: &str, summary: Option<&Summary>, text: &str, via_ssh: bool)
         } else {
             hints.push("Or connect through SSH (Edit Connection > SSH) via a machine that reaches the database.".into());
         }
-        return Some(compose(format!("{place}{tunnel} didn't answer in time."), hints));
+        return Some(compose(
+            format!("{place}{tunnel} didn't answer in time."),
+            hints,
+        ));
     }
     if has(&[
-        "password authentication failed", "autenticação do tipo senha", "access denied for user", "wrongpass",
-        "authentication failed", "invalid username-password", "invalid password",
+        "password authentication failed",
+        "autenticação do tipo senha",
+        "access denied for user",
+        "wrongpass",
+        "authentication failed",
+        "invalid username-password",
+        "invalid password",
     ]) {
         return Some(if user.is_empty() {
             "The server refused the login: wrong password, or a user that can't log in.".into()
@@ -133,11 +185,17 @@ pub fn headline(raw: &str, summary: Option<&Summary>, text: &str, via_ssh: bool)
     if has(&["role \"", "função \"", "papel \""]) && has(&["does not exist", "não existe"]) {
         return Some(format!("The user \"{user}\" doesn't exist on this server."));
     }
-    if has(&["database \"", "banco de dados \"", "unknown database"]) && has(&["does not exist", "não existe", "unknown database"]) {
-        return Some(format!("The database \"{database}\" doesn't exist on this server."));
+    if has(&["database \"", "banco de dados \"", "unknown database"])
+        && has(&["does not exist", "não existe", "unknown database"])
+    {
+        return Some(format!(
+            "The database \"{database}\" doesn't exist on this server."
+        ));
     }
     if has(&["db index is out of range"]) {
-        return Some(format!("This Redis server has no database {database}; it has fewer numbered databases."));
+        return Some(format!(
+            "This Redis server has no database {database}; it has fewer numbered databases."
+        ));
     }
     if has(&["file is not a database"]) {
         return Some("This file isn't a SQLite database.".into());
@@ -167,22 +225,39 @@ mod tests {
 
     #[test]
     fn names_refused_connections() {
-        let error = explain(&DbError::msg("Connection refused (os error 111)"), "postgres://ana@localhost:5433/loja", false);
+        let error = explain(
+            &DbError::msg("Connection refused (os error 111)"),
+            "postgres://ana@localhost:5433/loja",
+            false,
+        );
         let text = error.to_string();
-        assert!(text.starts_with("Nothing answered at localhost:5433"), "{text}");
+        assert!(
+            text.starts_with("Nothing answered at localhost:5433"),
+            "{text}"
+        );
         assert!(text.contains("usual port is 5432"), "{text}");
         assert!(text.ends_with("Connection refused (os error 111)"));
     }
 
     #[test]
     fn names_container_hosts() {
-        let text = explain(&DbError::msg("failed to lookup address information: Name or service not known"), "mysql://u:p@db/shop", false).to_string();
+        let text = explain(
+            &DbError::msg("failed to lookup address information: Name or service not known"),
+            "mysql://u:p@db/shop",
+            false,
+        )
+        .to_string();
         assert!(text.contains("container or service name"), "{text}");
     }
 
     #[test]
     fn names_bad_logins() {
-        let text = headline("password authentication failed for user \"ana\"", crate::connector::summary("postgres://ana@db.x.com/loja").as_ref(), "", false);
+        let text = headline(
+            "password authentication failed for user \"ana\"",
+            crate::connector::summary("postgres://ana@db.x.com/loja").as_ref(),
+            "",
+            false,
+        );
         assert_eq!(text.as_deref(), Some("The server refused the login for \"ana\": wrong password, or a user that can't log in."));
     }
 

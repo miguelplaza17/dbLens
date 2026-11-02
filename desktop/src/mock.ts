@@ -404,7 +404,8 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   connect: async (a) => {
     await pause(250);
     const stored = a.savedId ? saved.find((c) => c.id === a.savedId) : undefined;
-    const url = stored?.url ?? String(a.url ?? "");
+    // With both, a.url is an edit of the saved connection being tried.
+    const url = a.url ? String(a.url) : stored?.url ?? "";
     const summary = summarize(url);
     if (!summary) throw "This doesn't look like a database URL.";
     if (/example\.com|internal/.test(url)) {

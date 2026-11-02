@@ -13,12 +13,36 @@ pub mod ssh;
 pub mod store;
 pub mod url;
 
+use tauri::webview::PageLoadEvent;
+use tauri::{Manager, RunEvent, WindowEvent};
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // rustls needs one crypto provider for the process; every driver uses ring.
     let _ = rustls::crypto::ring::default_provider().install_default();
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(commands::AppState::default())
+        // A reload (or HMR) forgets every session id: close what that page opened.
+        .on_page_load(|webview, payload| {
+            if payload.event() == PageLoadEvent::Started {
+                let app = webview.app_handle().clone();
+                let label = webview.label().to_string();
+                tauri::async_runtime::spawn(async move {
+                    app.state::<commands::AppState>()
+                        .close_owned_by(&label)
+                        .await;
+                });
+            }
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::Destroyed = event {
+                let state = window.state::<commands::AppState>();
+                for webview in window.webviews() {
+                    tauri::async_runtime::block_on(state.close_owned_by(webview.label()));
+                }
+                tauri::async_runtime::block_on(state.close_owned_by(window.label()));
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::detect_engine,
             commands::summarize_url,
@@ -50,6 +74,14 @@ pub fn run() {
             commands::delete_folder,
             commands::set_folder_expanded,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running dbLens");
+        .build(tauri::generate_context!())
+        .expect("error while building dbLens");
+    // The process ends with exit() and managed state is never dropped, so the
+    // sessions and their ssh tunnels are closed here, on the way out.
+    app.run(|app, event| {
+        if let RunEvent::Exit = event {
+            let state = app.state::<commands::AppState>();
+            tauri::async_runtime::block_on(state.close_all());
+        }
+    });
 }

@@ -14,7 +14,10 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use mongodb::bson::{self, doc, Bson, Document};
-use mongodb::options::{ClientOptions, DeleteOptions, InsertManyOptions, InsertOneOptions, ReplaceOptions, UpdateOptions};
+use mongodb::options::{
+    ClientOptions, DeleteOptions, InsertManyOptions, InsertOneOptions, ReplaceOptions,
+    UpdateOptions,
+};
 use mongodb::{Client, Cursor};
 use regex::Regex;
 use tokio::sync::{Mutex, Notify};
@@ -23,8 +26,9 @@ use super::mongo_shell::{self as shell, Call, Statement};
 use crate::connector::Summary;
 use crate::engine::Engine;
 use crate::session::{
-    CellValue, Column, ColumnSort, DatabaseSession, DbError, DbResult, EditOutcome, Execution, QueryResult, Relation,
-    RelationKind, RowKey, RowKeyKind, RowKeys, SchemaColumn, SchemaGraph, SchemaLink, SchemaTable, ROW_LIMIT,
+    CellValue, Column, ColumnSort, DatabaseSession, DbError, DbResult, EditOutcome, Execution,
+    QueryResult, Relation, RelationKind, RowKey, RowKeyKind, RowKeys, SchemaColumn, SchemaGraph,
+    SchemaLink, SchemaTable, ROW_LIMIT,
 };
 use crate::url::UrlParts;
 
@@ -34,13 +38,19 @@ const BATCH_SIZE: i32 = 500;
 /// Hosts, database and user for the connection sheet. One host has its own
 /// port (for an SSH tunnel); several hosts show as "h1:27017,h2:27018".
 pub fn summary(text: &str) -> Option<Summary> {
-    let parts = UrlParts::new(text).filter(|p| p.scheme == "mongodb" || p.scheme == "mongodb+srv")?;
+    let parts =
+        UrlParts::new(text).filter(|p| p.scheme == "mongodb" || p.scheme == "mongodb+srv")?;
     let srv = parts.scheme == "mongodb+srv";
     let (host, port) = match parts.hosts.as_slice() {
         [] => (None, None),
         [one] => (Some(one.name.clone()), if srv { None } else { one.port }),
         many => (
-            Some(many.iter().map(|h| format!("{}:{}", bracketed(&h.name), h.port.unwrap_or(27017))).collect::<Vec<_>>().join(",")),
+            Some(
+                many.iter()
+                    .map(|h| format!("{}:{}", bracketed(&h.name), h.port.unwrap_or(27017)))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
             None,
         ),
     };
@@ -49,8 +59,15 @@ pub fn summary(text: &str) -> Option<Summary> {
         engine: Engine::Mongodb,
         suggested_name: format!(
             "{} @ {}",
-            if database.is_empty() { "mongodb" } else { &database },
-            parts.first_host().map(|h| h.name.as_str()).unwrap_or("localhost")
+            if database.is_empty() {
+                "mongodb"
+            } else {
+                &database
+            },
+            parts
+                .first_host()
+                .map(|h| h.name.as_str())
+                .unwrap_or("localhost")
         ),
         database,
         host,
@@ -78,15 +95,24 @@ pub fn connection_text(cleaned: &str) -> String {
 
 /// The same URL pointed at an SSH tunnel's local end, connecting to that one server directly.
 pub fn through_local_port(text: &str, port: u16) -> String {
-    let Some(scheme) = text.find("://") else { return text.to_string() };
+    let Some(scheme) = text.find("://") else {
+        return text.to_string();
+    };
     let rest = &text[scheme + 3..];
     let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
-    let userinfo = authority.rfind('@').map(|at| &authority[..=at]).unwrap_or("");
+    let userinfo = authority
+        .rfind('@')
+        .map(|at| &authority[..=at])
+        .unwrap_or("");
     let mut path = rest[authority_end..].to_string();
     let mut query: Vec<String> = Vec::new();
     if let Some(mark) = path.find('?') {
-        query = path[mark + 1..].split('&').filter(|q| !q.is_empty()).map(String::from).collect();
+        query = path[mark + 1..]
+            .split('&')
+            .filter(|q| !q.is_empty())
+            .map(String::from)
+            .collect();
         path.truncate(mark);
     }
     if path.is_empty() {
@@ -94,7 +120,10 @@ pub fn through_local_port(text: &str, port: u16) -> String {
     }
     query.retain(|q| !q.to_lowercase().starts_with("directconnection="));
     query.push("directConnection=true".into());
-    format!("mongodb://{userinfo}127.0.0.1:{port}{path}?{}", query.join("&"))
+    format!(
+        "mongodb://{userinfo}127.0.0.1:{port}{path}?{}",
+        query.join("&")
+    )
 }
 
 /// Opens a session. Through an SSH tunnel, `local_port` replaces the URL's host and port.
@@ -112,9 +141,13 @@ pub async fn open(url: &str, local_port: Option<u16>) -> DbResult<MongoSession> 
     let parts = UrlParts::new(&cleaned)
         .filter(|p| p.scheme == "mongodb" || p.scheme == "mongodb+srv")
         .filter(|_| lower.starts_with("mongodb://") || lower.starts_with("mongodb+srv://"))
-        .ok_or_else(|| DbError::msg("Unrecognized format. Use a mongodb://… URL (or mongodb+srv://)"))?;
+        .ok_or_else(|| {
+            DbError::msg("Unrecognized format. Use a mongodb://… URL (or mongodb+srv://)")
+        })?;
     if parts.hosts.is_empty() || parts.hosts.iter().any(|h| h.name.is_empty()) {
-        return Err(DbError::msg("The URL needs a host, like mongodb://localhost:27017."));
+        return Err(DbError::msg(
+            "The URL needs a host, like mongodb://localhost:27017.",
+        ));
     }
     let mut text = connection_text(&cleaned);
     if let Some(port) = local_port {
@@ -185,7 +218,9 @@ fn fail(error: mongodb::error::Error) -> DbError {
 }
 
 fn row_changed() -> DbError {
-    DbError::msg("The row changed or was deleted since it was loaded. Reload the table and try again.")
+    DbError::msg(
+        "The row changed or was deleted since it was loaded. Reload the table and try again.",
+    )
 }
 
 /// One MongoDB connection (a pooled client). Methods that touch the session's
@@ -218,7 +253,11 @@ impl MongoSession {
 
     /// Runs `work` as one cancelable operation: a cancel stops waiting for it
     /// at once (and kills it on the server, see `cancel`).
-    async fn cancelable<T>(&self, operation: &Operation, work: impl Future<Output = DbResult<T>>) -> DbResult<T> {
+    async fn cancelable<T>(
+        &self,
+        operation: &Operation,
+        work: impl Future<Output = DbResult<T>>,
+    ) -> DbResult<T> {
         let outcome = tokio::select! {
             biased;
             _ = operation.notify.notified() => Err(DbError::Cancelled),
@@ -258,7 +297,9 @@ impl MongoSession {
     async fn collections(&self, database: &str) -> DbResult<Vec<Relation>> {
         let db = self.client.database(database);
         let cursor = db
-            .run_cursor_command(doc! { "listCollections": 1, "nameOnly": true, "authorizedCollections": true })
+            .run_cursor_command(
+                doc! { "listCollections": 1, "nameOnly": true, "authorizedCollections": true },
+            )
             .await
             .map_err(fail)?;
         let mut found: Vec<(String, String)> = Vec::new();
@@ -277,12 +318,20 @@ impl MongoSession {
             let estimate = if is_view {
                 -1.0
             } else {
-                db.collection::<Document>(&name).estimated_document_count().await.map(|n| n as f64).unwrap_or(-1.0)
+                db.collection::<Document>(&name)
+                    .estimated_document_count()
+                    .await
+                    .map(|n| n as f64)
+                    .unwrap_or(-1.0)
             };
             out.push(Relation {
                 schema: database.into(),
                 name,
-                kind: if is_view { RelationKind::View } else { RelationKind::Table },
+                kind: if is_view {
+                    RelationKind::View
+                } else {
+                    RelationKind::Table
+                },
                 estimate,
                 subtype: kind,
             });
@@ -337,25 +386,42 @@ impl MongoSession {
         }
         if relation.estimate >= 0.0 {
             let count = relation.estimate as u64;
-            result.note = Some(if count == 1 { "1 document".into() } else { format!("{} documents", grouped(count)) });
+            result.note = Some(if count == 1 {
+                "1 document".into()
+            } else {
+                format!("{} documents", grouped(count))
+            });
         }
         let mut types = HashMap::new();
         for column in &result.columns {
-            types.entry(column.name.clone()).or_insert_with(|| column.type_name.clone());
+            types
+                .entry(column.name.clone())
+                .or_insert_with(|| column.type_name.clone());
         }
         inner.column_types.insert(relation.id(), types);
         Ok(result)
     }
 
     /// The field names a search needs come from a page without it.
-    async fn learn_columns(&self, inner: &mut Inner, relation: &Relation, search: &str, tag: &str) -> DbResult<()> {
+    async fn learn_columns(
+        &self,
+        inner: &mut Inner,
+        relation: &Relation,
+        search: &str,
+        tag: &str,
+    ) -> DbResult<()> {
         if !search.is_empty() && !inner.column_types.contains_key(&relation.id()) {
             self.page_in(inner, relation, 1, 0, "", None, tag).await?;
         }
         Ok(())
     }
 
-    async fn cursor(&self, database: &str, command: Document, tag: &str) -> DbResult<Cursor<Document>> {
+    async fn cursor(
+        &self,
+        database: &str,
+        command: Document,
+        tag: &str,
+    ) -> DbResult<Cursor<Document>> {
         self.client
             .database(database)
             .run_cursor_command(command)
@@ -365,7 +431,13 @@ impl MongoSession {
             .map_err(fail)
     }
 
-    async fn count_documents(&self, database: &str, collection: &str, filter: Document, tag: &str) -> DbResult<u64> {
+    async fn count_documents(
+        &self,
+        database: &str,
+        collection: &str,
+        filter: Document,
+        tag: &str,
+    ) -> DbResult<u64> {
         self.client
             .database(database)
             .collection::<Document>(collection)
@@ -379,7 +451,12 @@ impl MongoSession {
 
     /// The BSON type of each field in the document as it is now ("" for a missing or
     /// null field). The "row changed" error when the document is gone.
-    async fn field_types(&self, relation: &Relation, filter: &Document, fields: &[&str]) -> DbResult<HashMap<String, String>> {
+    async fn field_types(
+        &self,
+        relation: &Relation,
+        filter: &Document,
+        fields: &[&str],
+    ) -> DbResult<HashMap<String, String>> {
         let mut projection = Document::new();
         for field in fields {
             projection.insert(*field, 1);
@@ -397,7 +474,14 @@ impl MongoSession {
             .iter()
             .map(|(key, value)| {
                 let kind = type_name(value);
-                (key.clone(), if kind == "null" { String::new() } else { kind.to_string() })
+                (
+                    key.clone(),
+                    if kind == "null" {
+                        String::new()
+                    } else {
+                        kind.to_string()
+                    },
+                )
             })
             .collect())
     }
@@ -418,7 +502,10 @@ impl MongoSession {
             let cursor = self.cursor(&relation.schema, command, tag).await?;
             drain(cursor, 100, |doc| stats.add(&doc)).await?;
             let columns = stats.columns();
-            for column in columns.iter().filter(|c| c.type_name == "objectId" && !c.is_primary_key) {
+            for column in columns
+                .iter()
+                .filter(|c| c.type_name == "objectId" && !c.is_primary_key)
+            {
                 object_id_fields
                     .entry(relation.id())
                     .or_default()
@@ -439,17 +526,26 @@ impl MongoSession {
                 .filter_map(|(database, field)| {
                     let base = referenced_name(field)?;
                     let lower = base.to_lowercase();
-                    [base.clone(), format!("{base}s"), lower.clone(), format!("{lower}s")]
-                        .iter()
-                        .map(|name| format!("{database}.{name}"))
-                        .find(|id| names.contains(id))
-                        .map(|target| (field.clone(), target))
+                    [
+                        base.clone(),
+                        format!("{base}s"),
+                        lower.clone(),
+                        format!("{lower}s"),
+                    ]
+                    .iter()
+                    .map(|name| format!("{database}.{name}"))
+                    .find(|id| names.contains(id))
+                    .map(|target| (field.clone(), target))
                 })
                 .collect();
             let single = found.len() == 1;
             for (field, target) in found {
                 links.push(SchemaLink {
-                    name: if single { "guessed".into() } else { format!("guessed ({field})") },
+                    name: if single {
+                        "guessed".into()
+                    } else {
+                        format!("guessed ({field})")
+                    },
                     from: table.clone(),
                     from_columns: vec![field],
                     to: target,
@@ -462,7 +558,13 @@ impl MongoSession {
 
     // MARK: Command panel
 
-    async fn run(&self, inner: &mut Inner, parsed: Statement, statement: &str, tag: &str) -> DbResult<QueryResult> {
+    async fn run(
+        &self,
+        inner: &mut Inner,
+        parsed: Statement,
+        statement: &str,
+        tag: &str,
+    ) -> DbResult<QueryResult> {
         match parsed {
             Statement::Use(name) => {
                 let command = format!("USE {name}");
@@ -471,19 +573,37 @@ impl MongoSession {
             }
             Statement::ShowDatabases => {
                 let args = ["{listDatabases: 1, authorizedDatabases: true}".to_string()];
-                self.run_database_method(inner, "adminCommand", &args, statement, Some("databases")).await
+                self.run_database_method(inner, "adminCommand", &args, statement, Some("databases"))
+                    .await
             }
-            Statement::ShowCollections => self.run_database_method(inner, "getCollectionNames", &[], statement, None).await,
+            Statement::ShowCollections => {
+                self.run_database_method(inner, "getCollectionNames", &[], statement, None)
+                    .await
+            }
             Statement::Database { method, arguments } => {
-                self.run_database_method(inner, &method, &arguments, statement, None).await
+                self.run_database_method(inner, &method, &arguments, statement, None)
+                    .await
             }
-            Statement::Collection { name, calls } => self.run_collection_method(inner, &name, &calls, statement, tag).await,
+            Statement::Collection { name, calls } => {
+                self.run_collection_method(inner, &name, &calls, statement, tag)
+                    .await
+            }
         }
     }
 
     /// A command's reply as one row, or (with `list`) the documents of one of its arrays.
-    async fn command_result(&self, database: &str, command: Document, list: Option<&str>) -> DbResult<QueryResult> {
-        let reply = self.client.database(database).run_command(command).await.map_err(fail)?;
+    async fn command_result(
+        &self,
+        database: &str,
+        command: Document,
+        list: Option<&str>,
+    ) -> DbResult<QueryResult> {
+        let reply = self
+            .client
+            .database(database)
+            .run_command(command)
+            .await
+            .map_err(fail)?;
         let mut table = DocumentTable::new(false);
         match list {
             None => {
@@ -491,7 +611,11 @@ impl MongoSession {
                 Ok(table.result("OK".into()))
             }
             Some(key) => {
-                for item in reply.get_array(key).map(|a| a.as_slice()).unwrap_or_default() {
+                for item in reply
+                    .get_array(key)
+                    .map(|a| a.as_slice())
+                    .unwrap_or_default()
+                {
                     if let Bson::Document(doc) = item {
                         table.add(doc);
                     }
@@ -511,18 +635,40 @@ impl MongoSession {
     ) -> DbResult<QueryResult> {
         let database = inner.current_database.clone();
         match (method, arguments.len()) {
-            ("runCommand", 1) => self.command_result(&database, command_document(&arguments[0])?, list).await,
-            ("adminCommand", 1) => self.command_result("admin", command_document(&arguments[0])?, list).await,
-            ("getCollectionNames", 0) => {
-                let names: Vec<Vec<Option<String>>> =
-                    self.collections(&database).await?.into_iter().map(|r| vec![Some(r.name)]).collect();
-                let count = names.len();
-                Ok(QueryResult::rows(vec![Column::new("name", "string")], names, format!("FIND {count}")))
+            ("runCommand", 1) => {
+                self.command_result(&database, command_document(&arguments[0])?, list)
+                    .await
             }
-            ("getName", 0) => Ok(QueryResult::rows(vec![Column::new("value", "string")], vec![vec![Some(database)]], "FIND 1")),
-            ("stats", 0) => self.command_result(&database, doc! { "dbStats": 1 }, None).await,
+            ("adminCommand", 1) => {
+                self.command_result("admin", command_document(&arguments[0])?, list)
+                    .await
+            }
+            ("getCollectionNames", 0) => {
+                let names: Vec<Vec<Option<String>>> = self
+                    .collections(&database)
+                    .await?
+                    .into_iter()
+                    .map(|r| vec![Some(r.name)])
+                    .collect();
+                let count = names.len();
+                Ok(QueryResult::rows(
+                    vec![Column::new("name", "string")],
+                    names,
+                    format!("FIND {count}"),
+                ))
+            }
+            ("getName", 0) => Ok(QueryResult::rows(
+                vec![Column::new("value", "string")],
+                vec![vec![Some(database)]],
+                "FIND 1",
+            )),
+            ("stats", 0) => {
+                self.command_result(&database, doc! { "dbStats": 1 }, None)
+                    .await
+            }
             ("createCollection", 1 | 2) => {
-                let name = shell::string_argument(&arguments[0]).ok_or_else(|| shell::unsupported(statement))?;
+                let name = shell::string_argument(&arguments[0])
+                    .ok_or_else(|| shell::unsupported(statement))?;
                 let mut command = doc! { "create": name };
                 if arguments.len() == 2 {
                     command.extend(document(&arguments[1])?);
@@ -531,7 +677,8 @@ impl MongoSession {
                 Ok(QueryResult::command("CREATE COLLECTION", 0))
             }
             ("dropDatabase", 0) => {
-                self.command_result(&database, doc! { "dropDatabase": 1 }, None).await?;
+                self.command_result(&database, doc! { "dropDatabase": 1 }, None)
+                    .await?;
                 Ok(QueryResult::command("DROP DATABASE", 0))
             }
             _ => Err(shell::unsupported(statement)),
@@ -548,12 +695,25 @@ impl MongoSession {
     ) -> DbResult<QueryResult> {
         let database = inner.current_database.clone();
         let main = &calls[0];
-        let modifiers: Vec<&Call> = calls[1..].iter().filter(|c| c.name != "pretty" && c.name != "toArray").collect();
+        let modifiers: Vec<&Call> = calls[1..]
+            .iter()
+            .filter(|c| c.name != "pretty" && c.name != "toArray")
+            .collect();
         let args = &main.arguments;
         let unsupported = || shell::unsupported(statement);
-        let doc_at = |index: usize| -> DbResult<Document> { args.get(index).map_or_else(|| Ok(Document::new()), |a| document(a)) };
-        let no_modifiers = || if modifiers.is_empty() { Ok(()) } else { Err(unsupported()) };
-        let written = |verb: &str, count: u64| QueryResult::command(format!("{verb} {count}"), count);
+        let doc_at = |index: usize| -> DbResult<Document> {
+            args.get(index)
+                .map_or_else(|| Ok(Document::new()), |a| document(a))
+        };
+        let no_modifiers = || {
+            if modifiers.is_empty() {
+                Ok(())
+            } else {
+                Err(unsupported())
+            }
+        };
+        let written =
+            |verb: &str, count: u64| QueryResult::command(format!("{verb} {count}"), count);
         let collection = self.client.database(&database).collection::<Document>(name);
 
         match main.name.as_str() {
@@ -598,7 +758,11 @@ impl MongoSession {
                     }
                 }
                 if counting {
-                    return Ok(scalar(self.count_documents(&database, name, filter, tag).await?, "long", "COUNT"));
+                    return Ok(scalar(
+                        self.count_documents(&database, name, filter, tag).await?,
+                        "long",
+                        "COUNT",
+                    ));
                 }
                 self.documents("FIND", &database, command, tag).await
             }
@@ -610,7 +774,9 @@ impl MongoSession {
                 }
                 let stages = shell::extended_json(&args[0])?;
                 if !stages.starts_with('[') {
-                    return Err(DbError::msg("aggregate takes a list of stages, like [{$match: {…}}]."));
+                    return Err(DbError::msg(
+                        "aggregate takes a list of stages, like [{$match: {…}}].",
+                    ));
                 }
                 let mut cursor = doc! { "batchSize": BATCH_SIZE };
                 let mut command = doc! { "aggregate": name, "pipeline": bson_from_json(&stages)?, "comment": tag };
@@ -638,7 +804,12 @@ impl MongoSession {
                 if args.len() > 1 {
                     return Err(unsupported());
                 }
-                Ok(scalar(self.count_documents(&database, name, doc_at(0)?, tag).await?, "long", "COUNT"))
+                Ok(scalar(
+                    self.count_documents(&database, name, doc_at(0)?, tag)
+                        .await?,
+                    "long",
+                    "COUNT",
+                ))
             }
 
             "estimatedDocumentCount" => {
@@ -646,7 +817,11 @@ impl MongoSession {
                 if !args.is_empty() {
                     return Err(unsupported());
                 }
-                Ok(scalar(collection.estimated_document_count().await.map_err(fail)?, "long", "COUNT"))
+                Ok(scalar(
+                    collection.estimated_document_count().await.map_err(fail)?,
+                    "long",
+                    "COUNT",
+                ))
             }
 
             "distinct" => {
@@ -655,12 +830,22 @@ impl MongoSession {
                     return Err(unsupported());
                 }
                 let field = shell::string_argument(&args[0]).ok_or_else(unsupported)?;
-                let command = doc! { "distinct": name, "key": field, "query": doc_at(1)?, "comment": tag };
-                let reply = self.client.database(&database).run_command(command).await.map_err(fail)?;
+                let command =
+                    doc! { "distinct": name, "key": field, "query": doc_at(1)?, "comment": tag };
+                let reply = self
+                    .client
+                    .database(&database)
+                    .run_command(command)
+                    .await
+                    .map_err(fail)?;
                 let mut rows = Vec::new();
                 let mut kind: Option<&'static str> = None;
                 let mut truncated = false;
-                for value in reply.get_array("values").map(|a| a.as_slice()).unwrap_or_default() {
+                for value in reply
+                    .get_array("values")
+                    .map(|a| a.as_slice())
+                    .unwrap_or_default()
+                {
                     if rows.len() >= ROW_LIMIT {
                         truncated = true;
                         break;
@@ -671,14 +856,19 @@ impl MongoSession {
                     rows.push(vec![cell(value)]);
                 }
                 let count = rows.len();
-                let mut result = QueryResult::rows(vec![Column::new("value", kind.unwrap_or(""))], rows, format!("DISTINCT {count}"));
+                let mut result = QueryResult::rows(
+                    vec![Column::new("value", kind.unwrap_or(""))],
+                    rows,
+                    format!("DISTINCT {count}"),
+                );
                 result.truncated = truncated;
                 Ok(result)
             }
 
             "getIndexes" => {
                 no_modifiers()?;
-                self.documents("FIND", &database, doc! { "listIndexes": name }, tag).await
+                self.documents("FIND", &database, doc! { "listIndexes": name }, tag)
+                    .await
             }
 
             "insertOne" => {
@@ -687,7 +877,11 @@ impl MongoSession {
                     return Err(unsupported());
                 }
                 let options: InsertOneOptions = options(doc_at(1)?)?;
-                collection.insert_one(doc_at(0)?).with_options(options).await.map_err(fail)?;
+                collection
+                    .insert_one(doc_at(0)?)
+                    .with_options(options)
+                    .await
+                    .map_err(fail)?;
                 Ok(written("INSERT", 1))
             }
 
@@ -698,14 +892,23 @@ impl MongoSession {
                 }
                 let list = shell::extended_json(&args[0])?;
                 if !list.starts_with('[') {
-                    return Err(DbError::msg("insertMany takes a list of documents, like [{a: 1}, {a: 2}]."));
+                    return Err(DbError::msg(
+                        "insertMany takes a list of documents, like [{a: 1}, {a: 2}].",
+                    ));
                 }
-                let docs = documents_in(&list, "Each item of the list must be a document, like {name: \"Ana\"}.")?;
+                let docs = documents_in(
+                    &list,
+                    "Each item of the list must be a document, like {name: \"Ana\"}.",
+                )?;
                 if docs.is_empty() {
                     return Ok(written("INSERT", 0));
                 }
                 let options: InsertManyOptions = options(doc_at(1)?)?;
-                let inserted = collection.insert_many(docs).with_options(options).await.map_err(fail)?;
+                let inserted = collection
+                    .insert_many(docs)
+                    .with_options(options)
+                    .await
+                    .map_err(fail)?;
                 Ok(written("INSERT", inserted.inserted_ids.len() as u64))
             }
 
@@ -718,7 +921,10 @@ impl MongoSession {
                 let change = shell::extended_json(&args[1])?;
                 let result = if main.name == "replaceOne" {
                     let options: ReplaceOptions = options(doc_at(2)?)?;
-                    collection.replace_one(filter, document(&args[1])?).with_options(options).await
+                    collection
+                        .replace_one(filter, document(&args[1])?)
+                        .with_options(options)
+                        .await
                 } else {
                     let options: UpdateOptions = options(doc_at(2)?)?;
                     // An update pipeline: [{$set: …}, …]
@@ -728,9 +934,15 @@ impl MongoSession {
                         document(&args[1])?.into()
                     };
                     if main.name == "updateOne" {
-                        collection.update_one(filter, update).with_options(options).await
+                        collection
+                            .update_one(filter, update)
+                            .with_options(options)
+                            .await
                     } else {
-                        collection.update_many(filter, update).with_options(options).await
+                        collection
+                            .update_many(filter, update)
+                            .with_options(options)
+                            .await
                     }
                 };
                 Ok(written("UPDATE", result.map_err(fail)?.modified_count))
@@ -780,8 +992,16 @@ impl MongoSession {
                 let mut index = doc! { "key": keys, "name": &index_name };
                 index.extend(given);
                 let command = doc! { "createIndexes": name, "indexes": [index] };
-                self.client.database(&database).run_command(command).await.map_err(fail)?;
-                Ok(QueryResult::rows(vec![Column::new("value", "string")], vec![vec![Some(index_name)]], "CREATE INDEX"))
+                self.client
+                    .database(&database)
+                    .run_command(command)
+                    .await
+                    .map_err(fail)?;
+                Ok(QueryResult::rows(
+                    vec![Column::new("value", "string")],
+                    vec![vec![Some(index_name)]],
+                    "CREATE INDEX",
+                ))
             }
 
             _ => Err(unsupported()),
@@ -789,7 +1009,13 @@ impl MongoSession {
     }
 
     /// The documents of a cursor command as a table, cut at `ROW_LIMIT`.
-    async fn documents(&self, verb: &str, database: &str, command: Document, tag: &str) -> DbResult<QueryResult> {
+    async fn documents(
+        &self,
+        verb: &str,
+        database: &str,
+        command: Document,
+        tag: &str,
+    ) -> DbResult<QueryResult> {
         let mut table = DocumentTable::new(false);
         let cursor = self.cursor(database, command, tag).await?;
         let more = drain(cursor, ROW_LIMIT, |doc| table.add(&doc)).await?;
@@ -800,7 +1026,15 @@ impl MongoSession {
 }
 
 /// Methods that start a read, and the ones that may follow them in a chain.
-const READING_METHODS: [&str; 7] = ["find", "findOne", "aggregate", "countDocuments", "estimatedDocumentCount", "distinct", "count"];
+const READING_METHODS: [&str; 7] = [
+    "find",
+    "findOne",
+    "aggregate",
+    "countDocuments",
+    "estimatedDocumentCount",
+    "distinct",
+    "count",
+];
 const CURSOR_METHODS: [&str; 12] = [
     "sort",
     "limit",
@@ -815,7 +1049,12 @@ const CURSOR_METHODS: [&str; 12] = [
     "collation",
     "comment",
 ];
-const READING_DATABASE_METHODS: [&str; 4] = ["getCollectionNames", "getCollectionInfos", "getName", "stats"];
+const READING_DATABASE_METHODS: [&str; 4] = [
+    "getCollectionNames",
+    "getCollectionInfos",
+    "getName",
+    "stats",
+];
 
 #[async_trait]
 impl DatabaseSession for MongoSession {
@@ -852,7 +1091,10 @@ impl DatabaseSession for MongoSession {
             let mut results = Vec::with_capacity(statements.len());
             for statement in &statements {
                 let parsed = shell::parse(statement)?;
-                results.push(self.run(&mut inner, parsed, statement, &operation.tag).await?);
+                results.push(
+                    self.run(&mut inner, parsed, statement, &operation.tag)
+                        .await?,
+                );
             }
             Ok(results)
         };
@@ -868,7 +1110,9 @@ impl DatabaseSession for MongoSession {
         if statements.len() != 1 {
             return Err(DbError::msg("Send one statement at a time."));
         }
-        let refused = || DbError::msg("This statement can change data; read-only queries only find, aggregate, count, and list.");
+        let refused = || {
+            DbError::msg("This statement can change data; read-only queries only find, aggregate, count, and list.")
+        };
         match shell::parse(&statements[0])? {
             Statement::ShowDatabases | Statement::ShowCollections => {}
             Statement::Use(_) => return Err(refused()),
@@ -880,11 +1124,18 @@ impl DatabaseSession for MongoSession {
             Statement::Collection { calls, .. } => {
                 let first = &calls[0];
                 if !READING_METHODS.contains(&first.name.as_str())
-                    || !calls[1..].iter().all(|c| CURSOR_METHODS.contains(&c.name.as_str()))
+                    || !calls[1..]
+                        .iter()
+                        .all(|c| CURSOR_METHODS.contains(&c.name.as_str()))
                 {
                     return Err(refused());
                 }
-                if first.name == "aggregate" && first.arguments.iter().any(|a| a.contains("$out") || a.contains("$merge")) {
+                if first.name == "aggregate"
+                    && first
+                        .arguments
+                        .iter()
+                        .any(|a| a.contains("$out") || a.contains("$merge"))
+                {
                     return Err(refused());
                 }
             }
@@ -908,8 +1159,18 @@ impl DatabaseSession for MongoSession {
         let mut inner = self.inner.lock().await;
         let operation = self.canceller.begin();
         let work = async {
-            self.learn_columns(&mut inner, relation, search, &operation.tag).await?;
-            self.page_in(&mut inner, relation, limit, offset, search, sort, &operation.tag).await
+            self.learn_columns(&mut inner, relation, search, &operation.tag)
+                .await?;
+            self.page_in(
+                &mut inner,
+                relation,
+                limit,
+                offset,
+                search,
+                sort,
+                &operation.tag,
+            )
+            .await
         };
         self.cancelable(&operation, work).await
     }
@@ -922,18 +1183,29 @@ impl DatabaseSession for MongoSession {
         let mut inner = self.inner.lock().await;
         let operation = self.canceller.begin();
         let work = async {
-            self.learn_columns(&mut inner, relation, search, &operation.tag).await?;
+            self.learn_columns(&mut inner, relation, search, &operation.tag)
+                .await?;
             let filter = search_filter(&inner, search, relation);
-            self.count_documents(&relation.schema, &relation.name, filter, &operation.tag).await
+            self.count_documents(&relation.schema, &relation.name, filter, &operation.tag)
+                .await
         };
         self.cancelable(&operation, work).await.map(Some)
     }
 
     /// Sets the changed fields of one document, found by its _id, in one updateOne.
     /// Each value keeps the type the field has in that document (see `extended_json_from`).
-    async fn update(&self, relation: &Relation, key: &RowKey, changes: &[CellValue]) -> DbResult<EditOutcome> {
+    async fn update(
+        &self,
+        relation: &Relation,
+        key: &RowKey,
+        changes: &[CellValue],
+    ) -> DbResult<EditOutcome> {
         if changes.is_empty() {
-            return Ok(EditOutcome { sql: String::new(), command: "UPDATE 0".into(), affected: 0 });
+            return Ok(EditOutcome {
+                sql: String::new(),
+                command: "UPDATE 0".into(),
+                affected: 0,
+            });
         }
         if changes.iter().any(|c| c.column == "_id") {
             return Err(DbError::msg(
@@ -946,7 +1218,10 @@ impl DatabaseSession for MongoSession {
         let types = self.field_types(relation, &filter, &fields).await?;
         let mut set = Document::new();
         for change in changes {
-            let json = extended_json_from(change.value.as_deref(), types.get(&change.column).map_or("", String::as_str))?;
+            let json = extended_json_from(
+                change.value.as_deref(),
+                types.get(&change.column).map_or("", String::as_str),
+            )?;
             set.insert(change.column.clone(), bson_from_json(&json)?);
         }
         let result = self
@@ -959,9 +1234,16 @@ impl DatabaseSession for MongoSession {
         if result.matched_count != 1 {
             return Err(row_changed());
         }
-        let shown = fields.iter().map(|f| format!("{}: ?", shell_key(f))).collect::<Vec<_>>().join(", ");
+        let shown = fields
+            .iter()
+            .map(|f| format!("{}: ?", shell_key(f)))
+            .collect::<Vec<_>>()
+            .join(", ");
         Ok(EditOutcome {
-            sql: format!("db.{}.updateOne({{_id: ?}}, {{$set: {{{shown}}}}})", shell_name(&relation.name)),
+            sql: format!(
+                "db.{}.updateOne({{_id: ?}}, {{$set: {{{shown}}}}})",
+                shell_name(&relation.name)
+            ),
             command: "UPDATE 1".into(),
             affected: 1,
         })
@@ -974,8 +1256,10 @@ impl DatabaseSession for MongoSession {
         let inner = self.inner.lock().await;
         let empty = HashMap::new();
         let types = inner.column_types.get(&relation.id()).unwrap_or(&empty);
-        let fields: Vec<&CellValue> =
-            values.iter().filter(|v| !(v.column == "_id" && v.value.as_deref().unwrap_or("").is_empty())).collect();
+        let fields: Vec<&CellValue> = values
+            .iter()
+            .filter(|v| !(v.column == "_id" && v.value.as_deref().unwrap_or("").is_empty()))
+            .collect();
         let mut doc = Document::new();
         for field in &fields {
             let text = field.value.as_deref();
@@ -990,7 +1274,11 @@ impl DatabaseSession for MongoSession {
             .insert_one(doc)
             .await
             .map_err(fail)?;
-        let shown = fields.iter().map(|f| format!("{}: ?", shell_key(&f.column))).collect::<Vec<_>>().join(", ");
+        let shown = fields
+            .iter()
+            .map(|f| format!("{}: ?", shell_key(&f.column)))
+            .collect::<Vec<_>>()
+            .join(", ");
         Ok(EditOutcome {
             sql: format!("db.{}.insertOne({{{shown}}})", shell_name(&relation.name)),
             command: "INSERT 1".into(),
@@ -1029,7 +1317,8 @@ impl DatabaseSession for MongoSession {
         let _inner = self.inner.lock().await;
         let relations = self.all_relations().await?;
         let operation = self.canceller.begin();
-        self.cancelable(&operation, self.sample_graph(&relations, &operation.tag)).await
+        self.cancelable(&operation, self.sample_graph(&relations, &operation.tag))
+            .await
     }
 
     async fn close(&self) {
@@ -1061,7 +1350,12 @@ struct CancelState {
 impl Canceller {
     fn new() -> Self {
         Self {
-            state: StdMutex::new(CancelState { running: false, requested: false, generation: 0, notify: Arc::new(Notify::new()) }),
+            state: StdMutex::new(CancelState {
+                running: false,
+                requested: false,
+                generation: 0,
+                notify: Arc::new(Notify::new()),
+            }),
             session: uuid::Uuid::new_v4().to_string(),
         }
     }
@@ -1081,7 +1375,10 @@ impl Canceller {
         state.running = true;
         state.requested = false;
         state.notify = Arc::new(Notify::new());
-        Operation { tag: self.tag(state.generation), notify: state.notify.clone() }
+        Operation {
+            tag: self.tag(state.generation),
+            notify: state.notify.clone(),
+        }
     }
 
     /// Ends an operation; true when it was canceled.
@@ -1122,12 +1419,20 @@ async fn kill(client: Client, tag: String) {
         };
         let mut opids: Vec<Bson> = Vec::new();
         if let Ok(reply) = admin.run_command(find).await {
-            if let Ok(batch) = reply.get_document("cursor").and_then(|c| c.get_array("firstBatch")) {
-                opids = batch.iter().filter_map(|op| op.as_document()?.get("opid").cloned()).collect();
+            if let Ok(batch) = reply
+                .get_document("cursor")
+                .and_then(|c| c.get_array("firstBatch"))
+            {
+                opids = batch
+                    .iter()
+                    .filter_map(|op| op.as_document()?.get("opid").cloned())
+                    .collect();
             }
         }
         for opid in &opids {
-            let _ = admin.run_command(doc! { "killOp": 1, "op": opid.clone() }).await;
+            let _ = admin
+                .run_command(doc! { "killOp": 1, "op": opid.clone() })
+                .await;
         }
         if !opids.is_empty() {
             return;
@@ -1137,7 +1442,11 @@ async fn kill(client: Client, tag: String) {
 }
 
 /// Reads a cursor: up to `limit` documents. True when more documents were left.
-async fn drain(mut cursor: Cursor<Document>, limit: usize, mut body: impl FnMut(Document) + Send) -> DbResult<bool> {
+async fn drain(
+    mut cursor: Cursor<Document>,
+    limit: usize,
+    mut body: impl FnMut(Document) + Send,
+) -> DbResult<bool> {
     let mut count = 0;
     while let Some(doc) = cursor.try_next().await.map_err(fail)? {
         if count >= limit {
@@ -1158,27 +1467,44 @@ fn search_filter(inner: &Inner, search: &str, relation: &Relation) -> Document {
         return Document::new();
     }
     let pattern = regex::escape(search);
-    let mut names: Vec<&String> =
-        inner.column_types.get(&relation.id()).map(|t| t.keys().filter(|k| *k != "_id").collect()).unwrap_or_default();
+    let mut names: Vec<&String> = inner
+        .column_types
+        .get(&relation.id())
+        .map(|t| t.keys().filter(|k| *k != "_id").collect())
+        .unwrap_or_default();
     names.sort();
-    let mut clauses: Vec<Bson> =
-        names.into_iter().map(|name| Bson::Document(doc! { name: { "$regex": &pattern, "$options": "i" } })).collect();
+    let mut clauses: Vec<Bson> = names
+        .into_iter()
+        .map(|name| Bson::Document(doc! { name: { "$regex": &pattern, "$options": "i" } }))
+        .collect();
+    // $toString throws for an _id that is a document or an array (compound ids);
+    // $convert with onError reads those as "" so the search still runs.
     clauses.push(Bson::Document(doc! {
-        "$expr": { "$regexMatch": { "input": { "$toString": "$_id" }, "regex": &pattern, "options": "i" } }
+        "$expr": { "$regexMatch": {
+            "input": { "$convert": { "input": "$_id", "to": "string", "onError": "", "onNull": "" } },
+            "regex": &pattern,
+            "options": "i"
+        } }
     }));
     doc! { "$or": clauses }
 }
 
 /// {_id: …} from the row's key (canonical extended JSON).
 fn id_filter(key: &RowKey) -> DbResult<Document> {
-    let id = key.values.first().cloned().flatten().ok_or_else(row_changed)?;
+    let id = key
+        .values
+        .first()
+        .cloned()
+        .flatten()
+        .ok_or_else(row_changed)?;
     let id = bson_from_json(&id).map_err(|_| row_changed())?;
     Ok(doc! { "_id": id })
 }
 
 /// One extended JSON value (canonical or relaxed), keys in order.
 pub fn bson_from_json(json: &str) -> DbResult<Bson> {
-    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| DbError::msg(e.to_string()))?;
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| DbError::msg(e.to_string()))?;
     Bson::try_from(value).map_err(|e| DbError::msg(e.to_string()))
 }
 
@@ -1193,7 +1519,9 @@ fn document(argument: &str) -> DbResult<Document> {
     match bson_from_json(&json) {
         Ok(Bson::Document(doc)) if json.starts_with('{') => Ok(doc),
         Err(error) if json.starts_with('{') => Err(error),
-        _ => Err(DbError::msg(format!("Expected a document like {{name: \"Ana\"}}, not {argument}."))),
+        _ => Err(DbError::msg(format!(
+            "Expected a document like {{name: \"Ana\"}}, not {argument}."
+        ))),
     }
 }
 
@@ -1232,8 +1560,13 @@ fn options<T: serde::de::DeserializeOwned>(doc: Document) -> DbResult<T> {
 /// limit(5), skip(NumberInt(5)): a whole number.
 fn integer(argument: &str) -> DbResult<i64> {
     let json = shell::extended_json(argument)?;
-    let exact = |d: f64| (d.is_finite() && d.fract() == 0.0 && d.abs() < 9.2e18).then_some(d as i64);
-    if let Some(n) = json.parse::<i64>().ok().or_else(|| json.parse::<f64>().ok().and_then(exact)) {
+    let exact =
+        |d: f64| (d.is_finite() && d.fract() == 0.0 && d.abs() < 9.2e18).then_some(d as i64);
+    if let Some(n) = json
+        .parse::<i64>()
+        .ok()
+        .or_else(|| json.parse::<f64>().ok().and_then(exact))
+    {
         return Ok(n);
     }
     match bson_from_json(&json) {
@@ -1245,7 +1578,11 @@ fn integer(argument: &str) -> DbResult<i64> {
 }
 
 fn scalar(value: u64, type_name: &str, command: &str) -> QueryResult {
-    QueryResult::rows(vec![Column::new("value", type_name)], vec![vec![Some(value.to_string())]], command)
+    QueryResult::rows(
+        vec![Column::new("value", type_name)],
+        vec![vec![Some(value.to_string())]],
+        command,
+    )
 }
 
 /// mongosh's index name: {a: 1, b: -1} is "a_1_b_-1".
@@ -1271,7 +1608,9 @@ fn grouped(n: u64) -> String {
 
 fn plain_identifier(name: &str) -> bool {
     static PLAIN: OnceLock<Regex> = OnceLock::new();
-    PLAIN.get_or_init(|| Regex::new(r"^[A-Za-z_$][A-Za-z0-9_$]*$").expect("valid regex")).is_match(name)
+    PLAIN
+        .get_or_init(|| Regex::new(r"^[A-Za-z_$][A-Za-z0-9_$]*$").expect("valid regex"))
+        .is_match(name)
 }
 
 /// `users`, or `getCollection("my-things")` when the name isn't a plain identifier.
@@ -1312,13 +1651,23 @@ pub fn referenced_name(field: &str) -> Option<String> {
 /// literals ({a: 1}, [1, 2], ObjectId("…"), {"$date": …}), and an unknown field
 /// keeps text that isn't JSON as a string. Errors with "This isn't a valid <type>."
 pub fn extended_json_from(text: Option<&str>, original_type: &str) -> DbResult<String> {
-    let Some(text) = text else { return Ok("null".into()) };
+    let Some(text) = text else {
+        return Ok("null".into());
+    };
     let value = text.trim();
     let invalid = || DbError::msg(format!("This isn't a valid {original_type}."));
     // JSON or a mongosh literal that the bson crate reads.
-    let literal = || shell::extended_json(value).ok().filter(|json| bson_from_json(json).is_ok());
+    let literal = || {
+        shell::extended_json(value)
+            .ok()
+            .filter(|json| bson_from_json(json).is_ok())
+    };
     // The literal when it reads as this type (ObjectId("…"), {"$date": …}, …).
-    let literal_of = |kind: &str| literal().filter(|json| type_of_value(json) == Some(kind)).ok_or_else(invalid);
+    let literal_of = |kind: &str| {
+        literal()
+            .filter(|json| type_of_value(json) == Some(kind))
+            .ok_or_else(invalid)
+    };
     match original_type {
         "string" | "symbol" => Ok(shell::json_string(text)),
         "int" => match value.parse::<i32>() {
@@ -1330,7 +1679,10 @@ pub fn extended_json_from(text: Option<&str>, original_type: &str) -> DbResult<S
             Err(_) => literal_of("long"),
         },
         "double" => match parse_double(value) {
-            Some(d) => Ok(format!(r#"{{"$numberDouble":"{}"}}"#, shell::double_text(d))),
+            Some(d) => Ok(format!(
+                r#"{{"$numberDouble":"{}"}}"#,
+                shell::double_text(d)
+            )),
             None => literal_of("double"),
         },
         "decimal" if shell::is_decimal(value) => Ok(format!(r#"{{"$numberDecimal":"{value}"}}"#)),
@@ -1362,7 +1714,10 @@ fn parse_double(text: &str) -> Option<f64> {
         "Infinity" | "+Infinity" => Some(f64::INFINITY),
         "-Infinity" => Some(f64::NEG_INFINITY),
         _ => NUMBER
-            .get_or_init(|| Regex::new(r"^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$").expect("valid regex"))
+            .get_or_init(|| {
+                Regex::new(r"^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$")
+                    .expect("valid regex")
+            })
             .is_match(text)
             .then(|| text.parse().ok())
             .flatten(),
@@ -1411,7 +1766,9 @@ pub fn cell(value: &Bson) -> Option<String> {
         Bson::Boolean(b) => Some(b.to_string()),
         Bson::Null | Bson::Undefined => None,
         Bson::ObjectId(id) => Some(id.to_hex()),
-        Bson::DateTime(date) => shell::iso_date(date.timestamp_millis()).or_else(|| Some(relaxed_json(value))),
+        Bson::DateTime(date) => {
+            shell::iso_date(date.timestamp_millis()).or_else(|| Some(relaxed_json(value)))
+        }
         _ => Some(relaxed_json(value)),
     }
 }
@@ -1440,7 +1797,14 @@ struct DocumentTable {
 
 impl DocumentTable {
     fn new(keep_ids: bool) -> Self {
-        Self { names: vec![], index: HashMap::new(), types: vec![], rows: vec![], ids: vec![], keep_ids }
+        Self {
+            names: vec![],
+            index: HashMap::new(),
+            types: vec![],
+            rows: vec![],
+            ids: vec![],
+            keep_ids,
+        }
     }
 
     fn add(&mut self, doc: &Document) {
@@ -1458,7 +1822,9 @@ impl DocumentTable {
                 }
             };
             let kind = type_name(value);
-            if self.types[column].is_none() || (self.types[column] == Some("null") && kind != "null") {
+            if self.types[column].is_none()
+                || (self.types[column] == Some("null") && kind != "null")
+            {
                 self.types[column] = Some(kind);
             }
             row[column] = cell(value);
@@ -1480,8 +1846,20 @@ impl DocumentTable {
                 order.insert(0, id);
             }
         }
-        let columns = order.iter().map(|&i| Column::new(self.names[i].clone(), self.types[i].unwrap_or(""))).collect();
-        let rows = self.rows.iter().map(|row| order.iter().map(|&i| row.get(i).cloned().flatten()).collect()).collect();
+        let columns = order
+            .iter()
+            .map(|&i| Column::new(self.names[i].clone(), self.types[i].unwrap_or("")))
+            .collect();
+        let rows = self
+            .rows
+            .iter()
+            .map(|row| {
+                order
+                    .iter()
+                    .map(|&i| row.get(i).cloned().flatten())
+                    .collect()
+            })
+            .collect();
         QueryResult::rows(columns, rows, command)
     }
 }
@@ -1506,7 +1884,12 @@ impl FieldStats {
             if kind != "null" {
                 *self.present.entry(key.clone()).or_default() += 1;
             }
-            *self.types.entry(key.clone()).or_default().entry(kind).or_default() += 1;
+            *self
+                .types
+                .entry(key.clone())
+                .or_default()
+                .entry(kind)
+                .or_default() += 1;
         }
     }
 
@@ -1543,41 +1926,80 @@ mod tests {
     #[test]
     fn summarizes_urls() {
         let one = summary("mongodb://ana:pw@db.x.com:27018/shop?authSource=admin").unwrap();
-        assert_eq!((one.host.as_deref(), one.port, one.database.as_str()), (Some("db.x.com"), Some(27018), "shop"));
+        assert_eq!(
+            (one.host.as_deref(), one.port, one.database.as_str()),
+            (Some("db.x.com"), Some(27018), "shop")
+        );
         assert_eq!(one.suggested_name, "shop @ db.x.com");
         assert_eq!(one.user.as_deref(), Some("ana"));
         let many = summary("mongodb://h1:27017,h2:27018,h3/app?replicaSet=rs0").unwrap();
-        assert_eq!((many.host.as_deref(), many.port), (Some("h1:27017,h2:27018,h3:27017"), None));
+        assert_eq!(
+            (many.host.as_deref(), many.port),
+            (Some("h1:27017,h2:27018,h3:27017"), None)
+        );
         assert_eq!(many.suggested_name, "app @ h1");
         let srv = summary("mongodb+srv://cluster0.example.mongodb.net/?appName=x").unwrap();
-        assert_eq!((srv.host.as_deref(), srv.port, srv.database.as_str()), (Some("cluster0.example.mongodb.net"), None, ""));
+        assert_eq!(
+            (srv.host.as_deref(), srv.port, srv.database.as_str()),
+            (Some("cluster0.example.mongodb.net"), None, "")
+        );
         assert_eq!(srv.suggested_name, "mongodb @ cluster0.example.mongodb.net");
-        assert_eq!(summary("MONGO_URL=mongodb://ana:pw@db.x.com/shop").unwrap().suggested_name, "shop @ db.x.com");
+        assert_eq!(
+            summary("MONGO_URL=mongodb://ana:pw@db.x.com/shop")
+                .unwrap()
+                .suggested_name,
+            "shop @ db.x.com"
+        );
         assert!(summary("postgres://a@b/c").is_none());
         assert!(summary("redis://h").is_none());
     }
 
     #[test]
     fn points_urls_at_tunnels() {
-        let text = "mongodb://ana:p%40w@db.internal:27018/shop?authSource=admin&directConnection=false";
-        assert_eq!(through_local_port(text, 61000), "mongodb://ana:p%40w@127.0.0.1:61000/shop?authSource=admin&directConnection=true");
-        assert_eq!(through_local_port("mongodb://db.internal", 5), "mongodb://127.0.0.1:5/?directConnection=true");
-        assert_eq!(through_local_port("mongodb://db.internal?tls=true", 5), "mongodb://127.0.0.1:5/?tls=true&directConnection=true");
+        let text =
+            "mongodb://ana:p%40w@db.internal:27018/shop?authSource=admin&directConnection=false";
+        assert_eq!(
+            through_local_port(text, 61000),
+            "mongodb://ana:p%40w@127.0.0.1:61000/shop?authSource=admin&directConnection=true"
+        );
+        assert_eq!(
+            through_local_port("mongodb://db.internal", 5),
+            "mongodb://127.0.0.1:5/?directConnection=true"
+        );
+        assert_eq!(
+            through_local_port("mongodb://db.internal?tls=true", 5),
+            "mongodb://127.0.0.1:5/?tls=true&directConnection=true"
+        );
         assert_eq!(connection_text("MONGODB://h/db?w=1"), "mongodb://h/db?w=1");
     }
 
     #[tokio::test]
     async fn refuses_other_input_and_tunnels_to_many_hosts() {
-        for text in ["", "   ", "postgres://a@b/c", "hello", "https://example.com", "mongodb://", "mongo://h"] {
+        for text in [
+            "",
+            "   ",
+            "postgres://a@b/c",
+            "hello",
+            "https://example.com",
+            "mongodb://",
+            "mongo://h",
+        ] {
             assert!(open(text, None).await.is_err(), "{text}");
         }
         assert_eq!(
-            open("https://example.com", None).await.err().unwrap().message(),
+            open("https://example.com", None)
+                .await
+                .err()
+                .unwrap()
+                .message(),
             "Unrecognized format. Use a mongodb://… URL (or mongodb+srv://)"
         );
         for text in ["mongodb+srv://c.x.net/shop", "mongodb://h1,h2/shop"] {
             let error = open(text, Some(5)).await.err().unwrap().message();
-            assert!(error.contains("SSH tunnel goes to one MongoDB server"), "{error}");
+            assert!(
+                error.contains("SSH tunnel goes to one MongoDB server"),
+                "{error}"
+            );
         }
     }
 
@@ -1588,17 +2010,37 @@ mod tests {
             (" padded ", "string", r#"" padded ""#),
             ("42", "int", r#"{"$numberInt":"42"}"#),
             ("NumberInt(7)", "int", r#"{"$numberInt":"7"}"#),
-            ("9007199254740993", "long", r#"{"$numberLong":"9007199254740993"}"#),
+            (
+                "9007199254740993",
+                "long",
+                r#"{"$numberLong":"9007199254740993"}"#,
+            ),
             ("1.5", "double", r#"{"$numberDouble":"1.5"}"#),
             ("3", "double", r#"{"$numberDouble":"3.0"}"#),
             ("-Infinity", "double", r#"{"$numberDouble":"-Infinity"}"#),
             ("9.99", "decimal", r#"{"$numberDecimal":"9.99"}"#),
             ("TRUE", "bool", "true"),
             ("false", "bool", "false"),
-            ("65A1B2C3D4E5F60718293A4B", "objectId", r#"{"$oid":"65a1b2c3d4e5f60718293a4b"}"#),
-            (r#"ObjectId("65a1b2c3d4e5f60718293a4b")"#, "objectId", r#"{"$oid":"65a1b2c3d4e5f60718293a4b"}"#),
-            ("2024-05-01T10:30:00.250Z", "date", r#"{"$date":{"$numberLong":"1714559400250"}}"#),
-            (r#"{"$date": "2024-05-01T10:30:00Z"}"#, "date", r#"{"$date":"2024-05-01T10:30:00Z"}"#),
+            (
+                "65A1B2C3D4E5F60718293A4B",
+                "objectId",
+                r#"{"$oid":"65a1b2c3d4e5f60718293a4b"}"#,
+            ),
+            (
+                r#"ObjectId("65a1b2c3d4e5f60718293a4b")"#,
+                "objectId",
+                r#"{"$oid":"65a1b2c3d4e5f60718293a4b"}"#,
+            ),
+            (
+                "2024-05-01T10:30:00.250Z",
+                "date",
+                r#"{"$date":{"$numberLong":"1714559400250"}}"#,
+            ),
+            (
+                r#"{"$date": "2024-05-01T10:30:00Z"}"#,
+                "date",
+                r#"{"$date":"2024-05-01T10:30:00Z"}"#,
+            ),
             ("{city: 'Lisbon'}", "object", r#"{"city":"Lisbon"}"#),
             (r#"["a", 1]"#, "array", r#"["a",1]"#),
             ("42", "", "42"),
@@ -1614,7 +2056,11 @@ mod tests {
             ),
         ];
         for (text, kind, json) in cases {
-            assert_eq!(extended_json_from(Some(text), kind).unwrap(), *json, "{text} as {kind}");
+            assert_eq!(
+                extended_json_from(Some(text), kind).unwrap(),
+                *json,
+                "{text} as {kind}"
+            );
         }
     }
 
@@ -1636,7 +2082,8 @@ mod tests {
             ("{a: 1}", "array"),
             ("not base64", "binData"),
         ] {
-            let error = extended_json_from(Some(text), kind).expect_err(&format!("accepted {text} as {kind}"));
+            let error = extended_json_from(Some(text), kind)
+                .expect_err(&format!("accepted {text} as {kind}"));
             assert_eq!(error.message(), format!("This isn't a valid {kind}."));
         }
     }
@@ -1666,11 +2113,21 @@ mod tests {
         table.add(&doc! { "n": Bson::Null, "extra": "e", "_id": 2 });
         let result = table.result("FIND 2".into());
         let names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["_id", "n", "l", "d", "t", "a", "o", "b", "x", "dec", "$type", "extra"]);
-        let types: Vec<&str> = result.columns.iter().map(|c| c.type_name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["_id", "n", "l", "d", "t", "a", "o", "b", "x", "dec", "$type", "extra"]
+        );
+        let types: Vec<&str> = result
+            .columns
+            .iter()
+            .map(|c| c.type_name.as_str())
+            .collect();
         assert_eq!(
             types,
-            ["objectId", "int", "long", "double", "date", "array", "object", "binData", "null", "decimal", "string", "string"]
+            [
+                "objectId", "int", "long", "double", "date", "array", "object", "binData", "null",
+                "decimal", "string", "string"
+            ]
         );
         let row: Vec<Option<&str>> = result.rows[0].iter().map(Option::as_deref).collect();
         assert_eq!(
@@ -1692,17 +2149,33 @@ mod tests {
         );
         assert_eq!(result.rows[1][0].as_deref(), Some("2"));
         assert_eq!(result.rows[1][11].as_deref(), Some("e"));
-        assert_eq!(table.ids, [Some(r#"{"$oid":"650000000000000000000001"}"#.to_string()), Some(r#"{"$numberInt":"2"}"#.into())]);
+        assert_eq!(
+            table.ids,
+            [
+                Some(r#"{"$oid":"650000000000000000000001"}"#.to_string()),
+                Some(r#"{"$numberInt":"2"}"#.into())
+            ]
+        );
         // The key finds the same value again.
-        let key = RowKey { columns: vec!["_id".into()], kind: RowKeyKind::PrimaryKey, values: vec![table.ids[1].clone()] };
+        let key = RowKey {
+            columns: vec!["_id".into()],
+            kind: RowKeyKind::PrimaryKey,
+            values: vec![table.ids[1].clone()],
+        };
         assert_eq!(id_filter(&key).unwrap(), doc! { "_id": 2 });
-        let gone = RowKey { values: vec![None], ..key };
+        let gone = RowKey {
+            values: vec![None],
+            ..key
+        };
         assert!(id_filter(&gone).is_err());
     }
 
     #[test]
     fn reads_arguments() {
-        assert_eq!(document("{a: 1, b: {$type: 'date'}}").unwrap(), doc! { "a": 1, "b": { "$type": "date" } });
+        assert_eq!(
+            document("{a: 1, b: {$type: 'date'}}").unwrap(),
+            doc! { "a": 1, "b": { "$type": "date" } }
+        );
         assert_eq!(
             document("[1]").unwrap_err().message(),
             "Expected a document like {name: \"Ana\"}, not [1]."
@@ -1713,7 +2186,10 @@ mod tests {
         assert_eq!(integer("NumberInt(7)").unwrap(), 7);
         assert_eq!(integer("NumberLong('8')").unwrap(), 8);
         assert_eq!(integer("2.0").unwrap(), 2);
-        assert_eq!(integer("'x'").unwrap_err().message(), "Expected a number, not 'x'.");
+        assert_eq!(
+            integer("'x'").unwrap_err().message(),
+            "Expected a number, not 'x'."
+        );
         assert_eq!(index_name(&doc! { "city": 1, "age": -1 }), "city_1_age_-1");
         assert_eq!(index_name(&doc! { "body": "text" }), "body_text");
         assert_eq!(shell_name("users"), "users");
@@ -1721,8 +2197,14 @@ mod tests {
         assert_eq!(shell_key("odd key"), r#""odd key""#);
         assert_eq!(grouped(1_234_567), "1,234,567");
         assert_eq!(grouped(999), "999");
-        assert!(documents_in("[{a: 1}, 2]", "bad").is_err() || documents_in(r#"[{"a":1},2]"#, "bad").is_err());
-        assert_eq!(documents_in(r#"[{"a":1},{"b":2}]"#, "bad").unwrap().len(), 2);
+        assert!(
+            documents_in("[{a: 1}, 2]", "bad").is_err()
+                || documents_in(r#"[{"a":1},2]"#, "bad").is_err()
+        );
+        assert_eq!(
+            documents_in(r#"[{"a":1},{"b":2}]"#, "bad").unwrap().len(),
+            2
+        );
         let update: UpdateOptions = options(doc! { "upsert": true }).unwrap();
         assert_eq!(update.upsert, Some(true));
     }
@@ -1734,8 +2216,17 @@ mod tests {
         stats.add(&doc! { "_id": 2, "a": "x", "b": 2.5 });
         stats.add(&doc! { "_id": 3, "a": "y" });
         let columns = stats.columns();
-        let shown: Vec<(&str, &str, bool, bool)> =
-            columns.iter().map(|c| (c.name.as_str(), c.type_name.as_str(), c.is_primary_key, c.is_nullable)).collect();
+        let shown: Vec<(&str, &str, bool, bool)> = columns
+            .iter()
+            .map(|c| {
+                (
+                    c.name.as_str(),
+                    c.type_name.as_str(),
+                    c.is_primary_key,
+                    c.is_nullable,
+                )
+            })
+            .collect();
         assert_eq!(
             shown,
             [
@@ -1764,15 +2255,34 @@ mod tests {
     #[test]
     fn builds_search_filters() {
         let relation = Relation::new("shop", "users", RelationKind::Table, 3.0);
-        let mut inner = Inner { current_database: "shop".into(), column_types: HashMap::new() };
+        let mut inner = Inner {
+            current_database: "shop".into(),
+            column_types: HashMap::new(),
+        };
         assert!(search_filter(&inner, "", &relation).is_empty());
         inner.column_types.insert(
             relation.id(),
-            HashMap::from([("_id".into(), "objectId".into()), ("name".into(), "string".into())]),
+            HashMap::from([
+                ("_id".into(), "objectId".into()),
+                ("name".into(), "string".into()),
+            ]),
         );
         let filter = search_filter(&inner, "a.b", &relation);
         let clauses = filter.get_array("$or").unwrap();
         assert_eq!(clauses.len(), 2);
-        assert_eq!(clauses[0], Bson::Document(doc! { "name": { "$regex": r"a\.b", "$options": "i" } }));
+        assert_eq!(
+            clauses[0],
+            Bson::Document(doc! { "name": { "$regex": r"a\.b", "$options": "i" } })
+        );
+        // The _id is matched through $convert, which can't fail on a compound _id.
+        let id = clauses[1].as_document().unwrap();
+        let input = id
+            .get_document("$expr")
+            .and_then(|e| e.get_document("$regexMatch"))
+            .and_then(|m| m.get_document("input"))
+            .unwrap();
+        let convert = input.get_document("$convert").unwrap();
+        assert_eq!(convert.get_str("onError").unwrap(), "");
+        assert_eq!(convert.get_str("to").unwrap(), "string");
     }
 }

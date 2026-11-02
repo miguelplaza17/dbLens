@@ -51,7 +51,9 @@ export default function App() {
     : model.shown === "query"
       ? t("Query Result")
       : model.relation
-        ? `${model.relation.schema ? `${model.relation.schema}.` : ""}${model.relation.name}`
+        ? model.relation.kind === "key" || !model.relation.schema
+          ? model.relation.name
+          : `${model.relation.schema}.${model.relation.name}`
         : `${engineNames[model.session.engine]} ${model.session.serverVersion}`;
 
   return (
