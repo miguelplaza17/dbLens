@@ -1601,8 +1601,10 @@ impl Inner {
     /// column. Refuses rows whose values were shown as hex.
     fn shown_row(&self, relation: &Relation, key: &RowKey) -> DbResult<(Cell, Cell)> {
         let name = key.values.first().cloned().flatten();
+        // No page on this connection: the grid's page was read on another one
+        // (the pool moved the session), so the check can't run. Refuse.
         let Some(page) = self.shown.get(&relation.id()) else {
-            return Ok((name, None));
+            return Err(row_changed());
         };
         let Some(row) = page.keys.iter().position(|k| k == &key.values) else {
             return Ok((name, None));
@@ -1677,7 +1679,6 @@ impl Inner {
         }
         let name = relation.name.as_str();
         let kind = self.current_type(name).await?;
-        let (row_key, row_value) = self.shown_row(relation, key)?;
         let allowed: &[&str] = match kind.as_str() {
             "string" | "ReJSON-RL" | "list" => &["value"],
             "hash" => &["field", "value"],
@@ -1694,6 +1695,7 @@ impl Inner {
         {
             return Err(not_editable(&c.column));
         }
+        let (row_key, row_value) = self.shown_row(relation, key)?;
         match kind.as_str() {
             "string" => {
                 let Some(value) = change(changes, "value")? else {
@@ -1951,6 +1953,16 @@ impl Inner {
     async fn delete(&mut self, relation: &Relation, key: &RowKey) -> DbResult<EditOutcome> {
         let name = relation.name.as_str();
         let kind = self.current_type(name).await?;
+        // Kinds with no row deletes are refused first, so the message says what to do.
+        match kind.as_str() {
+            "hash" | "set" | "zset" | "list" => {}
+            "string" | "ReJSON-RL" => {
+                return Err(DbError::msg(
+                    "To delete the whole key, run DEL in the command panel.",
+                ))
+            }
+            _ => return Err(read_only_type(&kind)),
+        }
         let (row_key, row_value) = self.shown_row(relation, key)?;
         let member = row_key.ok_or_else(row_changed)?;
         let removal = match kind.as_str() {

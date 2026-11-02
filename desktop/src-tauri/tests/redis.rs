@@ -516,6 +516,7 @@ async fn inserts_and_deletes_rows() {
     );
     let e = s.delete(&h, &key(&["field"], &["g"])).await.unwrap_err();
     assert!(e.message().contains("changed or was deleted"));
+    s.page(&set, 10, 0, "", None).await.unwrap();
     s.delete(&set, &key(&["member"], &["n"])).await.unwrap();
     s.delete(&z, &key(&["member"], &["a"])).await.unwrap();
     s.page(&l, 10, 0, "", None).await.unwrap();

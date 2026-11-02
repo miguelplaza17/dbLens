@@ -18,6 +18,7 @@ import {
   type RowKey,
   type Value,
 } from "../api";
+import { t } from "../i18n";
 import { recordCache, recordFetch } from "./perf";
 
 /** Rows per block fetched with page_block. */
@@ -157,6 +158,8 @@ export class TableSource implements GridData {
   private counted: number | null = null;
   /** Rows end here: a block came back short. */
   private end: number | null = null;
+  /** Rows shown before an invalidate: kept until the new count or end is known, so the grid doesn't shrink. */
+  private floor = 0;
   private prefetchTimer: ReturnType<typeof setTimeout> | undefined;
   private listeners = new Set<(change: Change) => void>();
   /** Bumps on invalidate: answers to older requests are dropped. */
@@ -239,7 +242,7 @@ export class TableSource implements GridData {
     let read = 0;
     for (const [index, block] of this.blocks) read = Math.max(read, index * BLOCK_ROWS + block.rowCount);
     const estimate = this.search.trim() === "" && this.relation.estimate > 0 ? this.relation.estimate : 0;
-    return Math.max(estimate, read + BLOCK_ROWS);
+    return Math.max(estimate, read + BLOCK_ROWS, this.floor);
   }
 
   private update() {
@@ -290,10 +293,31 @@ export class TableSource implements GridData {
     return this.edits.get(row)?.key ?? null;
   }
 
-  /** Keys of these rows, loading blocks that aren't in memory. */
+  /** Keys of these rows, reading blocks that aren't in memory. Each block's keys are taken
+   *  as soon as it is read, so the cache evicting it doesn't lose rows. Rows past the end
+   *  have no key; rejects when the rows were read anew meanwhile (positions may have moved)
+   *  or a row has no key, so a delete never runs on part of the selection. */
   async keys(rows: number[]): Promise<RowKey[]> {
-    await this.load(rows);
-    return rows.map((r) => this.key(r)).filter((k): k is RowKey => k !== null);
+    const epoch = this.epoch;
+    const byBlock = new Map<number, number[]>();
+    for (const r of [...new Set(rows)].sort((a, b) => a - b)) {
+      const b = Math.floor(r / BLOCK_ROWS);
+      const list = byBlock.get(b);
+      if (list) list.push(r);
+      else byBlock.set(b, [r]);
+    }
+    const keys: RowKey[] = [];
+    for (const [b, list] of byBlock) {
+      const block = this.blocks.get(b) ?? (await this.read(b, epoch));
+      for (const r of list) {
+        const index = r - block.offset;
+        if (index >= block.rowCount) continue;
+        const key = block.keys ? rowKey(block.keys, index) : this.edits.get(r)?.key ?? null;
+        if (!key) throw t("Read Only");
+        keys.push(key);
+      }
+    }
+    return keys;
   }
 
   // MARK: Fetching
@@ -388,14 +412,24 @@ export class TableSource implements GridData {
     this.report();
   }
 
-  /** Makes sure these rows' blocks are in memory (copy, delete, row editor). */
+  /** Reads block `b` outside the visible-block queue. It is cached only when nothing was
+   *  invalidated since `epoch`; rejects when the source closed or was invalidated meanwhile. */
+  private async read(b: number, epoch: number): Promise<ResultBlock> {
+    if (this.closed || epoch !== this.epoch) throw t("The rows changed while they were read. Select them again.");
+    const started = performance.now();
+    const block = await api.pageBlock(this.sessionId, this.relation, { offset: b * BLOCK_ROWS, limit: BLOCK_ROWS, search: this.search, sort: this.sort });
+    recordFetch(performance.now() - started);
+    if (this.closed || epoch !== this.epoch) throw t("The rows changed while they were read. Select them again.");
+    return block;
+  }
+
+  /** Makes sure these rows' blocks are in memory (as many as the cache keeps). */
   async load(rows: number[]) {
+    const epoch = this.epoch;
     const missing = [...new Set(rows.map((r) => Math.floor(r / BLOCK_ROWS)))].filter((b) => !this.blocks.has(b)).sort((a, b) => a - b);
     for (const b of missing) {
-      const started = performance.now();
-      const block = await api.pageBlock(this.sessionId, this.relation, { offset: b * BLOCK_ROWS, limit: BLOCK_ROWS, search: this.search, sort: this.sort });
-      recordFetch(performance.now() - started);
-      this.store(b, block);
+      const block = await this.read(b, epoch);
+      if (!this.blocks.has(b)) this.store(b, block);
     }
   }
 
@@ -404,6 +438,8 @@ export class TableSource implements GridData {
     if (rows) {
       for (const b of new Set(rows.map((r) => Math.floor(r / BLOCK_ROWS)))) this.blocks.delete(b);
     } else {
+      // Keep showing as many rows as before until the new count (or the end) is in.
+      this.floor = this.total;
       this.blocks.clear();
       this.end = null;
       this.counted = null;
@@ -416,29 +452,55 @@ export class TableSource implements GridData {
     this.view(this.first, this.last);
   }
 
+  /** The rows' cells (all rows when null, read until a short block), at most `cap` rows.
+   *  Blocks are read in order without filling the cache (keyset pagination keeps each cheap);
+   *  `cut` is true when rows were left out. Rejects when the rows were read anew meanwhile. */
   async collect(rows: number[] | null, cap = COLLECT_CAP): Promise<{ block: ResultBlock; cut: boolean }> {
-    const limit = rows ? rows.length : this.total;
-    const picked = rows ? [...rows].sort((a, b) => a - b).slice(0, cap) : Array.from({ length: Math.min(limit, cap) }, (_, i) => i);
-    // Read in order without filling the cache (keyset pagination keeps each block cheap).
-    const extra = new Map<number, ResultBlock>();
-    const needed = [...new Set(picked.map((r) => Math.floor(r / BLOCK_ROWS)))].sort((a, b) => a - b);
-    for (const b of needed) {
-      if (this.blocks.has(b)) continue;
-      const block = await api.pageBlock(this.sessionId, this.relation, { offset: b * BLOCK_ROWS, limit: BLOCK_ROWS, search: this.search, sort: this.sort });
-      extra.set(b, block);
-      if (!rows && block.rowCount < BLOCK_ROWS) break;
+    const epoch = this.epoch;
+    const got = new Map<number, ResultBlock>();
+    const blockOf = async (b: number) => {
+      let block = got.get(b) ?? this.blocks.get(b);
+      if (!block) block = await this.read(b, epoch);
+      got.set(b, block);
+      return block;
+    };
+    let picked: number[];
+    let cut: boolean;
+    if (rows) {
+      const sorted = [...new Set(rows)].sort((a, b) => a - b);
+      picked = sorted.slice(0, cap);
+      cut = sorted.length > cap;
+      for (const b of new Set(picked.map((r) => Math.floor(r / BLOCK_ROWS)))) await blockOf(b);
+    } else {
+      // Not this.total: without a count it is only a guess. Read until a block comes back short.
+      picked = [];
+      cut = false;
+      for (let b = 0; ; b++) {
+        if (picked.length >= cap) {
+          // Rows left in this block, or (at a block's edge) a next block with rows.
+          const known = this.counted ?? this.end;
+          if (known !== null) cut = known > cap;
+          else if (picked.length % BLOCK_ROWS !== 0) cut = true;
+          else cut = (await blockOf(b)).rowCount > 0;
+          break;
+        }
+        const block = await blockOf(b);
+        const take = Math.min(block.rowCount, cap - picked.length);
+        for (let i = 0; i < take; i++) picked.push(b * BLOCK_ROWS + i);
+        if (block.rowCount < BLOCK_ROWS) break;
+      }
     }
     const present = picked.filter((r) => {
-      const block = this.blocks.get(Math.floor(r / BLOCK_ROWS)) ?? extra.get(Math.floor(r / BLOCK_ROWS));
+      const block = got.get(Math.floor(r / BLOCK_ROWS));
       return !!block && r - block.offset < block.rowCount;
     });
     const cell = (r: number, c: number): Cell => {
       const edit = this.edits.get(r)?.cells;
       if (edit?.has(c)) return edit.get(c) as Cell;
-      const block = (this.blocks.get(Math.floor(r / BLOCK_ROWS)) ?? extra.get(Math.floor(r / BLOCK_ROWS)))!;
+      const block = got.get(Math.floor(r / BLOCK_ROWS))!;
       return cellText(block, r - block.offset, c);
     };
-    return { block: pick(this.columns, present, cell), cut: limit > cap };
+    return { block: pick(this.columns, present, cell), cut };
   }
 
   // MARK: Pending edits

@@ -1060,14 +1060,31 @@ async fn grid_edits_inside_a_user_transaction_leave_the_commit_to_the_user() {
 }
 
 #[tokio::test]
-async fn a_failed_transaction_is_rolled_back_so_the_session_keeps_working() {
+async fn a_failed_transaction_is_kept_until_the_user_rolls_back() {
     let Some(s) = session().await else { return };
     let error = s.execute("begin; select 1/0").await.unwrap_err();
-    assert!(error.to_string().contains("rolled back"), "{error}");
+    assert!(error.to_string().contains("ROLLBACK"), "{error}");
+    // The failed transaction stays open: plain statements are refused by Postgres.
+    assert!(s.execute("select 1").await.is_err());
+    s.execute("rollback").await.unwrap();
     assert_eq!(
         cell(&s.execute("select 1").await.unwrap().results[0], 0, 0),
         Some("1")
     );
+    assert!(s.relations().await.is_ok());
+}
+
+#[tokio::test]
+async fn a_savepoint_recovers_a_failed_transaction() {
+    let Some(s) = session().await else { return };
+    s.execute("begin; savepoint sp; select 1").await.unwrap();
+    assert!(s.execute("select 1/0").await.is_err());
+    s.execute("rollback to sp").await.unwrap();
+    assert_eq!(
+        cell(&s.execute("select 2").await.unwrap().results[0], 0, 0),
+        Some("2")
+    );
+    s.execute("commit").await.unwrap();
     assert!(s.relations().await.is_ok());
 }
 

@@ -10,6 +10,7 @@ import type { AppModel } from "../model";
 import { shortcuts, type Action } from "../shortcuts";
 import { dispatch } from "./actions";
 import { connectionText, firstDatabase, sqliteUrl } from "./drop";
+import { installCloseGuard } from "./closeGuard";
 
 const known = new Set<string>(shortcuts.map((s) => s.action));
 
@@ -71,6 +72,9 @@ export function installNative(model: AppModel): () => void {
   const keep = (promise: Promise<() => void>) =>
     void promise.then((stop) => (alive ? stops.push(stop) : stop())).catch(() => undefined);
 
+  // Unsaved grid edits are asked about before the window closes or the app quits.
+  stops.push(installCloseGuard(model));
+
   keep(
     listen<string>("menu-action", (event) => {
       const id = event.payload;
@@ -82,6 +86,16 @@ export function installNative(model: AppModel): () => void {
       }
     }),
   );
+
+  // The menu's wording in the UI language (the language is fixed at start).
+  const labels: Record<string, string> = {
+    undo: t("Undo"),
+    redo: t("Redo"),
+    quit: t(/Mac/.test(navigator.platform) ? "Quit dbLens" : "Quit"),
+  };
+  for (const s of shortcuts) labels[s.action] = t(s.menu ?? s.title);
+  for (const title of ["File", "Edit", "View", "Query", "Window", "Help"]) labels[`menu:${title}`] = t(title);
+  void invoke("set_menu_labels", { labels }).catch(() => undefined);
 
   // The menu is shared by all windows, so the focused one sets its state.
   let sent = "";
@@ -111,6 +125,9 @@ export function installNative(model: AppModel): () => void {
   );
 
   // Text dropped on the window: a connection string opens the connect sheet.
+  // Not on Windows: there Tauri's file-drop handler owns the web view and these
+  // DOM events never fire (see dragConnections.ts); paste the string instead.
+  const windows = /Win/.test(navigator.platform);
   const onDragOver = (event: DragEvent) => {
     if (event.dataTransfer?.types.includes("text/plain")) event.preventDefault();
   };
@@ -120,8 +137,10 @@ export function installNative(model: AppModel): () => void {
     event.preventDefault();
     if (await api.detectEngine(text).catch(() => null)) model.open({ kind: "connection", editing: null, url: text });
   };
-  window.addEventListener("dragover", onDragOver);
-  window.addEventListener("drop", onDrop);
+  if (!windows) {
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("drop", onDrop);
+  }
 
   // Files queued for this window by a second launch.
   void invoke<string[]>("take_pending_open")

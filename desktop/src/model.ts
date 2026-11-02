@@ -414,6 +414,12 @@ export class AppModel {
     this.tableLoading = true;
     this.changed();
     await this.flushEdits();
+    if (this.tableSource?.hasPending) {
+      // A row could not be saved: keep its edits (and the failed state) instead of reloading.
+      this.tableLoading = false;
+      this.changed();
+      return;
+    }
     try {
       markStart();
       const source = await TableSource.open(info.sessionId, relation, this.tableSearch, this.tableSort);
@@ -562,6 +568,17 @@ export class AppModel {
     }
   }
 
+  /** Whether the grid holds edits not saved yet (the window asks before it closes). */
+  get hasUnsavedEdits(): boolean {
+    return !!this.tableSource?.hasPending;
+  }
+
+  /** Saves every pending edit; false when some row could not be saved (its error is shown). */
+  async saveUnsavedEdits(): Promise<boolean> {
+    await this.flushEdits();
+    return !this.hasUnsavedEdits;
+  }
+
   /** Saves every row with pending edits, before the rows are read anew. */
   private async flushEdits() {
     const source = this.tableSource;
@@ -607,8 +624,10 @@ export class AppModel {
     const source = this.tableSource;
     if (!info || !relation || !source) return this.loadPage(true);
     await this.flushEdits();
-    source.revert();
-    source.invalidate();
+    if (!source.hasPending) {
+      source.revert();
+      source.invalidate();
+    }
     this.tableCount = undefined;
     this.changed();
     try {
@@ -693,6 +712,7 @@ export class AppModel {
         });
         if (done.error !== null) throw done.error;
         execution = collector.execution();
+        if (done.cancelled) note = t("Stopped after %lld rows", mainResult(execution)?.rowCount ?? 0);
       }
       if (this.session?.sessionId !== info.sessionId) return;
       this.log = { date: started, isError: false, message: [executionSummary(execution), note].filter(Boolean).join(" · "), sql: text };

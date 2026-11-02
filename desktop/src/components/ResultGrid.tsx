@@ -33,7 +33,7 @@ import { copyText, tsv } from "../format";
 import { t } from "../i18n";
 import { isMac } from "../shortcuts";
 import { CellEditor, isDbCell, typeAhead, type DbCell } from "../grid/CellEditor";
-import type { Change, GridData } from "../grid/blocks";
+import { COLLECT_CAP, type Change, type GridData } from "../grid/blocks";
 import { registerGrid, SET_NULL_EVENT, type GridCommand } from "../grid/commands";
 import { dispatch } from "../native/actions";
 import { markFirstRows, recordScroll } from "../grid/perf";
@@ -49,6 +49,8 @@ const SHOWN_CHARS = 300;
 /** Most cells Set NULL changes at once. */
 const MAX_NULL_CELLS = 10_000;
 const FREEZE_KEY = "grid.freezeFirstColumn";
+/** How long typed keys are held for an editor that is opening (it mounts within a frame or two). */
+const TYPE_AHEAD_WAIT = 250;
 
 // Only the cell kinds the grid draws (the full set pulls in markdown and images).
 const renderers = [textCellRenderer, loadingCellRenderer, markerCellRenderer, newRowCellRenderer] as unknown as DataEditorCoreProps["renderers"];
@@ -136,14 +138,22 @@ function display(text: string): string {
   return /[\r\n\t]/.test(short) ? short.replace(/[\r\n\t]+/g, " ") : short;
 }
 
-/** The rows a selection covers: picked rows, else the cell ranges' rows. */
-function selectedRows(selection: GridSelection): number[] {
-  if (selection.rows.length > 0) return selection.rows.toArray();
+/** The rows a selection covers (picked rows, else the cell ranges' rows), below `end` and at
+ *  most `cap` of them: a select-all on an estimated million rows never becomes a million-entry array. */
+function selectedRows(selection: GridSelection, end: number, cap = COLLECT_CAP): number[] {
+  const out: number[] = [];
+  if (selection.rows.length > 0) {
+    for (const r of selection.rows) {
+      if (r >= end || out.length >= cap) break;
+      out.push(r);
+    }
+    return out;
+  }
   const current = selection.current;
   if (!current) return [];
   const rows = new Set<number>();
   for (const range of [current.range, ...current.rangeStack]) {
-    for (let r = range.y; r < range.y + range.height; r++) rows.add(r);
+    for (let r = range.y; r < Math.min(end, range.y + range.height) && rows.size < cap; r++) rows.add(r);
   }
   return [...rows].sort((a, b) => a - b);
 }
@@ -352,9 +362,9 @@ export const ResultGrid = memo(function ResultGrid(props: GridProps) {
       const row = next.current?.cell[1] ?? null;
       if (editRow.current !== null && row !== editRow.current) saveRow(editRow.current);
       editRow.current = row;
-      onSelectionChange(new Set(selectedRows(next)));
+      onSelectionChange(new Set(selectedRows(next, data.rows)));
     },
-    [onSelectionChange, saveRow],
+    [onSelectionChange, saveRow, data],
   );
 
   // Rows deselected from outside (a delete, the Escape key in the window): clear here too.
@@ -382,7 +392,8 @@ export const ResultGrid = memo(function ResultGrid(props: GridProps) {
   const copySelection = useCallback(async () => {
     const current = selection.current;
     if (selection.rows.length > 0) {
-      const rows = selection.rows.toArray();
+      // One past the cap, so collect reports the copy as cut.
+      const rows = selectedRows(selection, data.rows, COLLECT_CAP + 1);
       const { block, cut } = await data.collect(rows);
       await copyText(tsv(block, undefined, false));
       onCopied?.(block.rowCount, cut);
@@ -390,14 +401,11 @@ export const ResultGrid = memo(function ResultGrid(props: GridProps) {
     }
     if (!current) return;
     const { x, y, width, height } = current.range;
-    const rows = Array.from({ length: height }, (_, i) => y + i);
+    const rows = Array.from({ length: Math.max(0, Math.min(height, data.rows - y, COLLECT_CAP + 1)) }, (_, i) => y + i);
     const { block, cut } = await data.collect(rows);
-    const lines = block.data[0]
-      ? Array.from({ length: block.rowCount }, (_, r) =>
-          Array.from({ length: width }, (_, c) => (block.data[x + c]?.[r] ?? "").toString().replace(/[\t\r\n]+/g, " ")).join("\t"),
-        )
-      : [];
-    await copyText(lines.join("\n"));
+    const cols = Array.from({ length: width }, (_, c) => x + c);
+    const text = block.data[0] ? tsv(block, undefined, false, cols) : "";
+    await copyText(text);
     onCopied?.(block.rowCount, cut);
   }, [data, selection, onCopied]);
 
@@ -504,10 +512,26 @@ export const ResultGrid = memo(function ResultGrid(props: GridProps) {
         event.preventDefault();
         event.stopPropagation();
       } else {
+        const [col, row] = selection.current.cell;
+        // Only a loaded cell opens an editor (a loading one has no overlay): else keys go through.
+        if (data.shown(row, col) === undefined) return;
         typeAhead.opening = true;
         typeAhead.keys = "";
         typeAhead.finish = "";
         typeAhead.since = now;
+        // No editor showed up (the grid dropped the key): stop holding keys for it. While the
+        // overlay is in #portal (its editor code still loading), the editor clears this itself.
+        const expire = () => {
+          if (!typeAhead.opening || typeAhead.since !== now) return;
+          if (document.getElementById("portal")?.childElementCount && performance.now() - now < 1000) {
+            setTimeout(expire, TYPE_AHEAD_WAIT);
+            return;
+          }
+          typeAhead.opening = false;
+          typeAhead.keys = "";
+          typeAhead.finish = "";
+        };
+        setTimeout(expire, TYPE_AHEAD_WAIT);
       }
       return;
     }
@@ -531,9 +555,10 @@ export const ResultGrid = memo(function ResultGrid(props: GridProps) {
       event.preventDefault();
       event.stopPropagation();
       if (data.rows === 0 || data.columns.length === 0) return;
+      // At most what a copy or delete takes (rows past an estimated end are skipped by them).
       onGridSelectionChange({
         columns: CompactSelection.empty(),
-        rows: CompactSelection.fromSingleSelection([0, data.rows]),
+        rows: CompactSelection.fromSingleSelection([0, Math.min(data.rows, COLLECT_CAP)]),
         current: undefined,
       });
     }

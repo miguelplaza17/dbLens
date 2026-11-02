@@ -32,12 +32,22 @@ struct Open {
     /// The label of the webview that opened it; its sessions close when that
     /// page reloads or its window goes away, since the ids die with the page.
     owner: String,
+    /// Set once the session is taken out to close: a stream still running on
+    /// it stops (see `execute_stream`'s liveness check).
+    closing: std::sync::atomic::AtomicBool,
 }
 
 impl Open {
+    /// Marks the session closing and stops what runs; quick, no waiting.
+    fn stop(&self) {
+        self.closing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.connection.session.cancel_all();
+    }
+
     /// Stops what runs, closes the session (a few seconds at most), then the tunnel.
     async fn close(&self) {
-        self.connection.session.cancel_all();
+        self.stop();
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(3),
             self.connection.session.close(),
@@ -102,6 +112,22 @@ impl AppState {
         for open in self.take_sessions(|open| open.owner == owner) {
             open.close().await;
         }
+    }
+
+    /// Takes out the sessions a webview opened right away (so its label is
+    /// free to reuse) and closes them in the background: a window going away
+    /// must not hold the UI thread while a slow server answers.
+    pub fn close_owned_by_later(&self, owner: &str) {
+        let taken = self.take_sessions(|open| open.owner == owner);
+        if taken.is_empty() {
+            return;
+        }
+        for open in &taken {
+            open.stop();
+        }
+        tauri::async_runtime::spawn(async move {
+            futures_util::future::join_all(taken.iter().map(|open| open.close())).await;
+        });
     }
 
     /// Closes every session and tunnel, for the app's exit.
@@ -236,6 +262,7 @@ pub async fn connect(
             Arc::new(Open {
                 connection,
                 owner: webview.label().to_string(),
+                closing: Default::default(),
             }),
         );
     if let Some(id) = saved_id.filter(|_| !trial) {
@@ -427,6 +454,7 @@ pub async fn execute_atomically(
 #[tauri::command]
 pub async fn execute_stream(
     state: State<'_, AppState>,
+    webview: tauri::Webview,
     session_id: String,
     sql: String,
     channel: Channel<InvokeResponseBody>,
@@ -434,10 +462,25 @@ pub async fn execute_stream(
 ) -> DbResult<()> {
     let open = state.session(&session_id)?;
     let start = std::time::Instant::now();
+    // A send can't tell that the window is gone (Tauri queues big messages
+    // for a webview that left), so the sink also asks whether the webview is
+    // still there (every webview here is a window's own, same label) and
+    // the session not closing.
+    let alive = {
+        use tauri::Manager;
+        let app = webview.app_handle().clone();
+        let label = webview.label().to_string();
+        let open = open.clone();
+        std::sync::Arc::new(move || {
+            !open.closing.load(std::sync::atomic::Ordering::SeqCst)
+                && app.get_webview_window(&label).is_some()
+        })
+    };
     let mut sink = StreamSink::new(
         std::sync::Arc::new(move |bytes| channel.send(InvokeResponseBody::Raw(bytes)).is_ok()),
         row_cap.unwrap_or(wire::STREAM_ROW_CAP),
-    );
+    )
+    .with_alive(alive);
     let outcome = open
         .connection
         .session

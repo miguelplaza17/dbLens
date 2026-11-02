@@ -482,3 +482,82 @@ async fn grid_edits_inside_a_user_transaction_leave_the_commit_to_the_user() {
     assert_eq!(page.rows[0][1].as_deref(), Some("Alpha"));
     drop_table(&*s, "dbl_my_tx").await;
 }
+
+/// A sink that takes `messages` messages and then closes, as when the
+/// window that asked for the rows goes away.
+fn closing_after(messages: usize) -> dblens_lib::wire::StreamSink {
+    let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    dblens_lib::wire::StreamSink::new(
+        std::sync::Arc::new(move |_bytes: Vec<u8>| {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < messages
+        }),
+        100,
+    )
+}
+
+#[tokio::test]
+async fn closed_stream_stops_the_query() {
+    let Some(s) = open().await else { return };
+    // Tens of millions of rows: draining them would take a minute or more.
+    let big = "select a.ORDINAL_POSITION from information_schema.COLUMNS a, information_schema.COLUMNS b, information_schema.COLUMNS c";
+    let mut sink = closing_after(0);
+    let outcome = s.execute_stream(big, &mut sink).await;
+    assert!(matches!(outcome, Err(DbError::Cancelled)), "{outcome:?}");
+    let start = std::time::Instant::now();
+    let next = s.execute("select 1").await.expect("the next query runs");
+    assert_eq!(next.results[0].rows[0][0].as_deref(), Some("1"));
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "the next query waited {:?}",
+        start.elapsed()
+    );
+
+    // A small result that was all sent already: the late KILL spares the next query.
+    let mut sink = closing_after(0);
+    let _ = s
+        .execute_stream("select 1 union all select 2", &mut sink)
+        .await;
+    for _ in 0..3 {
+        let next = s.execute("select 2").await.expect("not killed");
+        assert_eq!(next.results[0].rows[0][0].as_deref(), Some("2"));
+    }
+    s.close().await;
+}
+
+#[tokio::test]
+async fn autocommit_off_opens_a_transaction_on_the_first_change() {
+    let Some(s) = open().await else { return };
+    let name = "dblens_autocommit";
+    s.execute(&format!("drop table if exists `{name}`"))
+        .await
+        .unwrap();
+    s.execute(&format!(
+        "create table `{name}` (id int primary key) engine=InnoDB"
+    ))
+    .await
+    .unwrap();
+    s.execute("set autocommit=0").await.unwrap();
+    assert!(!s.transaction_open(), "nothing ran yet");
+    s.execute(&format!("insert into `{name}` values (1)"))
+        .await
+        .unwrap();
+    assert!(s.transaction_open(), "the insert opened one");
+    s.execute("rollback").await.unwrap();
+    assert!(!s.transaction_open(), "rolled back");
+
+    // The streaming path notes it too.
+    let mut sink = closing_after(usize::MAX);
+    s.execute_stream(&format!("insert into `{name}` values (2)"), &mut sink)
+        .await
+        .unwrap();
+    assert!(s.transaction_open(), "streamed insert opened one");
+    s.execute("commit").await.unwrap();
+    assert!(!s.transaction_open());
+    s.execute("set autocommit=1").await.unwrap();
+    s.execute(&format!("insert into `{name}` values (3)"))
+        .await
+        .unwrap();
+    assert!(!s.transaction_open(), "autocommit is back on");
+    drop_table(&*s, name).await;
+    s.close().await;
+}

@@ -36,8 +36,8 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 
 use crate::engine::Engine;
 use crate::session::{
-    keyset_direction, CellValue, ColumnSort, DatabaseSession, DbResult, EditOutcome, Execution,
-    DbError, KeyHint, QueryResult, Relation, RowKey, SchemaGraph,
+    keyset_direction, CellValue, ColumnSort, DatabaseSession, DbError, DbResult, EditOutcome,
+    Execution, KeyHint, QueryResult, Relation, RowKey, SchemaGraph,
 };
 use crate::wire::StreamSink;
 
@@ -69,9 +69,9 @@ impl Policy {
                 browse: 1,
                 edits_on_pinned: false,
             },
-            // The driver's client pools connections itself.
+            // Each session has its own client; pages and counts run on browse ones.
             Engine::Mongodb => Policy {
-                browse: 0,
+                browse: 2,
                 edits_on_pinned: true,
             },
         }
@@ -276,6 +276,9 @@ impl Drop for Lease<'_> {
 #[derive(Default)]
 struct Hints {
     by_view: HashMap<String, BTreeMap<u64, Vec<Option<String>>>>,
+    /// Bumped by every write: a block read that started before it must not
+    /// store a boundary computed from the rows as they were.
+    generation: u64,
 }
 
 const MAX_VIEWS: usize = 32;
@@ -415,10 +418,27 @@ impl PooledSession {
         }
     }
 
+    /// Drops every boundary and bumps the generation, so a block read still
+    /// running from before a write can't store a stale one. Writes call it
+    /// before and after they run: a read that starts while the write is in
+    /// flight may see either state.
     fn forget_hints(&self) {
         if let Ok(mut hints) = self.hints.lock() {
             hints.by_view.clear();
+            hints.generation = hints.generation.wrapping_add(1);
         }
+    }
+
+    fn hint_generation(&self) -> u64 {
+        self.hints.lock().map(|h| h.generation).unwrap_or(0)
+    }
+
+    /// Runs a write between two `forget_hints`.
+    async fn writing<T>(&self, write: impl std::future::Future<Output = T>) -> T {
+        self.forget_hints();
+        let result = write.await;
+        self.forget_hints();
+        result
     }
 
     fn hint(&self, view: &str, offset: u64) -> Option<KeyHint> {
@@ -435,7 +455,14 @@ impl PooledSession {
         })
     }
 
-    fn remember(&self, view: String, offset: u64, result: &QueryResult, sort: Option<&ColumnSort>) {
+    fn remember(
+        &self,
+        view: String,
+        offset: u64,
+        result: &QueryResult,
+        sort: Option<&ColumnSort>,
+        generation: u64,
+    ) {
         let Some(keys) = &result.keys else {
             return;
         };
@@ -448,6 +475,9 @@ impl PooledSession {
         let Ok(mut hints) = self.hints.lock() else {
             return;
         };
+        if hints.generation != generation {
+            return;
+        }
         if !hints.by_view.contains_key(&view) && hints.by_view.len() >= MAX_VIEWS {
             hints.by_view.clear();
         }
@@ -482,13 +512,11 @@ impl DatabaseSession for PooledSession {
     }
 
     async fn execute(&self, sql: &str) -> DbResult<Execution> {
-        self.forget_hints();
-        self.pinned.execute(sql).await
+        self.writing(self.pinned.execute(sql)).await
     }
 
     async fn execute_stream(&self, sql: &str, sink: &mut StreamSink) -> DbResult<()> {
-        self.forget_hints();
-        self.pinned.execute_stream(sql, sink).await
+        self.writing(self.pinned.execute_stream(sql, sink)).await
     }
 
     async fn read_only(&self, text: &str) -> DbResult<Execution> {
@@ -500,8 +528,7 @@ impl DatabaseSession for PooledSession {
     }
 
     async fn execute_atomically(&self, text: &str) -> DbResult<Execution> {
-        self.forget_hints();
-        self.pinned.execute_atomically(text).await
+        self.writing(self.pinned.execute_atomically(text)).await
     }
 
     async fn relations(&self) -> DbResult<Vec<Relation>> {
@@ -530,6 +557,7 @@ impl DatabaseSession for PooledSession {
         hint: Option<&KeyHint>,
     ) -> DbResult<QueryResult> {
         let view = view_key(relation, search, sort);
+        let generation = self.hint_generation();
         let remembered = match hint {
             Some(hint) => Some(hint.clone()),
             None => self.hint(&view, offset),
@@ -542,7 +570,7 @@ impl DatabaseSession for PooledSession {
             sort,
             remembered.as_ref()
         ))?;
-        self.remember(view, offset, &result, sort);
+        self.remember(view, offset, &result, sort, generation);
         Ok(result)
     }
 
@@ -556,18 +584,18 @@ impl DatabaseSession for PooledSession {
         key: &RowKey,
         changes: &[CellValue],
     ) -> DbResult<EditOutcome> {
-        self.forget_hints();
-        edit!(self, conn => conn.update(relation, key, changes))
+        self.writing(async { edit!(self, conn => conn.update(relation, key, changes)) })
+            .await
     }
 
     async fn insert(&self, relation: &Relation, values: &[CellValue]) -> DbResult<EditOutcome> {
-        self.forget_hints();
-        edit!(self, conn => conn.insert(relation, values))
+        self.writing(async { edit!(self, conn => conn.insert(relation, values)) })
+            .await
     }
 
     async fn delete(&self, relation: &Relation, key: &RowKey) -> DbResult<EditOutcome> {
-        self.forget_hints();
-        edit!(self, conn => conn.delete(relation, key))
+        self.writing(async { edit!(self, conn => conn.delete(relation, key)) })
+            .await
     }
 
     async fn schema_graph(&self) -> DbResult<SchemaGraph> {

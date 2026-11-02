@@ -33,10 +33,24 @@ pub fn is_database_path(arg: &str) -> bool {
 
 /// The database files among a launch's arguments (the first one is the program).
 pub fn database_args(args: &[String]) -> Vec<String> {
+    database_args_in(args, None)
+}
+
+/// Like `database_args`, with relative paths made absolute against the
+/// directory the launch ran in (a second launch runs in another process).
+pub fn database_args_in(args: &[String], cwd: Option<&str>) -> Vec<String> {
     args.iter()
         .skip(1)
         .filter(|a| is_database_path(a))
-        .cloned()
+        .map(|a| match cwd {
+            Some(dir) if !dir.is_empty() && !std::path::Path::new(a).is_absolute() => {
+                std::path::Path::new(dir)
+                    .join(a)
+                    .to_string_lossy()
+                    .into_owned()
+            }
+            _ => a.clone(),
+        })
         .collect()
 }
 
@@ -74,8 +88,8 @@ pub fn open_new(app: &AppHandle, open: Option<Vec<String>>) -> tauri::Result<Str
 
 /// A second launch: show the running app. With database files, open them in a
 /// new window; otherwise raise the window in front (or the first one).
-pub fn second_launch(app: &AppHandle, args: &[String]) {
-    let files = database_args(args);
+pub fn second_launch(app: &AppHandle, args: &[String], cwd: &str) {
+    let files = database_args_in(args, Some(cwd));
     if !files.is_empty() {
         let _ = open_new(app, Some(files));
         return;
@@ -146,5 +160,23 @@ mod tests {
         assert_eq!(database_args(&args), vec!["/a/b.db", "d.sqlite"]);
         // The program itself is never a file to open.
         assert!(database_args(&["app.db".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn relative_database_paths_join_the_callers_directory() {
+        let args: Vec<String> = ["dblens", "data/app.db", "/abs/b.db", "x.txt"]
+            .map(String::from)
+            .to_vec();
+        let got = database_args_in(&args, Some("/work/dir"));
+        assert_eq!(
+            got,
+            vec![
+                std::path::Path::new("/work/dir")
+                    .join("data/app.db")
+                    .to_string_lossy(),
+                "/abs/b.db".into()
+            ]
+        );
+        assert_eq!(database_args_in(&args, None)[0], "data/app.db");
     }
 }

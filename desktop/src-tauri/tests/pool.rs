@@ -465,14 +465,20 @@ async fn postgres_replaces_a_dead_browse_connection() {
     // The connection task notices the closed socket in a moment.
     tokio::time::sleep(Duration::from_millis(200)).await;
     for _ in 0..3 {
-        db.pool.relations().await.expect("relations on a fresh connection");
+        db.pool
+            .relations()
+            .await
+            .expect("relations on a fresh connection");
     }
     assert_ne!(browse_pid(&db).await, pid);
 
     // Killed without the pool noticing first: the read is tried again.
     let pid = browse_pid(&db).await;
     db.run(&format!("select pg_terminate_backend({pid})")).await;
-    db.pool.relations().await.expect("retried on a fresh connection");
+    db.pool
+        .relations()
+        .await
+        .expect("retried on a fresh connection");
     db.run("drop view dblens_pool_pid").await;
     db.pool.close().await;
 }
@@ -486,7 +492,11 @@ async fn postgres_browsing_follows_the_panels_scope() {
         .await;
     let relation = view("dblens_pool_scope");
     let pinned: String = {
-        let run = db.pool.execute("select pg_backend_pid()::text").await.unwrap();
+        let run = db
+            .pool
+            .execute("select pg_backend_pid()::text")
+            .await
+            .unwrap();
         run.results[0].rows[0][0].clone().unwrap()
     };
     let shown = |r: QueryResult| r.rows[0][0].clone().unwrap();
@@ -517,8 +527,13 @@ async fn redis_browsing_follows_select() {
     assert!(has(pool.relations().await.unwrap()));
     pool.execute("SELECT 14").await.unwrap();
     assert!(pool.scope_changed());
-    assert!(!has(pool.relations().await.unwrap()), "the sidebar shows db 14");
-    pool.execute("SELECT 15\nDEL dblens_pool_scope:k").await.unwrap();
+    assert!(
+        !has(pool.relations().await.unwrap()),
+        "the sidebar shows db 14"
+    );
+    pool.execute("SELECT 15\nDEL dblens_pool_scope:k")
+        .await
+        .unwrap();
     assert!(!pool.scope_changed());
     assert!(!has(pool.relations().await.unwrap()));
     pool.close().await;

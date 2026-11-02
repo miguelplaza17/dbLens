@@ -33,7 +33,16 @@ const FLUSH_MS: u128 = 200;
 pub const STREAM_ROW_CAP: usize = 100_000;
 /// Encoded bytes a streamed result keeps at most (whatever its row cap); later
 /// rows are counted, not sent, and the result is marked truncated.
-pub const STREAM_BYTE_CAP: usize = 128 << 20;
+pub const STREAM_BYTE_CAP: usize = 64 << 20;
+/// Encoded bytes a whole streamed run keeps across all its result sets, and
+/// how many times the row cap its rows may add up to: a script of many big
+/// SELECTs stops sending (and marks the rest truncated) once these are spent.
+/// Tauri's channel queues every message until the webview takes it, so this
+/// bounds what both sides hold.
+pub const STREAM_RUN_BYTE_CAP: usize = 192 << 20;
+pub const STREAM_RUN_ROW_CAPS: usize = 3;
+/// Rows between liveness checks while rows are only counted.
+const ALIVE_EVERY: u64 = 1_024;
 
 // MARK: - Values
 
@@ -247,6 +256,11 @@ pub fn atomic_refused(message: &str) -> Vec<u8> {
 /// Sends one message; false when nobody listens any more (the window closed).
 pub type Sender = Arc<dyn Fn(Vec<u8>) -> bool + std::marker::Send + Sync>;
 
+/// Whether someone still listens (the window that started the run is there
+/// and its session is not closing). A channel send can't tell: Tauri accepts
+/// a big message for a webview that is gone.
+pub type Alive = Arc<dyn Fn() -> bool + std::marker::Send + Sync>;
+
 /// Where a streamed run sends its rows: the driver calls `begin` for each
 /// result set, `cell` for each value and `end_row` after each row, then `end`
 /// (or just `command` for a statement without rows). Rows go out in blocks:
@@ -258,6 +272,7 @@ pub type Sender = Arc<dyn Fn(Vec<u8>) -> bool + std::marker::Send + Sync>;
 /// `end {result, command, totalRows, truncated}`, `done {durationMs, error, cancelled}`.
 pub struct StreamSink {
     send: Sender,
+    alive: Option<Alive>,
     cap: usize,
     open: bool,
     result: u32,
@@ -279,6 +294,13 @@ pub struct StreamSink {
     seen: u64,
     sent_first: bool,
     last_flush: Instant,
+    /// What the run kept across its finished result sets (never reset by
+    /// `begin`), its limits, and whether they were reached.
+    run_bytes: usize,
+    run_rows: usize,
+    run_byte_cap: usize,
+    run_row_cap: usize,
+    run_full: bool,
     /// Bytes and messages sent, for the bench.
     pub bytes: usize,
     pub messages: usize,
@@ -288,9 +310,11 @@ pub struct StreamSink {
 
 impl StreamSink {
     pub fn new(send: Sender, cap: usize) -> Self {
+        let cap = cap.max(1);
         Self {
             send,
-            cap: cap.max(1),
+            alive: None,
+            cap,
             open: true,
             result: 0,
             width: 0,
@@ -306,10 +330,29 @@ impl StreamSink {
             seen: 0,
             sent_first: false,
             last_flush: Instant::now(),
+            run_bytes: 0,
+            run_rows: 0,
+            run_byte_cap: STREAM_RUN_BYTE_CAP,
+            run_row_cap: cap.saturating_mul(STREAM_RUN_ROW_CAPS),
+            run_full: false,
             bytes: 0,
             messages: 0,
             first_rows_at: None,
         }
+    }
+
+    /// The same sink with a liveness check: once it says false, the sink
+    /// closes and the driver stops reading (and cancels the statement).
+    pub fn with_alive(mut self, alive: Alive) -> Self {
+        self.alive = Some(alive);
+        self
+    }
+
+    /// The same sink with other limits for the whole run (for tests).
+    pub fn with_run_caps(mut self, bytes: usize, rows: usize) -> Self {
+        self.run_byte_cap = bytes.max(1);
+        self.run_row_cap = rows.max(1);
+        self
     }
 
     /// The same sink with another byte limit per result (for tests).
@@ -323,8 +366,14 @@ impl StreamSink {
     /// task), so `done` still reaches the receiver if that task fails.
     pub fn sibling(&self) -> Self {
         let mut sink = Self::new(self.send.clone(), self.cap);
+        sink.alive = self.alive.clone();
         sink.byte_cap = self.byte_cap;
         sink.open = self.open;
+        sink.run_bytes = self.run_bytes;
+        sink.run_rows = self.run_rows;
+        sink.run_byte_cap = self.run_byte_cap;
+        sink.run_row_cap = self.run_row_cap;
+        sink.run_full = self.run_full;
         sink
     }
 
@@ -343,7 +392,19 @@ impl StreamSink {
     /// Whether the next row's values are kept (false past the cap): the
     /// driver may skip `cell` calls then, but still calls `end_row`.
     pub fn keeping(&self) -> bool {
-        self.open && self.kept < self.cap && !self.full
+        self.open && self.room()
+    }
+
+    /// Whether the current result and the run both have room for one more row.
+    fn room(&self) -> bool {
+        self.kept < self.cap && !self.full && !self.run_full
+    }
+
+    /// Asks the liveness check; closes the sink when nobody listens.
+    fn check_alive(&mut self) {
+        if self.open && self.alive.as_ref().is_some_and(|alive| !alive()) {
+            self.open = false;
+        }
     }
 
     /// Rows seen in the current result set.
@@ -352,6 +413,7 @@ impl StreamSink {
     }
 
     fn emit(&mut self, message: Vec<u8>) {
+        self.check_alive();
         if !self.open {
             return;
         }
@@ -395,7 +457,7 @@ impl StreamSink {
 
     /// The next value of the current row (NULL is None).
     pub fn cell(&mut self, value: Option<&str>) {
-        if self.kept >= self.cap || self.full || self.at >= self.width {
+        if !self.room() || self.at >= self.width {
             return;
         }
         let buffer = &mut self.buffers[self.at];
@@ -408,7 +470,12 @@ impl StreamSink {
     /// The current row is complete.
     pub fn end_row(&mut self) {
         self.seen += 1;
-        if self.kept < self.cap && !self.full && self.open {
+        if self.seen % ALIVE_EVERY == 0 {
+            // Past the caps nothing is sent, so this is the only way a run
+            // over millions of rows learns that its window is gone.
+            self.check_alive();
+        }
+        if self.room() && self.open {
             // A short row (fewer values than columns) gets NULLs.
             while self.at < self.width {
                 let _ = encode::write_nil(&mut self.buffers[self.at]);
@@ -419,6 +486,11 @@ impl StreamSink {
             self.pending += 1;
             if self.kept_bytes + self.pending_bytes >= self.byte_cap {
                 self.full = true;
+            }
+            if self.run_bytes + self.kept_bytes + self.pending_bytes >= self.run_byte_cap
+                || self.run_rows + self.kept >= self.run_row_cap
+            {
+                self.run_full = true;
             }
             let limit = if self.sent_first {
                 BLOCK_ROWS
@@ -492,6 +564,8 @@ impl StreamSink {
         let _ = encode::write_bool(&mut out, truncated);
         self.emit(out);
         self.result += 1;
+        self.run_bytes += self.kept_bytes + self.pending_bytes;
+        self.run_rows += self.kept;
         self.width = 0;
         self.buffers.clear();
         self.writers.clear();
@@ -667,6 +741,70 @@ mod tests {
         let end = decode(all.last().unwrap());
         assert_eq!(end["totalRows"], 20);
         assert_eq!(end["truncated"], true);
+    }
+
+    #[test]
+    fn the_run_budget_spans_result_sets() {
+        let (send, messages) = collect();
+        let mut sink = StreamSink::new(send, 100).with_run_caps(usize::MAX, 150);
+        for _ in 0..3 {
+            sink.begin(&[Column::new("n", "")]);
+            for i in 0..100 {
+                if sink.keeping() {
+                    sink.cell(Some(&i.to_string()));
+                }
+                sink.end_row();
+            }
+            sink.end("SELECT 100");
+        }
+        let ends: Vec<serde_json::Value> = messages
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|m| decode(m))
+            .filter(|m| m["type"] == "end")
+            .collect();
+        let truncated: Vec<bool> = ends
+            .iter()
+            .map(|m| m["truncated"].as_bool().unwrap())
+            .collect();
+        assert_eq!(truncated, [false, true, true]);
+        assert!(ends.iter().all(|m| m["totalRows"] == 100));
+        let sent: u64 = messages
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|m| decode(m))
+            .filter(|m| m["type"] == "rows")
+            .map(|m| m["rowCount"].as_u64().unwrap())
+            .sum();
+        assert_eq!(sent, 150);
+    }
+
+    #[test]
+    fn a_dead_listener_closes_the_sink_past_the_cap() {
+        let (send, _messages) = collect();
+        let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let flag = alive.clone();
+        let mut sink = StreamSink::new(send, 10).with_alive(Arc::new(move || {
+            flag.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+        sink.begin(&[Column::new("n", "")]);
+        let mut read = 0u64;
+        for i in 0..1_000_000u64 {
+            if i == 5_000 {
+                alive.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+            if sink.keeping() {
+                sink.cell(Some("1"));
+            }
+            sink.end_row();
+            read += 1;
+            if !sink.is_open() {
+                break;
+            }
+        }
+        assert!(read < 5_000 + ALIVE_EVERY + 1, "read {read}");
     }
 
     #[test]

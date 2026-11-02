@@ -111,7 +111,7 @@ pub enum Entry {
     Action(&'static str),
     /// Rows that are not in shortcuts.json. Undo and Redo are predefined only on
     /// macOS; elsewhere the front end does them on the focused field or editor.
-    /// Quit is predefined everywhere but Windows and Linux.
+    /// Quit is one too: the predefined item would skip the unsaved-edits check.
     Native(&'static str),
     Predefined(Predefined),
     Separator,
@@ -143,7 +143,9 @@ pub fn layout(os: Os) -> Vec<Menus> {
                 P(Predefined::HideOthers),
                 P(Predefined::ShowAll),
                 S,
-                P(Predefined::Quit),
+                // Not the predefined item: it ends the app at once, and
+                // windows with unsaved edits must be asked first.
+                E("quit"),
             ],
         });
     }
@@ -281,6 +283,7 @@ fn label(action: &str) -> String {
         None => match action {
             "undo" => "Undo".into(),
             "redo" => "Redo".into(),
+            "quit" if cfg!(target_os = "macos") => "Quit dbLens".into(),
             "quit" => "Quit".into(),
             other => other.into(),
         },
@@ -301,7 +304,9 @@ fn build_item(
         } else {
             "CmdOrCtrl+Shift+Z".to_string()
         }),
-        "quit" if cfg!(target_os = "linux") => Some("CmdOrCtrl+Q".to_string()),
+        "quit" if cfg!(any(target_os = "linux", target_os = "macos")) => {
+            Some("CmdOrCtrl+Q".to_string())
+        }
         _ => accelerator(keys),
     };
     if let Some(a) = accel {
@@ -346,13 +351,15 @@ pub fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let mut bar = Vec::new();
     for menu in layout(os) {
         let mut sub = SubmenuBuilder::new(app, menu.title);
-        if menu.title == "Window" {
-            sub = sub.id("window");
-        }
+        sub = sub.id(if menu.title == "Window" {
+            "window"
+        } else {
+            menu.title
+        });
         let mut built: Vec<Box<dyn tauri::menu::IsMenuItem<Wry>>> = Vec::new();
         for entry in menu.entries {
             match entry {
-                Entry::Native(id) if os == Os::Mac => {
+                Entry::Native(id @ ("undo" | "redo")) if os == Os::Mac => {
                     // macOS has the system Undo and Redo, which reach the web view.
                     built.push(Box::new(match id {
                         "undo" => PredefinedMenuItem::undo(app, None)?,
@@ -409,7 +416,8 @@ pub fn on_event(app: &AppHandle, id: &str) {
         "newWindow" => {
             let _ = crate::windows::open_new(app, None);
         }
-        "quit" => app.exit(0),
+        // Each window saves or drops its edits first (close_guard.rs).
+        "quit" => crate::close_guard::quit(app),
         "closeWindow" => {
             if let Some(w) = app.get_webview_window(&label) {
                 let _ = w.close();
@@ -428,6 +436,37 @@ pub fn set_menu_state(app: AppHandle, state: MenuState) {
     let Ok(map) = handles.0.lock() else { return };
     for (id, item) in map.iter() {
         let _ = item.set_enabled(enabled(id, &state));
+    }
+}
+
+/// The front end sends the menu's wording in the UI language, once at start:
+/// `labels` maps an action id to its row text and "menu:<English title>" to a
+/// menu's title. Rows without an entry keep their English text.
+#[tauri::command]
+pub fn set_menu_labels(app: AppHandle, labels: HashMap<String, String>) {
+    if let Ok(map) = app.state::<MenuHandles>().0.lock() {
+        for (id, item) in map.iter() {
+            if let Some(text) = labels.get(id) {
+                let _ = item.set_text(text);
+            }
+        }
+    }
+    if let Some(menu) = app.menu() {
+        for sub in menu.items().unwrap_or_default() {
+            if let Some(sub) = sub.as_submenu() {
+                let key = format!(
+                    "menu:{}",
+                    if sub.id().as_ref() == "window" {
+                        "Window"
+                    } else {
+                        sub.id().as_ref()
+                    }
+                );
+                if let Some(text) = labels.get(&key) {
+                    let _ = sub.set_text(text);
+                }
+            }
+        }
     }
 }
 
@@ -493,9 +532,7 @@ mod tests {
         assert!(mac[0]
             .entries
             .contains(&Entry::Predefined(Predefined::About)));
-        assert!(mac[0]
-            .entries
-            .contains(&Entry::Predefined(Predefined::Quit)));
+        assert!(mac[0].entries.contains(&Entry::Native("quit")));
         assert!(!layout(Os::Windows)[0]
             .entries
             .contains(&Entry::Predefined(Predefined::Hide)));

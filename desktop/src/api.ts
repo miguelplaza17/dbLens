@@ -410,6 +410,7 @@ function executeStream(
 export class StreamCollector {
   results: ResultBlock[] = [];
   done: StreamDone | null = null;
+  private ended = new Set<number>();
 
   add(message: StreamMessage) {
     switch (message.type) {
@@ -427,10 +428,18 @@ export class StreamCollector {
         block.totalRows = message.totalRows;
         block.truncated = message.truncated;
         this.results[message.result] = block;
+        this.ended.add(message.result);
         break;
       }
       case "done":
         this.done = message;
+        // A failed or cancelled run sends no `end` for the result in progress.
+        this.results.forEach((block, i) => {
+          if (block && !this.ended.has(i)) {
+            block.totalRows = block.rowCount;
+            block.truncated = true;
+          }
+        });
         break;
     }
   }

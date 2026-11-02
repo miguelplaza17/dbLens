@@ -281,6 +281,21 @@ jobs:
         with:
           workspaces: desktop/src-tauri
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      # tauri::generate_context! needs frontendDist (../dist) to exist.
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: desktop
+        run: npm run build
+
       - name: Integration tests
         working-directory: desktop/src-tauri
         run: cargo test

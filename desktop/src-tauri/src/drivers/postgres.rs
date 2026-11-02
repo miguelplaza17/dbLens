@@ -815,7 +815,8 @@ impl PostgresSession {
                     })
                 });
             if let Some(now) = now {
-                self.scope_changed.store(now != self.scope, Ordering::SeqCst);
+                self.scope_changed
+                    .store(now != self.scope, Ordering::SeqCst);
             }
         }
     }
@@ -1005,19 +1006,18 @@ impl PostgresSession {
 }
 
 impl PostgresSession {
-    /// A failed run that left the transaction failed rolls it back.
+    /// A failed run that left the transaction failed keeps it, with a hint.
     async fn after_run<T>(&self, outcome: DbResult<T>) -> DbResult<T> {
         match outcome {
             Ok(value) => Ok(value),
             Err(error) => {
-                // `begin; select 1/0` leaves the transaction failed, and every later
-                // call (the sidebar, the grid) would be refused until a ROLLBACK.
-                // Its work can only be rolled back anyway, so roll it back now.
+                // `begin; select 1/0` leaves the transaction failed. Keep it: the
+                // user may recover with `rollback to <savepoint>`, and a rollback
+                // here would throw away their earlier work. Say what to run.
                 if self.transaction_state().await.ok() == Some(TxState::Failed) {
-                    self.rollback().await;
                     return Err(match error {
                         DbError::Message(text) => DbError::Message(format!(
-                            "{text}\n\nThe transaction failed and was rolled back."
+                            "{text}\n\nThe transaction is now failed. Run ROLLBACK, or ROLLBACK TO a savepoint."
                         )),
                         other => other,
                     });

@@ -1144,7 +1144,6 @@ impl DatabaseSession for MongoSession {
     }
 
     async fn relations(&self) -> DbResult<Vec<Relation>> {
-        let _inner = self.inner.lock().await;
         self.all_relations().await
     }
 
@@ -1212,7 +1211,6 @@ impl DatabaseSession for MongoSession {
                 "The _id of a document can't be changed. Insert a copy with the new _id and delete this one.",
             ));
         }
-        let _inner = self.inner.lock().await;
         let filter = id_filter(key)?;
         let fields: Vec<&str> = changes.iter().map(|c| c.column.as_str()).collect();
         let types = self.field_types(relation, &filter, &fields).await?;
@@ -1253,7 +1251,17 @@ impl DatabaseSession for MongoSession {
     /// the driver makes an ObjectId. Values take the types of the collection's
     /// last page when the text reads as that type (else as it reads on its own).
     async fn insert(&self, relation: &Relation, values: &[CellValue]) -> DbResult<EditOutcome> {
-        let inner = self.inner.lock().await;
+        let mut inner = self.inner.lock().await;
+        if !inner.column_types.contains_key(&relation.id()) {
+            // Pages may have gone to other pool connections: learn the types here.
+            let operation = self.canceller.begin();
+            let learned = self.page_in(&mut inner, relation, 1, 0, "", None, &operation.tag);
+            let outcome = self.cancelable(&operation, learned).await;
+            outcome.map(drop).or_else(|e| match e {
+                DbError::Cancelled => Err(e),
+                _ => Ok(()),
+            })?;
+        }
         let empty = HashMap::new();
         let types = inner.column_types.get(&relation.id()).unwrap_or(&empty);
         let fields: Vec<&CellValue> = values
@@ -1288,7 +1296,6 @@ impl DatabaseSession for MongoSession {
 
     /// Deletes one document, found by its _id.
     async fn delete(&self, relation: &Relation, key: &RowKey) -> DbResult<EditOutcome> {
-        let _inner = self.inner.lock().await;
         let filter = id_filter(key)?;
         let result = self
             .client
@@ -1314,7 +1321,6 @@ impl DatabaseSession for MongoSession {
     /// `<name>` or `<name>s` of the same database ("guessed (field)" when a
     /// collection has more than one, so link ids stay unique).
     async fn schema_graph(&self) -> DbResult<SchemaGraph> {
-        let _inner = self.inner.lock().await;
         let relations = self.all_relations().await?;
         let operation = self.canceller.begin();
         self.cancelable(&operation, self.sample_graph(&relations, &operation.tag))

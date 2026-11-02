@@ -2,7 +2,8 @@
 //! `connections.json`; the URLs (with their passwords) sealed with AES-256-GCM
 //! in `connections.enc`. The key lives in the OS keyring (Windows Credential
 //! Manager, Linux Secret Service) or, when there is none, in a 0600
-//! `connections.key` file beside them. A damaged key or sealed file is refused,
+//! `connections.key` file beside them. On macOS the key file is the default
+//! (see `KEY_FILE_FIRST`). A damaged key or sealed file is refused,
 //! never replaced, so saved URLs are not silently lost.
 //!
 //! Folder: `directories::ProjectDirs::from("app", "dblens", "dbLens").data_dir()`
@@ -194,7 +195,8 @@ impl Store {
                 .then(a.sort_index.cmp(&b.sort_index))
                 .then(a.name.cmp(&b.name))
         });
-        snapshot.key_in_file = self.key_in_file;
+        // On macOS the file is the design, not a fallback worth a notice.
+        snapshot.key_in_file = self.key_in_file && !KEY_FILE_FIRST;
         snapshot
     }
 
@@ -552,6 +554,34 @@ fn with_keyring<T>(call: impl Fn() -> keyring::Result<T>) -> keyring::Result<T> 
     }
 }
 
+/// macOS: the Keychain ties an item to the app's code signature, so every ad
+/// hoc or re-signed build (CI signs ad hoc without secrets) asks again, and a
+/// dismissed prompt reads as denied: the store would not open. As the Swift
+/// app did, the key lives in the 0600 key file instead.
+const KEY_FILE_FIRST: bool = cfg!(target_os = "macos");
+
+/// The key-file-first path (macOS): a new key goes straight to the file; a
+/// key an earlier build left in the Keychain is read once and copied to the
+/// file, so later launches never touch the Keychain.
+fn load_key_keychain_once(file: &Path, create: bool) -> DbResult<(Key<Aes256Gcm>, bool)> {
+    if create {
+        return Ok((load_key_file(file, true)?, true));
+    }
+    let entry =
+        keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|_| io("the key is missing"))?;
+    match entry.get_password() {
+        Ok(text) => {
+            let key = decode_key(&text)?;
+            write_private(file, encode_key(&key).as_bytes())?;
+            Ok((key, true))
+        }
+        Err(keyring::Error::NoEntry) => Err(io("the key is missing")),
+        Err(_) => Err(io(
+            "the Keychain did not give the key that seals saved passwords. Allow access when macOS asks, then try again.",
+        )),
+    }
+}
+
 /// Keyring first; a key file already in the folder wins (it was the fallback
 /// before); a new key goes to the keyring, or to the file only when there is
 /// no keyring at all. A locked keyring is an error, so one bad moment never
@@ -561,6 +591,9 @@ fn load_key_auto(dir: &Path, create: bool) -> DbResult<(Key<Aes256Gcm>, bool)> {
     let file = dir.join(KEY_FILE);
     if file.exists() {
         return Ok((load_key_file(&file, false)?, true));
+    }
+    if KEY_FILE_FIRST {
+        return load_key_keychain_once(&file, create);
     }
     let entry = match keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER) {
         Ok(entry) => entry,

@@ -1,6 +1,7 @@
 //! dbLens for Windows and Linux: a Tauri 2 shell around database drivers that
 //! mirror the macOS app's DBLensKit. See desktop/CONTRACT.md.
 
+pub mod close_guard;
 pub mod commands;
 pub mod connection_problem;
 pub mod connector;
@@ -29,14 +30,15 @@ pub fn run() {
     // A second launch raises the running app (or opens a database file in a new
     // window) instead of starting another process. It must be the first plugin.
     #[cfg(any(target_os = "linux", target_os = "windows"))]
-    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-        windows::second_launch(app, &args)
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+        windows::second_launch(app, &args, &cwd)
     }));
     let app = builder
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .manage(commands::AppState::default())
         .manage(windows::PendingOpen::default())
+        .manage(close_guard::CloseGuard::default())
         .setup(|app| {
             menu::install(app.handle())?;
             windows::queue_launch_args(app.handle());
@@ -48,6 +50,7 @@ pub fn run() {
             if payload.event() == PageLoadEvent::Started {
                 let app = webview.app_handle().clone();
                 let label = webview.label().to_string();
+                app.state::<close_guard::CloseGuard>().forget(&label);
                 tauri::async_runtime::spawn(async move {
                     app.state::<commands::AppState>()
                         .close_owned_by(&label)
@@ -56,16 +59,30 @@ pub fn run() {
             }
         })
         .on_window_event(|window, event| {
+            // Unsaved grid edits: the page decides (close_guard.rs).
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                if close_guard::hold_close(window) {
+                    api.prevent_close();
+                }
+            }
             if let WindowEvent::Destroyed = event {
+                window
+                    .state::<close_guard::CloseGuard>()
+                    .forget(window.label());
+                // Taken out of the map now (the label may be reused at once),
+                // closed in the background so a slow server can't freeze the UI.
                 let state = window.state::<commands::AppState>();
                 for webview in window.webviews() {
-                    tauri::async_runtime::block_on(state.close_owned_by(webview.label()));
+                    state.close_owned_by_later(webview.label());
                 }
-                tauri::async_runtime::block_on(state.close_owned_by(window.label()));
+                state.close_owned_by_later(window.label());
             }
         })
         .invoke_handler(tauri::generate_handler![
             menu::set_menu_state,
+            menu::set_menu_labels,
+            close_guard::close_guard_ready,
+            close_guard::close_confirmed,
             windows::new_window,
             windows::take_pending_open,
             commands::detect_engine,

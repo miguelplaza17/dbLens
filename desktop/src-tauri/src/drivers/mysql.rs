@@ -255,6 +255,7 @@ pub async fn connect(url: &str, local_port: Option<u16>) -> DbResult<Box<dyn Dat
         activity: Activity::default(),
         editing: AtomicBool::new(false),
         in_transaction: AtomicBool::new(false),
+        autocommit_off: AtomicBool::new(false),
         scope_changed: AtomicBool::new(false),
         id: conn.id(),
         opts,
@@ -286,6 +287,9 @@ struct Shared {
     editing: AtomicBool,
     /// The user's transaction is open, as of the last SQL run.
     in_transaction: AtomicBool,
+    /// The user turned autocommit off: any statement may open a transaction
+    /// then, so every run asks the server again.
+    autocommit_off: AtomicBool,
     /// `USE` in the panel moved the connection off the URL's database.
     scope_changed: AtomicBool,
     id: u32,
@@ -905,14 +909,30 @@ impl MySqlSession {
     }
 
     /// Remembers whether the user's transaction is open after a run, asking
-    /// the server only when the run could have changed it.
+    /// the server only when the run could have changed it: a statement that
+    /// opens one or sets autocommit, an open one, or autocommit off (then an
+    /// INSERT or SELECT opens one by itself).
     async fn note_transaction(&self, conn: &mut Conn, sql: &str) {
         let changes = statement_verbs(sql)
             .iter()
             .any(|v| matches!(v.as_str(), "BEGIN" | "START" | "SET" | "XA"));
-        if changes || self.state.in_transaction.load(Ordering::SeqCst) {
-            let open = self.user_transaction(conn).await.unwrap_or(false);
-            self.state.in_transaction.store(open, Ordering::SeqCst);
+        let state = &self.state;
+        if changes
+            || state.in_transaction.load(Ordering::SeqCst)
+            || state.autocommit_off.load(Ordering::SeqCst)
+        {
+            let now: Result<Option<(Option<i64>, Option<i64>)>, _> = conn
+                .query_first("select @@in_transaction, @@autocommit")
+                .await;
+            let (open, autocommit) = match now {
+                Ok(Some((open, autocommit))) => {
+                    (open.unwrap_or(0) != 0, autocommit.unwrap_or(1) != 0)
+                }
+                // Unknown: keep asking after every run.
+                _ => (false, false),
+            };
+            state.in_transaction.store(open, Ordering::SeqCst);
+            state.autocommit_off.store(!autocommit, Ordering::SeqCst);
         }
     }
 
@@ -1199,8 +1219,32 @@ impl MySqlSession {
     }
 }
 
-/// Reads every result set of `sql` into `sink` as the rows arrive.
-async fn stream_all(conn: &mut Conn, sql: &str, sink: &mut StreamSink) -> DbResult<()> {
+/// Sends KILL QUERY for the session's connection from a second, short one.
+/// With `op`, only while that operation still runs (checked once connected).
+async fn kill_query(state: &Shared, op: Option<u64>) {
+    let connecting = Conn::new(state.opts.clone());
+    if let Ok(Ok(mut conn)) = tokio::time::timeout(Duration::from_secs(10), connecting).await {
+        let still = match op {
+            Some(op) => state.activity.is_running(op),
+            None => true,
+        };
+        if still {
+            let _ = conn.query_drop(format!("KILL QUERY {}", state.id)).await;
+        }
+        let _ = conn.disconnect().await;
+    }
+}
+
+/// Reads every result set of `sql` into `sink` as the rows arrive. When the
+/// sink closes mid-result, the server stops the query (KILL QUERY) and the
+/// rest is read off here, so the connection is free for the next command
+/// right away instead of draining the whole result first.
+async fn stream_all(
+    conn: &mut Conn,
+    state: &Shared,
+    sql: &str,
+    sink: &mut StreamSink,
+) -> DbResult<()> {
     let verbs = statement_verbs(sql);
     let mut result = conn.query_iter(sql).await.map_err(|e| to_error(&e))?;
     let mut index = 0;
@@ -1230,6 +1274,9 @@ async fn stream_all(conn: &mut Conn, sql: &str, sink: &mut StreamSink) -> DbResu
                     }
                     sink.end_row();
                     if !sink.is_open() {
+                        kill_query(state, None).await;
+                        // Ends with the KILL's error (or the last rows); either way nothing is left.
+                        let _ = result.drop_result().await;
                         return Err(DbError::Cancelled);
                     }
                 }
@@ -1348,17 +1395,7 @@ impl DatabaseSession for MySqlSession {
             return;
         };
         let state = self.state.clone();
-        let kill = async move {
-            let connecting = Conn::new(state.opts.clone());
-            if let Ok(Ok(mut conn)) =
-                tokio::time::timeout(Duration::from_secs(10), connecting).await
-            {
-                if state.activity.is_running(op) {
-                    let _ = conn.query_drop(format!("KILL QUERY {}", state.id)).await;
-                }
-                let _ = conn.disconnect().await;
-            }
-        };
+        let kill = async move { kill_query(&state, Some(op)).await };
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 handle.spawn(kill);
@@ -1499,11 +1536,8 @@ impl DatabaseSession for MySqlSession {
     async fn execute_stream(&self, sql: &str, sink: &mut StreamSink) -> DbResult<()> {
         let mut conn = self.guard().await?;
         let id = self.state.activity.start();
-        let outcome = stream_all(&mut conn, sql, sink).await;
+        let outcome = stream_all(&mut conn, &self.state, sql, sink).await;
         let cancelled = self.state.activity.finish(id);
-        if !sink.is_open() {
-            self.cancel();
-        }
         self.note_transaction(&mut conn, sql).await;
         self.note_scope(&mut conn, sql).await;
         if cancelled {

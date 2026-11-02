@@ -25,14 +25,20 @@ export function executionSummary(execution: Execution): string {
   return parts.join(" · ");
 }
 
+/** One spreadsheet field: quoted (inner quotes doubled) when it holds a tab, newline or quote. */
+export function tsvField(v: string | null | undefined): string {
+  const text = v ?? "";
+  return /[\t\r\n"]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
 /** Rows as tab-separated text for a spreadsheet; NULL is empty. `rows` undefined = all. */
-export function tsv(result: ResultBlock, rows?: number[], header = true): string {
+export function tsv(result: ResultBlock, rows?: number[], header = true, cols?: number[]): string {
   const picked = rows ? [...rows].sort((a, b) => a - b) : Array.from({ length: result.rowCount }, (_, i) => i);
-  const clean = (v: string | null) => (v ?? "").replace(/[\t\r\n]+/g, " ");
+  const columns = cols ?? result.columns.map((_, c) => c);
   const lines = picked
     .filter((i) => i < result.rowCount)
-    .map((i) => result.columns.map((_, c) => clean(cellText(result, i, c))).join("\t"));
-  if (header) lines.unshift(result.columns.map((c) => clean(c.name)).join("\t"));
+    .map((i) => columns.map((c) => tsvField(cellText(result, i, c))).join("\t"));
+  if (header) lines.unshift(columns.map((c) => tsvField(result.columns[c]?.name)).join("\t"));
   return lines.join("\n");
 }
 
