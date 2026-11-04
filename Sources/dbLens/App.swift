@@ -84,6 +84,12 @@ struct DBLensApp: App {
                 Button("Run SQL") { Task { await model.run() } }
                     .keyboardShortcut(.return)
                     .disabled(model.session == nil || model.running)
+                Button("Rehearse") { Task { await model.run(.rehearse) } }
+                    .keyboardShortcut(.return, modifiers: [.command, .option])
+                    .disabled(!model.canRehearse || model.running)
+                Button("Run All or Nothing") { Task { await model.run(.atomic) } }
+                    .keyboardShortcut(.return, modifiers: [.command, .shift])
+                    .disabled(!model.canRehearse || model.running)
                 Button("Cancel Query") { model.cancel() }
                     .keyboardShortcut(".")
                     .disabled(!model.running)

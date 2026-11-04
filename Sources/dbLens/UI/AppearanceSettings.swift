@@ -1,8 +1,10 @@
+import DBLensKit
 import SwiftUI
 
 /// Settings > Appearance: the accent color. dbLens is always dark.
 struct AppearanceSettings: View {
     @Bindable private var store = ThemeStore.shared
+    private var icons = EngineIconStore.shared
 
     var body: some View {
         Section {
@@ -18,6 +20,28 @@ struct AppearanceSettings: View {
                     Text(store.theme.name)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+            }
+        }
+        Section("Database Icons") {
+            ForEach(Engine.allCases, id: \.self) { engine in
+                LabeledContent {
+                    HStack(spacing: Space.sm) {
+                        Picker("Icon", selection: Binding(get: { icons.style(engine) }, set: { icons.setStyle($0, for: engine) })) {
+                            Text("Logo").tag(EngineIconStore.Style.logo)
+                            Text("Symbol").tag(EngineIconStore.Style.symbol)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .fixedSize()
+                        ColorPicker("Color", selection: Binding(get: { icons.color(engine) }, set: { icons.setColor($0, for: engine) }),
+                                    supportsOpacity: false)
+                            .labelsHidden()
+                        Button("Reset") { icons.reset(engine) }
+                            .disabled(!icons.isCustomized(engine))
+                    }
+                } label: {
+                    Label { Text(verbatim: engine.name) } icon: { EngineIcon(engine) }
                 }
             }
         }

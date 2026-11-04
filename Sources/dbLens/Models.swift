@@ -684,7 +684,14 @@ final class AppModel {
 
     // MARK: SQL
 
-    func run() async {
+    enum RunMode { case plain, rehearse, atomic }
+
+    /// Redis and MongoDB can't undo a command, so only the plain run is offered there.
+    var canRehearse: Bool { session != nil && !usesCommands && !usesQueries }
+
+    /// Runs the selection or everything. `.rehearse` rolls every change back;
+    /// `.atomic` is one transaction, all or nothing (the database may refuse it).
+    func run(_ mode: RunMode = .plain) async {
         guard let session, !running else { return }
         let picked = sqlSelection.trimmingCharacters(in: .whitespacesAndNewlines)
         let text = (picked.isEmpty ? sql : picked).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -693,19 +700,30 @@ final class AppModel {
         running = true
         defer { running = false }
         do {
-            let execution = try await session.execute(text)
+            let execution: Execution
+            switch mode {
+            case .plain: execution = try await session.execute(text)
+            case .rehearse: execution = try await session.rehearse(text)
+            case .atomic: execution = try await session.executeAtomically(text)
+            }
             self.execution = execution
             querySort = nil
             remember(text, failed: false)
             runVersion += 1
             shown = .query
-            addLog(sql: text, message: Self.summary(execution), isError: false)
+            let summary = Self.summary(execution)
+            addLog(sql: text, message: mode == .rehearse ? String(localized: "Rehearsed: every change was rolled back.") + " " + summary : summary,
+                   isError: false)
+            // A rehearsal changed nothing: the tables and rows stay as they were.
+            if mode == .rehearse { return }
             // A CREATE, ALTER, or DROP changes the table list; any write may change the rows.
             // Redis commands can add or remove keys anywhere: list them again after every run.
             if usesCommands || usesQueries || execution.results.contains(where: { ["CREATE", "DROP", "ALTER"].contains(where: $0.command.hasPrefix) }) {
                 await refreshRelations()
             }
             if execution.results.contains(where: { !$0.hasRows }) { await loadTable() }
+        } catch let refused as NotAtomic {
+            addLog(sql: text, message: refused.message + " " + String(localized: "Nothing ran; use Run to run it anyway."), isError: true)
         } catch {
             remember(text, failed: true)
             addLog(sql: text, message: error.localizedDescription, isError: true)
