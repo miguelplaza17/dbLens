@@ -37,6 +37,10 @@ enum MCPServer {
     }
 
     static let version = "2025-06-18"
+    /// The tools that work on one connection, which the user can turn off per connection.
+    static let connectionTools = ["list_tables", "describe_schema", "describe_table", "list_extensions", "query",
+                                  "test_changes", "execute", "install_extension"]
+    static let writingTools: Set<String> = ["test_changes", "execute", "install_extension"]
     static let maxRows = 1000
     static let maxValue = 2000
 
@@ -53,6 +57,14 @@ enum MCPServer {
                 let connection = SavedConnection(name: "test")
                 connection.engine = Engine.detect(url)?.rawValue ?? "postgres"
                 connection.agentsCanWrite = env["APP_AGENTS_WRITE"] == "1"
+                connection.agentsBlockedTools = env["APP_AGENTS_BLOCK"] ?? ""
+                if env["APP_AGENTS_HIDDEN"] == "1" {  // a second, hidden connection to the same server
+                    let hidden = SavedConnection(name: "hidden")
+                    hidden.engine = connection.engine
+                    hidden.agentsHidden = true
+                    try? Secrets.setURL(url, for: hidden.uuid)
+                    container.mainContext.insert(hidden)
+                }
                 try? Secrets.setURL(url, for: connection.uuid)
                 container.mainContext.insert(connection)
                 try? container.mainContext.save()
@@ -106,16 +118,17 @@ enum MCPServer {
         private func call(_ name: String, _ arguments: [String: Any]) async throws -> Any {
             switch name {
             case "list_connections":
-                return try connections().map { connection in
+                return try connections().filter { !$0.agentsHidden }.map { connection in
                     ["name": connection.name, "engine": Engine(rawValue: connection.engine)?.name ?? connection.engine,
-                     "via_ssh": connection.ssh != nil, "agents_can_write": connection.agentsCanWrite] as [String: Any]
+                     "via_ssh": connection.ssh != nil, "agents_can_write": connection.agentsCanWrite,
+                     "tools": MCPServer.connectionTools.filter(connection.agentsMayUse)] as [String: Any]
                 }
             case "create_connection":
                 return try await createConnection(arguments)
             case "delete_connection":
                 return try deleteConnection(arguments)
             case "list_tables":
-                let (_, session) = try await open(arguments)
+                let (_, session) = try await open(arguments, for: name)
                 return try await session.relations().map { relation in
                     var item: [String: Any] = ["name": relation.name, "kind": relation.kind.rawValue]
                     if !relation.schema.isEmpty { item["schema"] = relation.schema }
@@ -124,20 +137,20 @@ enum MCPServer {
                     return item
                 }
             case "describe_schema":
-                let (_, session) = try await open(arguments)
+                let (_, session) = try await open(arguments, for: name)
                 return try await schemaText(arguments["schema"] as? String, in: session)
             case "list_extensions":
-                let (_, session) = try await open(arguments)
+                let (_, session) = try await open(arguments, for: name)
                 return try await extensions(in: session)
             case "install_extension":
-                let (connection, session) = try await open(arguments)
+                let (connection, session) = try await open(arguments, for: name)
                 return try await install(try text(arguments, "name"), schema: arguments["schema"] as? String,
                                          on: connection, session)
             case "describe_table":
-                let (_, session) = try await open(arguments)
+                let (_, session) = try await open(arguments, for: name)
                 return try await describe(try text(arguments, "table"), in: session)
             case "query":
-                let (connection, session) = try await open(arguments)
+                let (connection, session) = try await open(arguments, for: name)
                 let statement = try text(arguments, "query")
                 let limit = min(max(arguments["max_rows"] as? Int ?? 100, 1), MCPServer.maxRows)
                 do {
@@ -149,7 +162,7 @@ enum MCPServer {
                     throw error
                 }
             case "test_changes":
-                let (connection, session) = try await open(arguments)
+                let (connection, session) = try await open(arguments, for: name)
                 let script = try text(arguments, "statements")
                 try requireWrite(connection, "Testing runs the statements (and locks what they touch) before undoing them")
                 do {
@@ -163,7 +176,7 @@ enum MCPServer {
                                         + " (Rolled back: nothing changed.)")
                 }
             case "execute":
-                let (connection, session) = try await open(arguments)
+                let (connection, session) = try await open(arguments, for: name)
                 let script = try text(arguments, "statements")
                 try requireWrite(connection, "Writing")
                 let atomic = arguments["atomic"] as? Bool
@@ -396,7 +409,8 @@ enum MCPServer {
         private func deleteConnection(_ arguments: [String: Any]) throws -> Any {
             try requireManage()
             let name = try text(arguments, "connection")
-            let matches = try connections().filter { $0.name.caseInsensitiveCompare(name) == .orderedSame || $0.uuid.uuidString == name }
+            let matches = try connections().filter { !$0.agentsHidden }
+                .filter { $0.name.caseInsensitiveCompare(name) == .orderedSame || $0.uuid.uuidString == name }
             guard matches.count == 1, let connection = matches.first else {
                 throw DatabaseError(message: matches.isEmpty ? "No connection \"\(name)\"." : "Several connections are named \"\(name)\"; rename one in dbLens.")
             }
@@ -424,14 +438,22 @@ enum MCPServer {
         }
 
         /// The named connection, opened once and kept for the next calls.
-        private func open(_ arguments: [String: Any]) async throws -> (SavedConnection, any DatabaseSession) {
+        /// The named connection, if the user lets agents use `tool` on it.
+        private func open(_ arguments: [String: Any], for tool: String) async throws -> (SavedConnection, any DatabaseSession) {
             let name = try text(arguments, "connection")
-            let all = try connections()
+            let all = try connections().filter { !$0.agentsHidden }
             let matches = all.filter { $0.name.caseInsensitiveCompare(name) == .orderedSame || $0.uuid.uuidString == name }
             guard matches.count == 1, let connection = matches.first else {
                 let names = all.map(\.name).joined(separator: ", ")
                 throw DatabaseError(message: matches.isEmpty ? "No connection \"\(name)\". Saved: \(names)."
                                                              : "Several connections are named \"\(name)\"; rename one in dbLens.")
+            }
+            guard connection.agentsMayUse(tool) else {
+                let allowed = MCPServer.connectionTools.filter(connection.agentsMayUse)
+                throw DatabaseError(message: """
+                    The user turned off \(tool) for "\(connection.name)" in dbLens (Settings > Agents, or right-click \
+                    the connection > Agent Tools). Allowed here: \(allowed.isEmpty ? "none" : allowed.joined(separator: ", ")).
+                    """)
             }
             if let session = sessions[connection.uuid] { return (connection, session) }
             guard let url = connection.url else {
@@ -503,7 +525,7 @@ enum MCPServer {
         static let tools: [[String: Any]] = [
             [
                 "name": "list_connections",
-                "description": "The database connections saved in dbLens: name, engine (PostgreSQL, MySQL, SQLite, Redis, MongoDB), whether it goes through SSH, and whether agents may write. URLs and passwords are never shown. Databases: all (PostgreSQL, MySQL/MariaDB, SQLite, Redis/Valkey, MongoDB).",
+                "description": "The database connections saved in dbLens: name, engine (PostgreSQL, MySQL, SQLite, Redis, MongoDB), whether it goes through SSH, whether agents may write, and the tools the user allows on it (other tools are refused there; connections the user hid are not listed). URLs and passwords are never shown. Databases: all (PostgreSQL, MySQL/MariaDB, SQLite, Redis/Valkey, MongoDB).",
                 "inputSchema": ["type": "object", "properties": [:]],
                 "annotations": ["readOnlyHint": true],
             ],

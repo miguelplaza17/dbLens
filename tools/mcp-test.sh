@@ -7,11 +7,12 @@ setopt null_glob
 url=${APP_SEED_URL:-${DBLENS_TEST_URL:-}}
 [[ -n $url ]] || { echo "set DBLENS_TEST_URL to a throwaway Postgres"; exit 1; }
 app=~/Applications/"dbLens Dev.app"/Contents/MacOS/dbLens
-call() {  # call <writable 0|1> <json-rpc lines...>: prints one reply per line
+call() {  # call <writable 0|1> <json-rpc lines...>: prints one reply per line (APP_AGENTS_BLOCK, APP_AGENTS_HIDDEN pass through)
   local writable=$1; shift
   rm -f /tmp/dbLens-mcp.store*  # each round starts from a fresh store
   printf '%s\n' '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' "$@" |
-    APP_STORE=/tmp/dbLens-mcp.store APP_SEED_URL=$url APP_AGENTS_WRITE=$writable $app --mcp
+    APP_STORE=/tmp/dbLens-mcp.store APP_SEED_URL=$url APP_AGENTS_WRITE=$writable \
+    APP_AGENTS_BLOCK=${APP_AGENTS_BLOCK:-} APP_AGENTS_HIDDEN=${APP_AGENTS_HIDDEN:-} $app --mcp
 }
 tool() { print -r -- "{\"jsonrpc\":\"2.0\",\"id\":$1,\"method\":\"tools/call\",\"params\":{\"name\":\"$2\",\"arguments\":$3}}" }
 rm -f /tmp/dbLens-mcp.store*
@@ -46,11 +47,18 @@ ro=$(call 0 "$(tool 10 execute '{"connection":"test","statements":"delete from d
             "$(tool 26 test_changes '{"connection":"test","statements":"delete from dblens_mcp"}')" \
             "$(tool 32 create_connection "{\"url\":\"$url\"}")" \
             "$(tool 11 query '{"connection":"nope","query":"select 1"}')")
+# Agent Tools: query turned off on "test", and a second connection the user hid.
+access=$(APP_AGENTS_BLOCK=query APP_AGENTS_HIDDEN=1 call 0 \
+  "$(tool 40 list_connections '{}')" \
+  "$(tool 41 query '{"connection":"test","query":"select 1"}')" \
+  "$(tool 42 list_tables '{"connection":"test"}')" \
+  "$(tool 43 query '{"connection":"hidden","query":"select 1"}')")
 call 1 "$(tool 12 execute '{"connection":"test","statements":"drop table dblens_mcp"}')" \
        "$(tool 18 execute '{"connection":"test","statements":"drop extension if exists pg_trgm"}')" >/dev/null
 rm -f /tmp/dbLens-mcp.store*
 print -r -- "$out
-$ro" | python3 -c '
+$ro
+$access" | python3 -c '
 import sys, json
 replies = {m["id"]: m.get("result", {}) for m in map(json.loads, sys.stdin) if m.get("id")}
 def text(i): return replies[i]["content"][0]["text"]
@@ -80,6 +88,11 @@ checks = [
     ("create_connection says why a URL fails", err(29) and "refused" in text(29)),
     ("delete_connection removes it", not err(30) and "\"created\"" not in text(31)),
     ("create_connection is refused unless the user allows it", err(32) and "Settings > Agents" in text(32)),
+    ("list_connections shows the tools allowed and leaves out hidden connections",
+     "\"list_tables\"" in text(40) and "\"query\"" not in text(40) and "hidden" not in text(40)),
+    ("a tool the user turned off is refused on that connection", err(41) and "turned off query" in text(41)),
+    ("the other tools still work there", not err(42) and "dblens_mcp" in text(42)),
+    ("a hidden connection is unknown to agents", err(43) and "No connection" in text(43)),
     ("describe_schema lists every table with its columns", "dblens_mcp (table" in text(13) and "id integer PK" in text(13)),
 ]
 for name, ok in checks: print(("PASS " if ok else "FAIL ") + name)

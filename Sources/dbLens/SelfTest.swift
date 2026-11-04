@@ -63,6 +63,21 @@ enum SelfTest {
                 let stored = (try? fresh.map { try ModelContext($0).fetch(FetchDescriptor<SavedConnection>()) })??.first { $0.uuid == saved.uuid }
                 check("Let Agents Write is saved for other processes", stored?.agentsCanWrite == true, saveError)
                 saved.agentsCanWrite = false
+                // Agent Tools: per-connection tools and hiding reach the MCP server's process too.
+                saved.setAgents("execute", allowed: false)
+                saved.setAgents("query", allowed: false)
+                saved.setAgents("query", allowed: true)
+                saved.agentsHidden = true
+                try? model.context.save()
+                let again = try? ModelContainer(for: SavedConnection.self, configurations: ModelConfiguration(url: Store.url))
+                let read = (try? again.map { try ModelContext($0).fetch(FetchDescriptor<SavedConnection>()) })??.first { $0.uuid == saved.uuid }
+                check("Agent Tools: turned-off tools and hiding are saved for other processes",
+                      read?.agentsBlockedTools == "execute" && read?.agentsHidden == true
+                      && read?.agentsMayUse("query") == false && saved.agentsMayUse("execute") == false)
+                saved.agentsHidden = false
+                check("Agent Tools: a visible connection allows every tool it didn't turn off",
+                      saved.agentsMayUse("query") && !saved.agentsMayUse("execute"))
+                saved.setAgents("execute", allowed: true)
                 try? model.context.save()
             }
             let boxDir = FileManager.default.temporaryDirectory.appending(path: "dbLens-box-\(UUID().uuidString)")

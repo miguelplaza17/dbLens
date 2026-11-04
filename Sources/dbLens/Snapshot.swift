@@ -77,6 +77,16 @@ enum Snapshot {
                         try? await Task.sleep(for: .seconds(0.8))
                         let settings = NSApp.windows.first { $0.isVisible && $0 !== main && !$0.isSheet }
                         capture(to: "\(dir)/settings-\(tab.rawValue)-\(mode).png", window: settings)
+                        // A tab taller than the window: its end too, as settings-<tab>-end.
+                        if let scroll = settings?.contentView.flatMap(Self.scrollView),
+                           let document = scroll.documentView,
+                           document.frame.height > scroll.contentView.bounds.height + 1 {
+                            let bottom = document.isFlipped ? document.frame.height - scroll.contentView.bounds.height : 0
+                            scroll.contentView.scroll(to: NSPoint(x: 0, y: bottom))
+                            scroll.reflectScrolledClipView(scroll.contentView)
+                            try? await Task.sleep(for: .seconds(0.5))
+                            capture(to: "\(dir)/settings-\(tab.rawValue)-end-\(mode).png", window: settings)
+                        }
                     }
                 }
             }
@@ -85,6 +95,20 @@ enum Snapshot {
             for window in NSApp.windows { if let sheet = window.attachedSheet { window.endSheet(sheet) } }
             NSApp.terminate(nil)
         }
+    }
+
+    /// The scroll view with the most to scroll in a window (a Settings tab's form, not its sidebar).
+    private static func scrollView(in view: NSView) -> NSScrollView? {
+        var found: [NSScrollView] = []
+        func walk(_ view: NSView) {
+            if let scroll = view as? NSScrollView { found.append(scroll) }
+            view.subviews.forEach(walk)
+        }
+        walk(view)
+        func overflow(_ scroll: NSScrollView) -> CGFloat {
+            (scroll.documentView?.frame.height ?? 0) - scroll.contentView.bounds.height
+        }
+        return found.max { overflow($0) < overflow($1) }
     }
 
     /// Captures the real window with screencapture, so glass, sidebars, and

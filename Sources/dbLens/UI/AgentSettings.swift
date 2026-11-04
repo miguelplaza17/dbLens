@@ -103,17 +103,22 @@ struct AgentSettings: View {
                 Text("No saved connections yet.").foregroundStyle(.secondary)
             }
             ForEach(connections) { connection in
-                Toggle(isOn: Binding(get: { connection.agentsCanWrite }, set: { on in
-                    connection.agentsCanWrite = on
-                    try? context.save()
-                })) {
+                LabeledContent {
+                    Menu {
+                        AgentAccessItems(connection: connection) { try? context.save() }
+                    } label: {
+                        Text(AgentAccessItems.summary(connection))
+                    }
+                    .fixedSize()
+                    .help("Choose which tools agents may use on this connection")
+                } label: {
                     Text(verbatim: connection.name)
                 }
             }
         } header: {
-            Text("Let Agents Write")
+            Text("Access by Connection")
         } footer: {
-            Text("Off: agents only read. On: they may change data and install extensions on that connection. Everything they run shows in the SQL panel's History.")
+            Text("Hidden connections don't show up for agents. Tools that write also need Let Agents Write. Everything agents run shows in the SQL panel's History.")
                 .foregroundStyle(.secondary)
         }
         .onAppear(perform: refresh)
@@ -163,6 +168,58 @@ struct AgentSettings: View {
             working = nil
             refresh()
         }
+    }
+}
+
+/// What agents may do on one connection, as menu items: shown to them or
+/// hidden, each MCP tool on or off, and Let Agents Write. In the sidebar's
+/// context menu (Agent Tools) and in Settings > Agents.
+struct AgentAccessItems: View {
+    let connection: SavedConnection
+    let save: () -> Void
+
+    var body: some View {
+        Toggle("Visible to Agents", isOn: Binding(get: { !connection.agentsHidden }, set: { on in
+            connection.agentsHidden = !on
+            save()
+        }))
+        Divider()
+        Section("Reading") {
+            ForEach(MCPServer.connectionTools.filter { !MCPServer.writingTools.contains($0) }, id: \.self, content: tool)
+        }
+        Section("Writing") {
+            Toggle("Let Agents Write", isOn: Binding(get: { connection.agentsCanWrite }, set: { on in
+                connection.agentsCanWrite = on
+                save()
+            }))
+            ForEach(MCPServer.connectionTools.filter(MCPServer.writingTools.contains), id: \.self, content: tool)
+        }
+        Divider()
+        Button("Allow All Tools") {
+            for name in MCPServer.connectionTools { connection.setAgents(name, allowed: true) }
+            save()
+        }
+        .disabled(connection.agentsBlockedTools.isEmpty)
+    }
+
+    private func tool(_ name: String) -> some View {
+        Toggle(isOn: Binding(get: { connection.agentsMayUse(name) }, set: { on in
+            connection.setAgents(name, allowed: on)
+            save()
+        })) {
+            Text(verbatim: name)
+        }
+        .disabled(connection.agentsHidden || (MCPServer.writingTools.contains(name) && !connection.agentsCanWrite))
+    }
+
+    /// "Hidden", "Read only", "Reads and writes", or "3 of 5 tools" when some are off.
+    static func summary(_ connection: SavedConnection) -> String {
+        if connection.agentsHidden { return String(localized: "Hidden") }
+        let offered = MCPServer.connectionTools.filter { connection.agentsCanWrite || !MCPServer.writingTools.contains($0) }
+        let allowed = offered.filter(connection.agentsMayUse).count
+        if allowed == 0 { return String(localized: "No tools") }
+        if allowed < offered.count { return String(localized: "\(allowed) of \(offered.count) tools") }
+        return connection.agentsCanWrite ? String(localized: "Reads and writes") : String(localized: "Read only")
     }
 }
 

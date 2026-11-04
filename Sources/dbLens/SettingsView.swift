@@ -148,7 +148,8 @@ struct ConnectionSettings: View {
         var parts = [engine.name]
         if let ssh = connection.ssh { parts.append(String(localized: "via SSH \(ssh.label)")) }
         if let used = connection.lastUsed { parts.append(String(localized: "used \(used.formatted(.relative(presentation: .named)))")) }
-        if connection.agentsCanWrite { parts.append(String(localized: "agents may write")) }
+        if connection.agentsHidden { parts.append(String(localized: "hidden from agents")) }
+        else if connection.agentsCanWrite { parts.append(String(localized: "agents may write")) }
         return parts.joined(separator: " · ")
     }
 

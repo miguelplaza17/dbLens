@@ -22,6 +22,11 @@ final class SavedConnection {
     /// Agents using dbLens's MCP server may change data here (the execute tool).
     /// Off by default; reading is always allowed.
     var agentsCanWrite: Bool = false
+    /// Hidden from agents: list_connections leaves it out and no tool opens it.
+    var agentsHidden: Bool = false
+    /// MCP tools agents may not use on this connection, comma-separated
+    /// (`MCPServer.connectionTools`). Empty: every tool. New tools start allowed.
+    var agentsBlockedTools: String = ""
     /// Place in the sidebar, within its folder (or the top level).
     var sortIndex: Int = 0
     /// The sidebar folder it sits in (`ConnectionFolder.id`), or "" at the top level.
@@ -32,6 +37,21 @@ final class SavedConnection {
     }
 
     @MainActor var url: String? { Secrets.url(for: uuid) }
+
+    /// Whether agents may run this MCP tool here. Tools that write also need `agentsCanWrite`.
+    func agentsMayUse(_ tool: String) -> Bool {
+        !agentsHidden && !blockedTools.contains(tool)
+    }
+
+    func setAgents(_ tool: String, allowed: Bool) {
+        var blocked = blockedTools
+        if allowed { blocked.remove(tool) } else { blocked.insert(tool) }
+        agentsBlockedTools = blocked.sorted().joined(separator: ",")
+    }
+
+    private var blockedTools: Set<String> {
+        Set(agentsBlockedTools.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) })
+    }
 
     var ssh: SSHTunnel.Config? {
         get {
