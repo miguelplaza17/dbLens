@@ -39,6 +39,18 @@ use crate::store::{KeySource, SavedConnection, Store, StoreSnapshot};
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const MAX_ROWS: usize = 1000;
 const MAX_VALUE: usize = 2000;
+/// The tools that work on one connection, which the user can turn off per
+/// connection (Agent Tools). The last three write.
+pub const CONNECTION_TOOLS: [&str; 8] = [
+    "list_tables",
+    "describe_schema",
+    "describe_table",
+    "list_extensions",
+    "query",
+    "test_changes",
+    "execute",
+    "install_extension",
+];
 /// How long one tools/call may run before the server stops waiting and
 /// cancels its statement. `DBLENS_MCP_TIMEOUT` (seconds) changes it.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -288,11 +300,22 @@ fn text_of(arguments: &Map<String, Value>, key: &str) -> DbResult<String> {
     }
 }
 
-/// The saved connection named (any case) or with that id.
+/// The tools of `CONNECTION_TOOLS` the user allows on a connection.
+fn allowed_tools(c: &SavedConnection) -> Vec<&'static str> {
+    CONNECTION_TOOLS
+        .iter()
+        .copied()
+        .filter(|t| c.agents_may_use(t))
+        .collect()
+}
+
+/// The saved connection named (any case) or with that id; ones the user hid
+/// from agents don't exist for them.
 fn pick(snapshot: &StoreSnapshot, name: &str) -> DbResult<SavedConnection> {
     let matches: Vec<&SavedConnection> = snapshot
         .connections
         .iter()
+        .filter(|c| !c.agents_hidden)
         .filter(|c| c.name.to_lowercase() == name.to_lowercase() || c.id == name)
         .collect();
     match matches.as_slice() {
@@ -301,6 +324,7 @@ fn pick(snapshot: &StoreSnapshot, name: &str) -> DbResult<SavedConnection> {
             let names: Vec<&str> = snapshot
                 .connections
                 .iter()
+                .filter(|c| !c.agents_hidden)
                 .map(|c| c.name.as_str())
                 .collect();
             Err(DbError::msg(format!(
@@ -531,10 +555,12 @@ impl Server {
                     snapshot
                         .connections
                         .iter()
+                        .filter(|c| !c.agents_hidden)
                         .map(|c| {
                             json!({
                                 "name": c.name, "engine": c.engine.name(),
                                 "via_ssh": c.ssh.is_some(), "agents_can_write": c.agents_can_write,
+                                "tools": allowed_tools(c),
                             })
                         })
                         .collect(),
@@ -543,33 +569,33 @@ impl Server {
             "create_connection" => self.create_connection(arguments).await,
             "delete_connection" => self.delete_connection(arguments).await,
             "list_tables" => {
-                let (_, conn) = self.open(arguments, flight).await?;
+                let (_, conn) = self.open(arguments, name, flight).await?;
                 let relations = conn.session.relations().await?;
                 Ok(Value::Array(relations.iter().map(relation_json).collect()))
             }
             "describe_schema" => {
-                let (_, conn) = self.open(arguments, flight).await?;
+                let (_, conn) = self.open(arguments, name, flight).await?;
                 let schema = arguments.get("schema").and_then(Value::as_str);
                 Ok(Value::String(
                     schema_text(conn.session.as_ref(), schema).await?,
                 ))
             }
             "list_extensions" => {
-                let (_, conn) = self.open(arguments, flight).await?;
+                let (_, conn) = self.open(arguments, name, flight).await?;
                 extensions(conn.session.as_ref()).await
             }
             "install_extension" => {
-                let (saved, conn) = self.open(arguments, flight).await?;
+                let (saved, conn) = self.open(arguments, name, flight).await?;
                 let extension = text_of(arguments, "name")?;
                 let schema = arguments.get("schema").and_then(Value::as_str);
                 install(&saved, conn.session.as_ref(), &extension, schema).await
             }
             "describe_table" => {
-                let (_, conn) = self.open(arguments, flight).await?;
+                let (_, conn) = self.open(arguments, name, flight).await?;
                 describe(conn.session.as_ref(), &text_of(arguments, "table")?).await
             }
             "query" => {
-                let (_, conn) = self.open(arguments, flight).await?;
+                let (_, conn) = self.open(arguments, name, flight).await?;
                 let statement = text_of(arguments, "query")?;
                 let limit = arguments
                     .get("max_rows")
@@ -580,7 +606,7 @@ impl Server {
                 Ok(output(&execution, limit))
             }
             "test_changes" => {
-                let (saved, conn) = self.open(arguments, flight).await?;
+                let (saved, conn) = self.open(arguments, name, flight).await?;
                 let script = text_of(arguments, "statements")?;
                 require_write(
                     &saved,
@@ -599,7 +625,7 @@ impl Server {
                 }
             }
             "execute" => {
-                let (saved, conn) = self.open(arguments, flight).await?;
+                let (saved, conn) = self.open(arguments, name, flight).await?;
                 let script = text_of(arguments, "statements")?;
                 require_write(&saved, "Writing")?;
                 let atomic = arguments.get("atomic").and_then(Value::as_bool);
@@ -615,6 +641,7 @@ impl Server {
     async fn open(
         &self,
         arguments: &Map<String, Value>,
+        tool: &str,
         flight: &Flight,
     ) -> DbResult<(SavedConnection, Arc<Connection>)> {
         let name = text_of(arguments, "connection")?;
@@ -625,6 +652,15 @@ impl Server {
                 Ok((saved, url))
             })
             .await?;
+        if !saved.agents_may_use(tool) {
+            let allowed = allowed_tools(&saved);
+            return Err(DbError::msg(format!(
+                "The user turned off {tool} for \"{}\" in dbLens (Settings > Agents, or right-click the \
+                 connection > Agent Tools). Allowed here: {}.",
+                saved.name,
+                if allowed.is_empty() { "none".to_string() } else { allowed.join(", ") }
+            )));
+        }
         let url = url.ok_or_else(|| {
             DbError::msg(format!(
                 "dbLens can't read the URL of \"{}\". Open dbLens and edit the connection.",
@@ -1171,7 +1207,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "list_connections",
-            "description": "The database connections saved in dbLens: name, engine (PostgreSQL, MySQL, SQLite, Redis, MongoDB), whether it goes through SSH, and whether agents may write. URLs and passwords are never shown. Databases: all (PostgreSQL, MySQL/MariaDB, SQLite, Redis/Valkey, MongoDB).",
+            "description": "The database connections saved in dbLens: name, engine (PostgreSQL, MySQL, SQLite, Redis, MongoDB), whether it goes through SSH, whether agents may write, and the tools the user allows on it (other tools are refused there; connections the user hid are not listed). URLs and passwords are never shown. Databases: all (PostgreSQL, MySQL/MariaDB, SQLite, Redis/Valkey, MongoDB).",
             "inputSchema": {"type": "object", "properties": {}},
             "annotations": read,
         },

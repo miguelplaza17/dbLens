@@ -188,7 +188,9 @@ async fn sqlite_read_write_gates() {
     let list = client.call_ok("list_connections", json!({})).await;
     assert_eq!(
         list,
-        json!([{"name": "Lite", "engine": "SQLite", "via_ssh": false, "agents_can_write": false}])
+        json!([{"name": "Lite", "engine": "SQLite", "via_ssh": false, "agents_can_write": false,
+                "tools": ["list_tables", "describe_schema", "describe_table", "list_extensions", "query",
+                          "test_changes", "execute", "install_extension"]}])
     );
     assert!(
         !list.to_string().contains("agent.db"),
@@ -342,6 +344,39 @@ async fn sqlite_read_write_gates() {
         .call("list_tables", json!({"connection": "Extra"}))
         .await;
     assert!(error && text.contains("No connection"));
+
+    // Agent Tools: a tool turned off is refused there, the others still work.
+    store
+        .lock()
+        .unwrap()
+        .set_agents_access(&id, false, vec!["query".into()])
+        .unwrap();
+    let (error, text) = client
+        .call("query", json!({"connection": "Lite", "query": "select 1"}))
+        .await;
+    assert!(error && text.contains("turned off query"), "{text}");
+    client
+        .call_ok("list_tables", json!({"connection": "Lite"}))
+        .await;
+    let list = client.call_ok("list_connections", json!({})).await;
+    assert!(
+        !list[0]["tools"].to_string().contains("\"query\""),
+        "{list}"
+    );
+    // Hidden: not listed, and unknown to every tool.
+    store
+        .lock()
+        .unwrap()
+        .set_agents_access(&id, true, vec![])
+        .unwrap();
+    assert_eq!(
+        client.call_ok("list_connections", json!({})).await,
+        json!([])
+    );
+    let (error, text) = client
+        .call("list_tables", json!({"connection": "Lite"}))
+        .await;
+    assert!(error && text.contains("No connection"), "{text}");
     client.finish().await;
 }
 

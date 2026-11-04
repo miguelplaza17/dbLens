@@ -632,6 +632,19 @@ pub async fn set_agents_can_write(
         .await
 }
 
+/// Agent Tools on one connection: hidden from agents, and the MCP tools turned off.
+#[tauri::command]
+pub async fn set_agents_access(
+    state: State<'_, AppState>,
+    id: String,
+    hidden: bool,
+    blocked_tools: Vec<String>,
+) -> DbResult<SavedConnection> {
+    state
+        .with_store(move |store| store.set_agents_access(&id, hidden, blocked_tools))
+        .await
+}
+
 /// "Let agents add and remove connections" for the MCP server.
 #[tauri::command]
 pub async fn set_agents_manage_connections(

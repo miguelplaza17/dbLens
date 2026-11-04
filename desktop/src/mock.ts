@@ -788,6 +788,14 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     const { url: _u, ...rest } = c;
     return { ...rest };
   },
+  set_agents_access: (a) => {
+    const c = saved.find((x) => x.id === a.id);
+    if (!c) throw "No such connection.";
+    c.agentsHidden = !!a.hidden;
+    c.agentsBlockedTools = [...((a.blockedTools as string[]) ?? [])].sort();
+    const { url: _u, ...rest } = c;
+    return { ...rest };
+  },
   agent_clients: () => mockAgents(),
   set_agent_installed: (a) => {
     const c = mockAgentState.find((x) => x.id === a.id || x.id === a.client);

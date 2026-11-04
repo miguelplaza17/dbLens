@@ -289,6 +289,10 @@ export interface SavedConnection {
   ssh: SshConfig | null;
   /** "Let Agents Write": the MCP server may run changes here. */
   agentsCanWrite?: boolean;
+  /** Hidden from agents (Agent Tools). */
+  agentsHidden?: boolean;
+  /** MCP tools turned off here; empty is every tool. */
+  agentsBlockedTools?: string[];
 }
 
 export interface ConnectionFolder {
@@ -606,6 +610,9 @@ export const api = {
   renameConnection: (id: string, name: string) => invoke<SavedConnection>("rename_connection", { id, name }),
   /** "Let Agents Write" for the MCP server (src-tauri/src/mcp.rs). */
   setAgentsCanWrite: (id: string, allowed: boolean) => invoke<SavedConnection>("set_agents_can_write", { id, allowed }),
+  /** Agent Tools: hidden from agents, and the MCP tools turned off on the connection. */
+  setAgentsAccess: (id: string, hidden: boolean, blockedTools: string[]) =>
+    invoke<SavedConnection>("set_agents_access", { id, hidden, blockedTools }),
   setAgentsManageConnections: (allowed: boolean) => invoke<void>("set_agents_manage_connections", { allowed }),
   /** The apps dbLens can install its MCP server into, and where each stands. */
   agentClients: () => invoke<AgentStatus[]>("agent_clients"),

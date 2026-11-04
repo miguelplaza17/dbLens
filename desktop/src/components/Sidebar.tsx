@@ -9,7 +9,8 @@ import { useModel } from "../model";
 import { withKeys } from "../shortcuts";
 import { copyText } from "../format";
 import { beginConnectionDrag } from "../native/dragConnections";
-import { copyUrl, copyUrlWithPassword, openInTerminal } from "../history/connectionActions";
+import { copyUrl, copyUrlWithPassword, openAgentTools, openInTerminal } from "../history/connectionActions";
+import { accessSummary } from "../agentAccess";
 import { Icon, type IconName } from "./Icon";
 
 const relationIcon: Record<Relation["kind"], IconName> = {
@@ -57,6 +58,7 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
         icon: "terminal",
         action: () => void model.setAgentsCanWrite(c, !c.agentsCanWrite),
       },
+      { title: t("Agent Tools…"), detail: accessSummary(c), action: () => openAgentTools(model, c) },
       ...(active ? [{ title: t("Disconnect"), icon: "disconnect" as IconName, action: () => void model.disconnect() }] : []),
       { separator: true, title: "" },
       ...model.store.folders

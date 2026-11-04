@@ -27,6 +27,7 @@ import { UpdateNotice } from "./native/UpdateNotice";
 import { performSchema, schema } from "./schema/store";
 import { nav, performNav } from "./nav";
 import { performHistory } from "./history/actions";
+import { AgentAccessEditor } from "./agentAccess";
 
 export default function App() {
   const model = useModel();
@@ -218,6 +219,32 @@ function Splitter() {
   );
 }
 
+/** Agent Tools for one connection: seen or hidden, each MCP tool, and writing. */
+function AgentToolsSheet({ savedId }: { savedId: string }) {
+  const model = useModel();
+  const saved = model.store.connections.find((c) => c.id === savedId);
+  if (!saved) return null;
+  return (
+    <Sheet label={t("Agent Tools")} width={420} onClose={() => model.open(null)}>
+      <div className="sheet-body">
+        <h2 className="sheet-title">{t("Agent Tools for “%@”", saved.name)}</h2>
+        <section className="form-group">
+          <div className="form-card">
+            <AgentAccessEditor connection={saved} onChange={(access) => void model.setAgentsAccess(saved, access)} />
+          </div>
+          <p className="form-footer">{t("Hidden connections don't show up for agents. Tools that write also need Let Agents Write. Everything agents run shows in the SQL panel's History.")}</p>
+        </section>
+        <footer className="sheet-actions">
+          <span className="spacer" />
+          <button className="button prominent" autoFocus onClick={() => model.open(null)}>
+            {t("Done")}
+          </button>
+        </footer>
+      </div>
+    </Sheet>
+  );
+}
+
 function SheetView({ sheet }: { sheet: SheetState }) {
   const model = useModel();
   switch (sheet.kind) {
@@ -250,6 +277,8 @@ function SheetView({ sheet }: { sheet: SheetState }) {
           </div>
         </Sheet>
       );
+    case "agentTools":
+      return <AgentToolsSheet savedId={sheet.savedId} />;
     case "shortcuts":
       return (
         <Sheet label={t("Keyboard Shortcuts")} width={440} onClose={() => model.open(null)}>

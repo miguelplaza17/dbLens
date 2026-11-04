@@ -59,6 +59,20 @@ pub struct SavedConnection {
     /// "Let Agents Write": the MCP server (mcp.rs) may run changes here. Off by default.
     #[serde(default)]
     pub agents_can_write: bool,
+    /// Hidden from agents: list_connections leaves it out and no tool opens it.
+    #[serde(default)]
+    pub agents_hidden: bool,
+    /// MCP tools agents may not use here (`mcp::CONNECTION_TOOLS`). Empty: every
+    /// tool, so tools added later start allowed. Writing ones also need `agents_can_write`.
+    #[serde(default)]
+    pub agents_blocked_tools: Vec<String>,
+}
+
+impl SavedConnection {
+    /// Whether agents may run this MCP tool on the connection.
+    pub fn agents_may_use(&self, tool: &str) -> bool {
+        !self.agents_hidden && !self.agents_blocked_tools.iter().any(|t| t == tool)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -278,6 +292,8 @@ impl Store {
                     sort_index,
                     ssh,
                     agents_can_write: false,
+                    agents_hidden: false,
+                    agents_blocked_tools: Vec::new(),
                 };
                 self.meta.connections.push(c.clone());
                 c
@@ -318,6 +334,29 @@ impl Store {
             .find(|c| c.id == id)
             .ok_or_else(|| DbError::msg("No such connection."))?;
         c.agents_can_write = allowed;
+        let c = c.clone();
+        self.persist()?;
+        Ok(c)
+    }
+
+    /// Agent Tools: whether agents see the connection, and the tools turned off on it.
+    pub fn set_agents_access(
+        &mut self,
+        id: &str,
+        hidden: bool,
+        blocked_tools: Vec<String>,
+    ) -> DbResult<SavedConnection> {
+        let c = self
+            .meta
+            .connections
+            .iter_mut()
+            .find(|c| c.id == id)
+            .ok_or_else(|| DbError::msg("No such connection."))?;
+        let mut blocked = blocked_tools;
+        blocked.sort();
+        blocked.dedup();
+        c.agents_hidden = hidden;
+        c.agents_blocked_tools = blocked;
         let c = c.clone();
         self.persist()?;
         Ok(c)

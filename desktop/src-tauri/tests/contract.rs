@@ -363,6 +363,8 @@ fn connections() {
             sort_index: 0,
             ssh: Some(ssh),
             agents_can_write: false,
+            agents_hidden: false,
+            agents_blocked_tools: vec![],
         }],
         folders: vec![ConnectionFolder {
             id: "f".into(),
@@ -385,7 +387,9 @@ fn connections() {
             "folderId",
             "sortIndex",
             "ssh",
-            "agentsCanWrite"
+            "agentsCanWrite",
+            "agentsHidden",
+            "agentsBlockedTools"
         ])
     );
     assert_eq!(

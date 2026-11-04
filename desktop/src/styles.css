@@ -369,6 +369,10 @@ select option {
 .switch:checked::after {
   transform: translateX(14px);
 }
+/* Off limits for now (an Agent Tools tool while writing is off): still shows its setting. */
+.switch:disabled {
+  opacity: 0.4;
+}
 
 .spinner {
   width: 20px;

@@ -4,12 +4,13 @@
 // Settings live in Rust (src-tauri/src/settings.rs); every change reaches all
 // windows at once.
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, engineNames, inTauri, type AgentClientId, type AgentStatus, type AgentTool, type Engine, type SavedConnection, type StoreSnapshot } from "../api";
 import { EngineIcon, engineDefaultColors, type EngineIconPref } from "../engineIcons";
 import { copyText } from "../format";
 import { t } from "../i18n";
+import { AgentAccessEditor, accessOf, accessSummary, type AgentAccess } from "../agentAccess";
 import { Empty } from "../components/Empty";
 import { Icon, type IconName } from "../components/Icon";
 import { ACCENTS } from "./accents";
@@ -433,10 +434,17 @@ function AgentsTab({ info, copy, say }: { info: SettingsInfo | null; copy: (text
       say(String(e));
     });
   };
-  const changeWrite = (c: SavedConnection, on: boolean) => {
-    setConnections((list) => list && list.map((x) => (x.id === c.id ? { ...x, agentsCanWrite: on } : x)));
-    void api.setAgentsCanWrite(c.id, on).catch((e) => {
-      setConnections((list) => list && list.map((x) => (x.id === c.id ? { ...x, agentsCanWrite: !on } : x)));
+  const [choosing, setChoosing] = useState<string | null>(null);
+  const changeAccess = (c: SavedConnection, access: AgentAccess) => {
+    const put = (x: SavedConnection, a: AgentAccess) => ({ ...x, agentsHidden: a.hidden, agentsBlockedTools: a.blockedTools, agentsCanWrite: a.canWrite });
+    const before = accessOf(c);
+    setConnections((list) => list && list.map((x) => (x.id === c.id ? put(x, access) : x)));
+    const saving = async () => {
+      if (before.canWrite !== access.canWrite) await api.setAgentsCanWrite(c.id, access.canWrite);
+      await api.setAgentsAccess(c.id, access.hidden, access.blockedTools);
+    };
+    void saving().catch((e) => {
+      setConnections((list) => list && list.map((x) => (x.id === c.id ? put(x, before) : x)));
       say(String(e));
     });
   };
@@ -528,12 +536,29 @@ function AgentsTab({ info, copy, say }: { info: SettingsInfo | null; copy: (text
         />
       </Group>
       <Group
-        title={t("Let Agents Write")}
-        footer={t("Off: agents only read. On: they may change data and install extensions on that connection. Everything they run shows in the SQL panel's History.")}
+        title={t("Access by Connection")}
+        footer={t("Hidden connections don't show up for agents. Tools that write also need Let Agents Write. Everything agents run shows in the SQL panel's History.")}
       >
         {connections && connections.length === 0 && <p className="settings-intro">{t("No saved connections yet.")}</p>}
         {(connections ?? []).map((c) => (
-          <Toggle key={c.id} id={`agents-write-${c.id}`} label={c.name} checked={!!c.agentsCanWrite} onChange={(on) => changeWrite(c, on)} />
+          <Fragment key={c.id}>
+            <Row label={c.name} detail={accessSummary(c)}>
+              <button
+                type="button"
+                className="button"
+                aria-expanded={choosing === c.id}
+                title={t("Choose which tools agents may use on this connection")}
+                onClick={() => setChoosing(choosing === c.id ? null : c.id)}
+              >
+                {choosing === c.id ? t("Done") : t("Choose…")}
+              </button>
+            </Row>
+            {choosing === c.id && (
+              <div className="agent-access">
+                <AgentAccessEditor connection={c} onChange={(access) => changeAccess(c, access)} />
+              </div>
+            )}
+          </Fragment>
         ))}
       </Group>
     </>

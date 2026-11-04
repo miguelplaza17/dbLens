@@ -254,3 +254,9 @@ html.settings-window #root {
 .settings-error {
   color: var(--danger);
 }
+
+/* Agent Tools under a connection's row in Settings > Agents: indented, like a disclosure. */
+.agent-access {
+  border-top: 1px solid var(--separator);
+  padding-left: var(--space-lg);
+}

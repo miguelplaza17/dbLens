@@ -125,7 +125,6 @@
   "Not imported: %@": "Não importadas: %@",
   "Not installed (command not found).": "Não instalado (comando não encontrado).",
   "Off": "Desligado",
-  "Off: agents only read. On: they may change data and install extensions on that connection. Everything they run shows in the SQL panel's History.": "Desligado: agentes só leem. Ligado: podem alterar dados e instalar extensões naquela conexão. Tudo o que eles rodam aparece no Histórico do painel SQL.",
   "Old path": "Caminho antigo",
   "Only the changed columns are sent.": "Só as colunas alteradas são enviadas.",
   "Open SQLite File…": "Abrir Arquivo SQLite…",
@@ -350,5 +349,18 @@
   "The password will be on the clipboard in plain text. dbLens clears it after a minute.": "A senha ficará na área de transferência em texto puro. O dbLens a apaga depois de um minuto.",
   "Copied. Cleared from the clipboard after a minute.": "Copiado. Some da área de transferência em um minuto.",
   "Agents can now change %@": "Agentes agora podem alterar %@",
-  "Agents can only read %@ now": "Agentes agora só podem ler %@"
+  "Agents can only read %@ now": "Agentes agora só podem ler %@",
+  "Agent Tools…": "Ferramentas para Agentes…",
+  "Agent Tools": "Ferramentas para Agentes",
+  "Agent Tools for “%@”": "Ferramentas para Agentes em “%@”",
+  "Visible to Agents": "Visível para Agentes",
+  "Hidden": "Oculta",
+  "No tools": "Nenhuma ferramenta",
+  "%@ of %@ tools": "%@ de %@ ferramentas",
+  "Reads and writes": "Lê e escreve",
+  "Read only": "Só leitura",
+  "Access by Connection": "Acesso por Conexão",
+  "Choose…": "Escolher…",
+  "Choose which tools agents may use on this connection": "Escolha quais ferramentas os agentes podem usar nesta conexão",
+  "Hidden connections don't show up for agents. Tools that write also need Let Agents Write. Everything agents run shows in the SQL panel's History.": "Conexões ocultas não aparecem para os agentes. Ferramentas que escrevem também precisam de Permitir que Agentes Escrevam. Tudo o que os agentes rodam aparece no Histórico do painel SQL."
 }

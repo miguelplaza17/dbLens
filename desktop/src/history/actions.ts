@@ -1,10 +1,10 @@
 // The menu and key actions of this feature: History, Open in Terminal, Copy URL,
-// Let Agents Write.
+// Let Agents Write, Agent Tools.
 // Back and Forward are in ../nav.ts.
 
 import type { AppModel } from "../model";
 import type { Action } from "../shortcuts";
-import { copyUrl, copyUrlWithPassword, openInTerminal, toggleAgentsWrite } from "./connectionActions";
+import { copyUrl, copyUrlWithPassword, openAgentTools, openInTerminal, toggleAgentsWrite } from "./connectionActions";
 import { OPEN_HISTORY_EVENT } from "./store";
 
 /** Returns true when it took the action. */
@@ -27,6 +27,9 @@ export function performHistory(model: AppModel, action: Action): boolean {
       return true;
     case "toggleAgentsWrite":
       void toggleAgentsWrite(model);
+      return true;
+    case "agentTools":
+      openAgentTools(model);
       return true;
     default:
       return false;

@@ -47,6 +47,7 @@ export type Action =
   | "copyUrl"
   | "copyUrlWithPassword"
   | "toggleAgentsWrite"
+  | "agentTools"
   | "goBack"
   | "goForward";
 

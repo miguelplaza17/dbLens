@@ -160,6 +160,7 @@ pub fn layout(os: Os) -> Vec<Menus> {
         A("copyUrl"),
         A("copyUrlWithPassword"),
         A("toggleAgentsWrite"),
+        A("agentTools"),
         S,
         A("disconnect"),
         S,
@@ -304,9 +305,12 @@ pub fn enabled(action: &str, s: &MenuState) -> bool {
         "nextPage" => s.can_forward,
         "goBack" => s.nav_back,
         "goForward" => s.nav_forward,
-        "history" | "openTerminal" | "copyUrl" | "copyUrlWithPassword" | "toggleAgentsWrite" => {
-            s.connected
-        }
+        "history"
+        | "openTerminal"
+        | "copyUrl"
+        | "copyUrlWithPassword"
+        | "toggleAgentsWrite"
+        | "agentTools" => s.connected,
         "freezeFirstColumn" => s.has_result,
         "saveChanges" | "revertChanges" => s.can_edit,
         "newRow" => s.can_insert,

@@ -92,6 +92,15 @@ async function clearIfUnchanged(secret: string) {
   }
 }
 
+/** The Agent Tools sheet for a connection (the open one from the menu). */
+export function openAgentTools(model: AppModel, saved: SavedConnection | undefined = openSaved(model)) {
+  if (!saved) {
+    model.showToast(t("Save this connection first."));
+    return;
+  }
+  model.open({ kind: "agentTools", savedId: saved.id });
+}
+
 /** "Let Agents Write" on the open connection (the MCP server may run changes there), or off again. */
 export async function toggleAgentsWrite(model: AppModel, saved: SavedConnection | undefined = openSaved(model)) {
   if (!saved) {

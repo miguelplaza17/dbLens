@@ -37,6 +37,7 @@
   { "action": "copyUrl", "keys": "Mod+Alt+C", "title": "Copy URL Without Password", "inFields": false },
   { "action": "copyUrlWithPassword", "keys": "Mod+Alt+Shift+C", "title": "Copy URL with Password…", "inFields": false },
   { "action": "toggleAgentsWrite", "keys": "Mod+Alt+A", "title": "Let Agents Write", "inFields": false },
+  { "action": "agentTools", "keys": "Mod+Alt+Shift+A", "title": "Agent Tools…", "inFields": false },
   { "action": "goBack", "keys": "Mod+[", "title": "Back" },
   { "action": "goForward", "keys": "Mod+]", "title": "Forward" },
   { "action": "zoomIn", "keys": "Mod+=", "title": "Zoom In" },

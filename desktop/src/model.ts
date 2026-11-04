@@ -21,6 +21,7 @@ import {
   type StoreSnapshot,
 } from "./api";
 import type { MenuItem, MenuState } from "./components/Sheet";
+import type { AgentAccess } from "./agentAccess";
 import { TableSource } from "./grid/blocks";
 import { markStart } from "./grid/perf";
 import { duration, executionSummary } from "./format";
@@ -43,6 +44,7 @@ export type Sheet =
   | { kind: "connection"; editing: SavedConnection | null; url?: string }
   | { kind: "row"; row: number | null }
   | { kind: "shortcuts" }
+  | { kind: "agentTools"; savedId: string }
   | {
       kind: "confirm";
       title: string;
@@ -342,6 +344,15 @@ export class AppModel {
 
   async setAgentsCanWrite(saved: SavedConnection, allowed: boolean) {
     await this.attempt(() => api.setAgentsCanWrite(saved.id, allowed));
+    await this.loadStore();
+  }
+
+  /** Agent Tools: everything in one go, writing included. */
+  async setAgentsAccess(saved: SavedConnection, access: AgentAccess) {
+    await this.attempt(async () => {
+      if (!!saved.agentsCanWrite !== access.canWrite) await api.setAgentsCanWrite(saved.id, access.canWrite);
+      return api.setAgentsAccess(saved.id, access.hidden, access.blockedTools);
+    });
     await this.loadStore();
   }
 

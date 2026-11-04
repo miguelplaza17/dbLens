@@ -125,7 +125,6 @@
   "Not imported: %@": "Not imported: %@",
   "Not installed (command not found).": "Not installed (command not found).",
   "Off": "Off",
-  "Off: agents only read. On: they may change data and install extensions on that connection. Everything they run shows in the SQL panel's History.": "Off: agents only read. On: they may change data and install extensions on that connection. Everything they run shows in the SQL panel's History.",
   "Old path": "Old path",
   "Only the changed columns are sent.": "Only the changed columns are sent.",
   "Open SQLite File…": "Open SQLite File…",
@@ -350,5 +349,18 @@
   "The password will be on the clipboard in plain text. dbLens clears it after a minute.": "The password will be on the clipboard in plain text. dbLens clears it after a minute.",
   "Copied. Cleared from the clipboard after a minute.": "Copied. Cleared from the clipboard after a minute.",
   "Agents can now change %@": "Agents can now change %@",
-  "Agents can only read %@ now": "Agents can only read %@ now"
+  "Agents can only read %@ now": "Agents can only read %@ now",
+  "Agent Tools…": "Agent Tools…",
+  "Agent Tools": "Agent Tools",
+  "Agent Tools for “%@”": "Agent Tools for “%@”",
+  "Visible to Agents": "Visible to Agents",
+  "Hidden": "Hidden",
+  "No tools": "No tools",
+  "%@ of %@ tools": "%@ of %@ tools",
+  "Reads and writes": "Reads and writes",
+  "Read only": "Read only",
+  "Access by Connection": "Access by Connection",
+  "Choose…": "Choose…",
+  "Choose which tools agents may use on this connection": "Choose which tools agents may use on this connection",
+  "Hidden connections don't show up for agents. Tools that write also need Let Agents Write. Everything agents run shows in the SQL panel's History.": "Hidden connections don't show up for agents. Tools that write also need Let Agents Write. Everything agents run shows in the SQL panel's History."
 }
