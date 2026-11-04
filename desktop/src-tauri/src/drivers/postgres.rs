@@ -401,6 +401,23 @@ fn format_version(number: u64) -> String {
 
 // MARK: - Errors
 
+/// Whether the connection is gone, by SQLSTATE (the server ended the backend,
+/// class 08) or a closed socket, never by text: the server may speak any language.
+fn lost(error: &tokio_postgres::Error) -> bool {
+    if error.is_closed() {
+        return true;
+    }
+    error.code().is_some_and(|code| {
+        code.code().starts_with("08")
+            || [
+                SqlState::ADMIN_SHUTDOWN,
+                SqlState::CRASH_SHUTDOWN,
+                SqlState::CANNOT_CONNECT_NOW,
+            ]
+            .contains(code)
+    })
+}
+
 /// The server's own text the way libpq prints it ("ERROR:  …", then DETAIL and
 /// HINT), or the driver's message with its causes.
 fn describe(error: &tokio_postgres::Error) -> String {
@@ -707,6 +724,8 @@ impl PostgresSession {
     fn fail(&self, error: tokio_postgres::Error) -> DbError {
         if error.code() == Some(&SqlState::QUERY_CANCELED) && self.activity.current_cancelled() {
             DbError::Cancelled
+        } else if lost(&error) {
+            DbError::ConnectionLost(describe(&error))
         } else {
             DbError::Message(describe(&error))
         }

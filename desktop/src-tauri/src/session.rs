@@ -97,6 +97,10 @@ pub enum DbError {
     /// The server's or driver's message, shown as is.
     #[error("{0}")]
     Message(String),
+    /// The connection itself is gone (the server ended it, the socket
+    /// closed), known by the driver's error code, so in any server language.
+    #[error("{0}")]
+    ConnectionLost(String),
     /// A script can't run all-or-nothing on this database (MySQL DDL, MongoDB,
     /// Redis); the caller may run it plainly instead.
     #[error("{0}")]

@@ -101,6 +101,9 @@ fn same(a: &Arc<dyn DatabaseSession>, b: &Arc<dyn DatabaseSession>) -> bool {
 /// Whether an error says the connection itself is gone (not the statement):
 /// the drivers' texts for a closed socket or a backend the server ended.
 pub fn connection_lost(error: &DbError) -> bool {
+    if matches!(error, DbError::ConnectionLost(_)) {
+        return true;
+    }
     let DbError::Message(text) = error else {
         return false;
     };
