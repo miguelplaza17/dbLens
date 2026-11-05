@@ -1492,7 +1492,7 @@ impl Inner {
             parts[at] = cursor.into_bytes();
         }
         let command = format!("{name} {}{}", sink.seen(), if cut { "+" } else { "" });
-        sink.end(&command);
+        sink.end_cut(&command, cut);
         Ok(())
     }
 

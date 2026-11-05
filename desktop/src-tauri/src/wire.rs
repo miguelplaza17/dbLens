@@ -569,9 +569,15 @@ impl StreamSink {
 
     /// The current result set is complete: what the statement did and how many rows it had.
     pub fn end(&mut self, command: &str) {
+        self.end_cut(command, false);
+    }
+
+    /// `end` for a result the driver stopped reading at the cap (a SCAN): it is
+    /// cut even when the rows seen fill the cap exactly.
+    pub fn end_cut(&mut self, command: &str, cut: bool) {
         self.flush();
         let total = self.seen;
-        let truncated = total > self.kept as u64;
+        let truncated = cut || total > self.kept as u64;
         self.finish(command, total, truncated);
     }
 
