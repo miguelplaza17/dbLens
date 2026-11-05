@@ -5,16 +5,24 @@
 <h1 align="center">dbLens</h1>
 
 <p align="center">
-  A fast, minimal database client for the Mac, Windows and Linux.<br>
-  Paste a URL, click a table, see the rows. That's it.
+  A light, simple, AI-ready database client for the Mac, Windows and Linux.<br>
+  Paste a URL, click a table, see the rows. Or let your agent do it.
 </p>
 
 <p align="center">
   <img src="docs/images/table.png" alt="dbLens showing a table with the SQL panel open">
 </p>
 
-Most database tools are slow, heavy, and full of things you never use. dbLens does the
-few things you do every day, and does them instantly.
+Most database tools are slow, heavy, and full of things you never use. dbLens stands on
+three things:
+
+- **Light.** A native app of about 12 MB that opens in a blink and stays fast on big tables.
+- **Simple.** It does the few things you do every day, with no trees, wizards, or menus
+  to dig through.
+- **AI-ready.** Built-in MCP server: Claude Code, Claude Desktop, Cursor, and other agents
+  explore schemas, query, and manage your databases through the connections saved in
+  dbLens, without ever seeing a URL or password. Read-only by default; writing is a switch
+  per connection. [How it works](#mcp-server-for-agents).
 
 **Databases:** PostgreSQL, MySQL and MariaDB, SQLite, Redis (and Valkey), and MongoDB. Paste the
 URL, and dbLens tells which database it is.
