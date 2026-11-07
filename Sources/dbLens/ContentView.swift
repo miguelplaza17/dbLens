@@ -88,17 +88,22 @@ struct Sidebar: View {
         }
     }
 
-    private enum Row: Hashable { case connection(UUID), relation(String) }
+    private enum Row: Hashable { case connection(UUID), relation(String), folder(UUID) }
 
+    /// A folder can be selected, like in Finder: the List only drags rows it can
+    /// select, and File > New Subfolder works on the selected folder.
     private var selection: Binding<Row?> {
         Binding {
-            model.shown == .table ? model.selectedRelation.map(Row.relation) : nil
+            if let id = model.selectedFolderID, model.folders.contains(where: { $0.id == id }) { return .folder(id) }
+            return model.shown == .table ? model.selectedRelation.map(Row.relation) : nil
         } set: { row in
+            if case .folder(let id) = row { model.selectedFolderID = id; return }
+            model.selectedFolderID = nil
             switch row {
             case .connection(let id):
                 if let connection = connections.first(where: { $0.uuid == id }) { Task { await model.connect(connection) } }
             case .relation(let id): Task { await model.showTable(id) }
-            case nil: break
+            case .folder, nil: break
             }
         }
     }
@@ -133,12 +138,12 @@ struct Sidebar: View {
     var body: some View {
         List(selection: selection) {
             Section {
-                // Folders first, like Finder; then the connections outside any folder.
+                // The connections outside any folder, then the folders.
                 // One flat run of rows, each with its own id and indent: nested
                 // DisclosureGroups in a List could show rows under the wrong folder.
                 ForEach(connectionTree) { item in
                     switch item.kind {
-                    case .folder(let folder): folderRow(folder, depth: item.depth)
+                    case .folder(let folder): folderRow(folder, depth: item.depth).tag(Row.folder(folder.id))
                     case .connection(let connection): connectionRow(connection, depth: item.depth)
                     case .slot: dropSlot.padding(.leading, CGFloat(item.depth) * Space.lg)
                     }
@@ -150,7 +155,7 @@ struct Sidebar: View {
                         .foregroundStyle(dropTarget == .top ? Palette.accentText : .secondary)
                     Spacer(minLength: 0)
                     Button("New Folder", systemImage: "folder.badge.plus") { newFolder() }
-                        .help("New Folder")
+                        .help("New Folder (Option-Command-N)")
                     Button("New Connection…", systemImage: "plus") { model.showingNewConnection = true }
                         .help("New Connection (Command-N)")
                 }
@@ -192,6 +197,10 @@ struct Sidebar: View {
             if !focused, editingFolder != nil { commitFolderName() }
         }
         .onAppear(perform: loadFolded)
+        // File > New Folder.
+        .onChange(of: model.newFolderRequests) { newFolder() }
+        // File > New Subfolder, in the selected folder.
+        .onChange(of: model.newSubfolderRequests) { if let id = model.selectedFolderID { newFolder(in: id) } }
         .onChange(of: model.activeID) { loadFolded() }
         .confirmationDialog("Delete the key “\(deletingKey?.name ?? "")”?", isPresented: .init(
             get: { deletingKey != nil }, set: { if !$0 { deletingKey = nil } }
@@ -232,29 +241,27 @@ struct Sidebar: View {
         let depth: Int
     }
 
-    /// Folders first, each followed (when open) by its subfolders and then its
-    /// connections, a level in; the connections outside any folder last.
+    /// The connections outside any folder, then the folders, each followed
+    /// (when open) by its own connections and then its subfolders, a level in.
     private var connectionTree: [TreeItem] {
         var items: [TreeItem] = []
         var seen: Set<UUID> = []
+        // At every level the connections come first, then the subfolders: a
+        // connection after an open folder looked like it was inside it.
         func add(_ parent: UUID?, depth: Int) {
+            for connection in AppModel.ordered(connections, in: parent?.uuidString ?? "") {
+                items.append(TreeItem(id: "connection-\(connection.uuid)", kind: .connection(connection), depth: depth))
+            }
+            // Where a connection dropped on the folder lands: last among its connections.
+            if let parent, dropTarget == .folder(parent) {
+                items.append(TreeItem(id: "slot-\(parent)", kind: .slot, depth: depth))
+            }
             for folder in model.subfolders(of: parent) where seen.insert(folder.id).inserted {
                 items.append(TreeItem(id: "folder-\(folder.id)", kind: .folder(folder), depth: depth))
-                guard folder.expanded else { continue }
-                add(folder.id, depth: depth + 1)
-                for connection in AppModel.ordered(connections, in: folder.id.uuidString) {
-                    items.append(TreeItem(id: "connection-\(connection.uuid)", kind: .connection(connection), depth: depth + 1))
-                }
-                // Where a connection dropped on the folder lands: last inside it.
-                if dropTarget == .folder(folder.id) {
-                    items.append(TreeItem(id: "slot-\(folder.id)", kind: .slot, depth: depth + 1))
-                }
+                if folder.expanded { add(folder.id, depth: depth + 1) }
             }
         }
         add(nil, depth: 0)
-        for connection in AppModel.ordered(connections, in: "") {
-            items.append(TreeItem(id: "connection-\(connection.uuid)", kind: .connection(connection), depth: 0))
-        }
         return items
     }
 
@@ -299,9 +306,11 @@ struct Sidebar: View {
             guard editingFolder != folder.id else { return }
             withAnimation(.snappy) { model.setFolderExpanded(folder.id, !folder.expanded) }
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityValue(folder.expanded ? Text("Expanded") : Text("Collapsed"))
+        // Not one combined element: that turned the name field into a button,
+        // so a new folder's name couldn't be typed.
+        .accessibilityAction(named: folder.expanded ? Text("Collapse") : Text("Expand")) {
+            model.setFolderExpanded(folder.id, !folder.expanded)
+        }
         // Dragged onto another folder's top edge, a folder goes in front of it
         // (the same level); onto the rest of it, it becomes a subfolder there.
         .padding(.top, before ? Space.xxl + Space.xs : 0)

@@ -46,6 +46,11 @@ struct DBLensApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("New Connection…") { model.showingNewConnection = true }
                     .keyboardShortcut("n")
+                Button("New Folder") { model.newFolderRequests += 1 }
+                    .keyboardShortcut("n", modifiers: [.command, .option])
+                Button("New Subfolder") { model.newSubfolderRequests += 1 }
+                    .keyboardShortcut("n", modifiers: [.command, .option, .shift])
+                    .disabled(model.selectedFolderID.map { id in !model.folders.contains { $0.id == id } } ?? true)
             }
             CommandGroup(after: .sidebar) {
                 Divider()

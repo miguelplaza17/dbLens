@@ -463,6 +463,7 @@
   "Reads and writes": "Lê e escreve",
   "Its subfolders and connections move up one level; none is deleted.": "As subpastas e conexões dela sobem um nível; nada é apagado.",
   "Top Level": "Nível Superior",
-  "Expanded": "Aberta",
-  "Collapsed": "Fechada"
+  "New Folder (Option-Command-N)": "Nova Pasta (Option-Command-N)",
+  "Collapse": "Fechar",
+  "Expand": "Abrir"
 }
