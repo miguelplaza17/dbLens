@@ -462,5 +462,7 @@
   "Read only": "Só leitura",
   "Reads and writes": "Lê e escreve",
   "Its subfolders and connections move up one level; none is deleted.": "As subpastas e conexões dela sobem um nível; nada é apagado.",
-  "Top Level": "Nível Superior"
+  "Top Level": "Nível Superior",
+  "Expanded": "Aberta",
+  "Collapsed": "Fechada"
 }

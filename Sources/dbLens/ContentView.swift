@@ -134,9 +134,14 @@ struct Sidebar: View {
         List(selection: selection) {
             Section {
                 // Folders first, like Finder; then the connections outside any folder.
-                folderTree(in: nil)
-                ForEach(AppModel.ordered(connections, in: "")) { connection in
-                    connectionRow(connection)
+                // One flat run of rows, each with its own id and indent: nested
+                // DisclosureGroups in a List could show rows under the wrong folder.
+                ForEach(connectionTree) { item in
+                    switch item.kind {
+                    case .folder(let folder): folderRow(folder, depth: item.depth)
+                    case .connection(let connection): connectionRow(connection, depth: item.depth)
+                    case .slot: dropSlot.padding(.leading, CGFloat(item.depth) * Space.lg)
+                    }
                 }
             } header: {
                 // Drop here to take a connection out of its folder.
@@ -219,26 +224,51 @@ struct Sidebar: View {
         }
     }
 
-    /// The folders inside `parent` (nil is the top level), each with its own
-    /// subfolders first and then its connections. Type-erased, since it nests itself.
-    private func folderTree(in parent: UUID?) -> AnyView {
-        AnyView(ForEach(model.subfolders(of: parent)) { folder in
-            folderGroup(folder)
-        })
+    /// A row of the Connections list: a folder, a connection, or the slot a drop would fill.
+    private struct TreeItem: Identifiable {
+        enum Kind { case folder(ConnectionFolder), connection(SavedConnection), slot }
+        let id: String
+        let kind: Kind
+        let depth: Int
     }
 
-    private func folderGroup(_ folder: ConnectionFolder) -> some View {
-        DisclosureGroup(isExpanded: Binding(get: { folder.expanded },
-                                            set: { model.setFolderExpanded(folder.id, $0) })) {
-            folderTree(in: folder.id)
-            ForEach(AppModel.ordered(connections, in: folder.id.uuidString)) { connection in
-                connectionRow(connection)
+    /// Folders first, each followed (when open) by its subfolders and then its
+    /// connections, a level in; the connections outside any folder last.
+    private var connectionTree: [TreeItem] {
+        var items: [TreeItem] = []
+        var seen: Set<UUID> = []
+        func add(_ parent: UUID?, depth: Int) {
+            for folder in model.subfolders(of: parent) where seen.insert(folder.id).inserted {
+                items.append(TreeItem(id: "folder-\(folder.id)", kind: .folder(folder), depth: depth))
+                guard folder.expanded else { continue }
+                add(folder.id, depth: depth + 1)
+                for connection in AppModel.ordered(connections, in: folder.id.uuidString) {
+                    items.append(TreeItem(id: "connection-\(connection.uuid)", kind: .connection(connection), depth: depth + 1))
+                }
+                // Where a connection dropped on the folder lands: last inside it.
+                if dropTarget == .folder(folder.id) {
+                    items.append(TreeItem(id: "slot-\(folder.id)", kind: .slot, depth: depth + 1))
+                }
             }
-            // Where a connection dropped on the folder lands: last inside it.
-            if dropTarget == .folder(folder.id) { dropSlot }
-        } label: {
-            let lit = dropTarget == .folder(folder.id)
-            let before = dropTarget == .beforeFolder(folder.id)
+        }
+        add(nil, depth: 0)
+        for connection in AppModel.ordered(connections, in: "") {
+            items.append(TreeItem(id: "connection-\(connection.uuid)", kind: .connection(connection), depth: 0))
+        }
+        return items
+    }
+
+    private func folderRow(_ folder: ConnectionFolder, depth: Int) -> some View {
+        let lit = dropTarget == .folder(folder.id)
+        let before = dropTarget == .beforeFolder(folder.id)
+        return HStack(spacing: Space.xs) {
+            // The disclosure arrow, like a sidebar outline's.
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(lit ? Palette.onAccent : Color.secondary)
+                .rotationEffect(.degrees(folder.expanded ? 90 : 0))
+                .frame(width: Space.md)
+                .accessibilityHidden(true)
             HStack(spacing: Space.sm) {
                 Image(systemName: lit ? "folder.fill" : "folder")
                 if editingFolder == folder.id {
@@ -258,48 +288,52 @@ struct Sidebar: View {
                 }
             }
             .foregroundStyle(lit ? Palette.onAccent : Color.primary)
-            .padding(.horizontal, lit ? Space.sm : 0)
-            .frame(maxWidth: .infinity, minHeight: Space.xxl, alignment: .leading)
-            .background(Palette.accent.opacity(lit ? 1 : 0), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop highlight
-            .contentShape(Rectangle())
-            // A click on the folder opens or closes it, like its arrow.
-            .onTapGesture {
-                guard editingFolder != folder.id else { return }
-                withAnimation(.snappy) { model.setFolderExpanded(folder.id, !folder.expanded) }
+        }
+        .padding(.horizontal, lit ? Space.xs : 0)
+        .frame(maxWidth: .infinity, minHeight: Space.xxl, alignment: .leading)
+        .background(Palette.accent.opacity(lit ? 1 : 0), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop highlight
+        .contentShape(Rectangle())
+        .padding(.leading, CGFloat(depth) * Space.lg)
+        // A click on the folder or its arrow opens or closes it.
+        .onTapGesture {
+            guard editingFolder != folder.id else { return }
+            withAnimation(.snappy) { model.setFolderExpanded(folder.id, !folder.expanded) }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityValue(folder.expanded ? Text("Expanded") : Text("Collapsed"))
+        // Dragged onto another folder's top edge, a folder goes in front of it
+        // (the same level); onto the rest of it, it becomes a subfolder there.
+        .padding(.top, before ? Space.xxl + Space.xs : 0)
+        .overlay(alignment: .top) {
+            if before {
+                dropSlot.transition(.opacity)
             }
-            // Dragged onto another folder's top edge, a folder goes in front of it
-            // (the same level); onto the rest of it, it becomes a subfolder there.
-            .padding(.top, before ? Space.xxl + Space.xs : 0)
-            .overlay(alignment: .top) {
-                if before {
-                    dropSlot.transition(.opacity)
-                }
+        }
+        .onDrag {
+            draggingFolder = folder.id
+            return NSItemProvider(object: (Self.folderPrefix + folder.id.uuidString) as NSString)
+        } preview: {
+            FolderDragCard(name: folder.name)
+        }
+        .onDrop(of: [.utf8PlainText, .plainText], delegate: FolderDropDelegate(
+            folder: folder.id,
+            reorders: draggingFolder != nil && draggingFolder != folder.id,
+            target: $dropTarget
+        ) { item, inFront in
+            if inFront {
+                drop([item], beforeFolder: folder)
+            } else {
+                drop([item], before: nil, into: folder.id.uuidString)
             }
-            .onDrag {
-                draggingFolder = folder.id
-                return NSItemProvider(object: (Self.folderPrefix + folder.id.uuidString) as NSString)
-            } preview: {
-                FolderDragCard(name: folder.name)
-            }
-            .onDrop(of: [.utf8PlainText, .plainText], delegate: FolderDropDelegate(
-                folder: folder.id,
-                reorders: draggingFolder != nil && draggingFolder != folder.id,
-                target: $dropTarget
-            ) { item, inFront in
-                if inFront {
-                    drop([item], beforeFolder: folder)
-                } else {
-                    drop([item], before: nil, into: folder.id.uuidString)
-                }
-            })
-            .contextMenu { folderMenu(folder) }
-            // Spring-loaded, like Finder: a closed folder opens after a moment under a drag.
-            .task(id: lit) {
-                guard lit, !folder.expanded else { return }
-                try? await Task.sleep(for: .milliseconds(500))
-                if !Task.isCancelled, dropTarget == .folder(folder.id) {
-                    withAnimation(.snappy) { model.setFolderExpanded(folder.id, true) }
-                }
+        })
+        .contextMenu { folderMenu(folder) }
+        // Spring-loaded, like Finder: a closed folder opens after a moment under a drag.
+        .task(id: lit) {
+            guard lit, !folder.expanded else { return }
+            try? await Task.sleep(for: .milliseconds(500))
+            if !Task.isCancelled, dropTarget == .folder(folder.id) {
+                withAnimation(.snappy) { model.setFolderExpanded(folder.id, true) }
             }
         }
     }
@@ -372,9 +406,10 @@ struct Sidebar: View {
 
     /// While a connection is dragged over this row, the row steps down and leaves
     /// an outlined slot above it: where the connection will land.
-    private func connectionRow(_ connection: SavedConnection) -> some View {
+    private func connectionRow(_ connection: SavedConnection, depth: Int) -> some View {
         let open = dropTarget == .row(connection.uuid)
         return ConnectionRow(connection: connection)
+            .padding(.leading, CGFloat(depth) * Space.lg)
             .padding(.top, open ? Space.xxl + Space.xs : 0)
             .overlay(alignment: .top) {
                 if open {
