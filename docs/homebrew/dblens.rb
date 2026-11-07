@@ -3,7 +3,7 @@
 #   brew install --cask miguelplaza17/tap/dblens
 cask "dblens" do
   version "1.0.7"
-  sha256 "95fcb74153e7bcb6ef1f9459431c7ae942a4ad58bcb1ff73b95a9218ba5ac6d2"
+  sha256 "06ddd892f688ba8820cb2f67bbbf3c94243f9eff6c902a20fa1910eda0387f93"
 
   url "https://github.com/miguelplaza17/dbLens/releases/download/v#{version}/dbLens-#{version}.dmg"
   name "dbLens"
