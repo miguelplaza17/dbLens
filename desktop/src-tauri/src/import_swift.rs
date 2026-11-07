@@ -65,6 +65,9 @@ pub struct SwiftFolder {
     pub name: String,
     #[serde(default = "yes")]
     pub expanded: bool,
+    /// The Swift folder it sits in (upper case), None at the top level.
+    #[serde(default, rename = "parentID")]
+    pub parent_id: Option<String>,
 }
 
 fn yes() -> bool {
@@ -386,6 +389,7 @@ pub fn parse_folders(plist_bytes: &[u8]) -> Vec<SwiftFolder> {
         .into_iter()
         .map(|f| SwiftFolder {
             id: f.id.to_uppercase(),
+            parent_id: f.parent_id.map(|p| p.to_uppercase()),
             ..f
         })
         .collect()
@@ -484,18 +488,12 @@ pub fn apply(store: &mut Store, app: SwiftApp) -> ImportReport {
         }
         let folder_id = match app.folders.iter().find(|f| f.id == c.folder_id) {
             None => String::new(),
-            Some(folder) => match folders.get(&folder.id) {
-                Some(id) => id.clone(),
-                None => match local_folder(store, folder) {
-                    Ok(id) => {
-                        folders.insert(folder.id.clone(), id.clone());
-                        id
-                    }
-                    Err(e) => {
-                        report.errors.push(format!("{}: {e}", folder.name));
-                        String::new()
-                    }
-                },
+            Some(folder) => match local_folder(store, &app.folders, folder, &mut folders, 0) {
+                Ok(id) => id,
+                Err(e) => {
+                    report.errors.push(format!("{}: {e}", folder.name));
+                    String::new()
+                }
             },
         };
         let draft = ConnectionDraft {
@@ -521,14 +519,44 @@ pub fn apply(store: &mut Store, app: SwiftApp) -> ImportReport {
     report
 }
 
-/// The folder of that name in `store`, made (with its expanded state) when
-/// there is none.
-fn local_folder(store: &mut Store, folder: &SwiftFolder) -> DbResult<String> {
+/// The folder of that name and place in `store` (its Swift parents made
+/// first), made with its expanded state when there is none. `made` maps
+/// Swift ids to this store's ids.
+fn local_folder(
+    store: &mut Store,
+    all: &[SwiftFolder],
+    folder: &SwiftFolder,
+    made: &mut HashMap<String, String>,
+    depth: usize,
+) -> DbResult<String> {
+    if let Some(id) = made.get(&folder.id) {
+        return Ok(id.clone());
+    }
+    // A parent that is missing (or a loop) puts the folder at the top level.
+    let parent = match folder
+        .parent_id
+        .as_ref()
+        .and_then(|p| all.iter().find(|f| &f.id == p))
+    {
+        Some(parent) if depth < 32 => local_folder(store, all, parent, made, depth + 1)?,
+        _ => String::new(),
+    };
+    let id = local_folder_in(store, folder, &parent)?;
+    made.insert(folder.id.clone(), id.clone());
+    Ok(id)
+}
+
+fn local_folder_in(store: &mut Store, folder: &SwiftFolder, parent: &str) -> DbResult<String> {
     let name = folder.name.trim();
-    if let Some(existing) = store.snapshot().folders.iter().find(|f| f.name == name) {
+    if let Some(existing) = store
+        .snapshot()
+        .folders
+        .iter()
+        .find(|f| f.name == name && f.parent_id == parent)
+    {
         return Ok(existing.id.clone());
     }
-    let made = store.add_folder(name)?;
+    let made = store.add_folder(name, parent)?;
     if !folder.expanded {
         store.set_folder_expanded(&made.id, false)?;
     }
@@ -867,6 +895,58 @@ mod tests {
     }
 
     #[test]
+    fn subfolders_import_with_their_parents() {
+        let outer = "AAAAAAAA-0000-0000-0000-000000000001";
+        let inner = "AAAAAAAA-0000-0000-0000-000000000002";
+        let json = serde_json::json!([
+            { "id": inner.to_lowercase(), "name": "Staging", "parentID": outer.to_lowercase() },
+            { "id": outer, "name": "Servers" },
+        ]);
+        let mut dict = plist::Dictionary::new();
+        dict.insert(
+            "connectionFolders".into(),
+            plist::Value::Data(json.to_string().into_bytes()),
+        );
+        let mut bytes = Vec::new();
+        plist::Value::Dictionary(dict)
+            .to_writer_binary(&mut bytes)
+            .unwrap();
+        let folders = parse_folders(&bytes);
+        assert_eq!(folders[0].parent_id.as_deref(), Some(outer));
+        let uuid = "BBBBBBBB-0000-0000-0000-000000000001".to_string();
+        let app = SwiftApp {
+            connections: vec![SwiftConnection {
+                uuid: uuid.clone(),
+                name: "staging".into(),
+                created_at: None,
+                last_used: None,
+                ssh: None,
+                sort_index: 0,
+                folder_id: inner.into(),
+            }],
+            urls: [(uuid, "sqlite:///tmp/staging.db".to_string())].into(),
+            folders,
+        };
+        let mut store = Store::in_memory();
+        let report = apply(&mut store, app);
+        assert_eq!(report.imported, 1, "{:?}", report.errors);
+        let snapshot = store.snapshot();
+        let servers = snapshot
+            .folders
+            .iter()
+            .find(|f| f.name == "Servers")
+            .unwrap();
+        let staging = snapshot
+            .folders
+            .iter()
+            .find(|f| f.name == "Staging")
+            .unwrap();
+        assert_eq!(servers.parent_id, "");
+        assert_eq!(staging.parent_id, servers.id);
+        assert_eq!(snapshot.connections[0].folder_id, staging.id);
+    }
+
+    #[test]
     fn folders_come_from_the_preferences() {
         let folders = parse_folders(&preferences());
         assert_eq!(
@@ -874,7 +954,8 @@ mod tests {
             vec![SwiftFolder {
                 id: WORK.into(),
                 name: "Work".into(),
-                expanded: false
+                expanded: false,
+                parent_id: None,
             }]
         );
         assert!(parse_folders(b"not a plist").is_empty());

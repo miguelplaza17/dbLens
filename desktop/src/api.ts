@@ -299,6 +299,8 @@ export interface ConnectionFolder {
   id: string;
   name: string;
   expanded: boolean;
+  /** The folder it sits in; "" is the top level. */
+  parentId: string;
 }
 
 export interface StoreSnapshot {
@@ -623,7 +625,9 @@ export const api = {
   connectionUrl: (id: string) => invoke<string>("connection_url", { id }),
   moveConnection: (id: string, folderId: string, beforeId: string | null = null) =>
     invoke<void>("move_connection", { id, folderId, beforeId }),
-  addFolder: (name: string) => invoke<ConnectionFolder>("add_folder", { name }),
+  addFolder: (name: string, parentId: string | null = null) => invoke<ConnectionFolder>("add_folder", { name, parentId }),
+  moveFolder: (id: string, parentId: string, beforeId: string | null = null) =>
+    invoke<void>("move_folder", { id, parentId, beforeId }),
   renameFolder: (id: string, name: string) => invoke<void>("rename_folder", { id, name }),
   deleteFolder: (id: string) => invoke<void>("delete_folder", { id }),
   setFolderExpanded: (id: string, expanded: boolean) => invoke<void>("set_folder_expanded", { id, expanded }),

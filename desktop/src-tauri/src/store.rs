@@ -82,6 +82,9 @@ pub struct ConnectionFolder {
     pub name: String,
     #[serde(default = "yes")]
     pub expanded: bool,
+    /// The folder it sits in, "" at the top level. Older stores have none.
+    #[serde(default)]
+    pub parent_id: String,
 }
 
 fn yes() -> bool {
@@ -397,15 +400,74 @@ impl Store {
         Ok(())
     }
 
-    pub fn add_folder(&mut self, name: &str) -> DbResult<ConnectionFolder> {
+    /// A new folder, last inside `parent_id` ("" for the top level), which opens.
+    pub fn add_folder(&mut self, name: &str, parent_id: &str) -> DbResult<ConnectionFolder> {
+        let parent_id = if self.meta.folders.iter().any(|f| f.id == parent_id) {
+            parent_id.to_string()
+        } else {
+            String::new()
+        };
         let folder = ConnectionFolder {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.trim().to_string(),
             expanded: true,
+            parent_id: parent_id.clone(),
         };
+        if let Some(parent) = self.meta.folders.iter_mut().find(|f| f.id == parent_id) {
+            parent.expanded = true;
+        }
         self.meta.folders.push(folder.clone());
         self.persist()?;
         Ok(folder)
+    }
+
+    /// Whether `id` is `ancestor` or sits somewhere inside it.
+    pub fn folder_is_in(&self, id: &str, ancestor: &str) -> bool {
+        let mut current = id.to_string();
+        let mut seen = std::collections::HashSet::new();
+        while !current.is_empty() && seen.insert(current.clone()) {
+            if current == ancestor {
+                return true;
+            }
+            current = self
+                .meta
+                .folders
+                .iter()
+                .find(|f| f.id == current)
+                .map(|f| f.parent_id.clone())
+                .unwrap_or_default();
+        }
+        false
+    }
+
+    /// Puts a folder inside `parent_id` ("" for the top level), before
+    /// `before_id` there (None: last). A folder never goes into itself or
+    /// one of its own subfolders.
+    pub fn move_folder(
+        &mut self,
+        id: &str,
+        parent_id: &str,
+        before_id: Option<&str>,
+    ) -> DbResult<()> {
+        if !parent_id.is_empty() && self.folder_is_in(parent_id, id) {
+            return Err(DbError::msg("A folder can't go inside itself."));
+        }
+        if before_id == Some(id) {
+            return Ok(());
+        }
+        let Some(at) = self.meta.folders.iter().position(|f| f.id == id) else {
+            return Err(DbError::msg("No such folder."));
+        };
+        let mut folder = self.meta.folders.remove(at);
+        folder.parent_id = parent_id.to_string();
+        let place = before_id
+            .and_then(|b| self.meta.folders.iter().position(|f| f.id == b))
+            .unwrap_or(self.meta.folders.len());
+        self.meta.folders.insert(place, folder);
+        if let Some(parent) = self.meta.folders.iter_mut().find(|f| f.id == parent_id) {
+            parent.expanded = true;
+        }
+        self.persist()
     }
 
     pub fn rename_folder(&mut self, id: &str, name: &str) -> DbResult<()> {
@@ -422,16 +484,27 @@ impl Store {
         self.persist()
     }
 
-    /// Removes a folder; its connections move to the top level.
+    /// Removes a folder; its subfolders and connections move up into its
+    /// parent (or the top level).
     pub fn delete_folder(&mut self, id: &str) -> DbResult<()> {
+        let parent = self
+            .meta
+            .folders
+            .iter()
+            .find(|f| f.id == id)
+            .map(|f| f.parent_id.clone())
+            .unwrap_or_default();
         self.meta.folders.retain(|f| f.id != id);
+        for f in self.meta.folders.iter_mut().filter(|f| f.parent_id == id) {
+            f.parent_id = parent.clone();
+        }
         for c in self
             .meta
             .connections
             .iter_mut()
             .filter(|c| c.folder_id == id)
         {
-            c.folder_id.clear();
+            c.folder_id = parent.clone();
         }
         self.persist()
     }
@@ -912,11 +985,62 @@ mod tests {
     }
 
     #[test]
+    fn subfolders_nest_reorder_and_move_up_when_deleted() {
+        let mut store = Store::in_memory();
+        let a = store.save(draft("sqlite:///tmp/a.db")).unwrap();
+        let outer = store.add_folder("Outer", "").unwrap();
+        let inner = store.add_folder("Inner", &outer.id).unwrap();
+        let deeper = store.add_folder("Deeper", &inner.id).unwrap();
+        assert_eq!(inner.parent_id, outer.id);
+        assert!(store
+            .add_folder("Lost", "nope")
+            .unwrap()
+            .parent_id
+            .is_empty());
+        // Never into itself or its own subfolders.
+        assert!(store.move_folder(&outer.id, &deeper.id, None).is_err());
+        assert!(store.move_folder(&inner.id, &inner.id, None).is_err());
+        // In front of another folder, at that one's level.
+        let second = store.add_folder("Second", "").unwrap();
+        store.move_folder(&second.id, "", Some(&outer.id)).unwrap();
+        let top: Vec<_> = store
+            .snapshot()
+            .folders
+            .iter()
+            .filter(|f| f.parent_id.is_empty())
+            .map(|f| f.name.clone())
+            .collect();
+        assert_eq!(top, ["Second", "Outer", "Lost"]);
+        store
+            .move_folder(&second.id, &outer.id, Some(&inner.id))
+            .unwrap();
+        let inside: Vec<_> = store
+            .snapshot()
+            .folders
+            .iter()
+            .filter(|f| f.parent_id == outer.id)
+            .map(|f| f.name.clone())
+            .collect();
+        assert_eq!(inside, ["Second", "Inner"]);
+        // Deleting a folder moves its contents up one level.
+        store.move_connection(&a.id, &inner.id, None).unwrap();
+        store.delete_folder(&inner.id).unwrap();
+        assert_eq!(store.get(&a.id).unwrap().folder_id, outer.id);
+        let deeper_now = store
+            .snapshot()
+            .folders
+            .into_iter()
+            .find(|f| f.id == deeper.id)
+            .unwrap();
+        assert_eq!(deeper_now.parent_id, outer.id);
+    }
+
+    #[test]
     fn folders_and_order() {
         let mut store = Store::in_memory();
         let a = store.save(draft("sqlite:///tmp/a.db")).unwrap();
         let b = store.save(draft("sqlite:///tmp/b.db")).unwrap();
-        let folder = store.add_folder("Work").unwrap();
+        let folder = store.add_folder("Work", "").unwrap();
         store.move_connection(&b.id, "", Some(&a.id)).unwrap();
         let names: Vec<_> = store
             .snapshot()

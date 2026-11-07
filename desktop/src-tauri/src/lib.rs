@@ -145,6 +145,7 @@ pub fn run() {
             agents::agent_tools,
             commands::move_connection,
             commands::add_folder,
+            commands::move_folder,
             commands::rename_folder,
             commands::delete_folder,
             commands::set_folder_expanded,

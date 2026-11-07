@@ -111,6 +111,7 @@
   "New Connection": "Nova Conexão",
   "New Connection…": "Nova Conexão…",
   "New Folder": "Nova Pasta",
+  "New Subfolder": "Nova Subpasta",
   "New Row": "Nova Linha",
   "New Window": "Nova Janela",
   "New row in %@": "Nova linha em %@",
@@ -362,5 +363,6 @@
   "Access by Connection": "Acesso por Conexão",
   "Choose…": "Escolher…",
   "Choose which tools agents may use on this connection": "Escolha quais ferramentas os agentes podem usar nesta conexão",
-  "Hidden connections don't show up for agents. Tools that write also need Let Agents Write. Everything agents run shows in the SQL panel's History.": "Conexões ocultas não aparecem para os agentes. Ferramentas que escrevem também precisam de Permitir que Agentes Escrevam. Tudo o que os agentes rodam aparece no Histórico do painel SQL."
+  "Hidden connections don't show up for agents. Tools that write also need Let Agents Write. Everything agents run shows in the SQL panel's History.": "Conexões ocultas não aparecem para os agentes. Ferramentas que escrevem também precisam de Permitir que Agentes Escrevam. Tudo o que os agentes rodam aparece no Histórico do painel SQL.",
+  "Top Level": "Nível Superior"
 }

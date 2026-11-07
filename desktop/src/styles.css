@@ -480,8 +480,9 @@ select option {
 .sidebar-row .icon {
   color: var(--accent-text);
 }
+/* Each folder level steps in; --depth is set on the row. */
 .sidebar-row.nested {
-  padding-left: var(--space-xxl);
+  padding-left: calc(var(--space-sm) + var(--depth, 1) * var(--space-lg));
 }
 .sidebar-row:hover {
   background: var(--grid-hover);
@@ -982,6 +983,8 @@ select option {
 /* Dragging a saved connection onto a folder (native/dragConnections.ts). */
 body.dragging-connection { cursor: grabbing; user-select: none; }
 .drop-target { background: color-mix(in srgb, var(--accent, #0a84ff) 22%, transparent); border-radius: 6px; }
+/* A folder dragged onto another folder's top edge goes in front of it. */
+.drop-before { box-shadow: inset 0 2px 0 var(--accent, #0a84ff); }
 
 /* Run with the arrow for its other modes. */
 .split-button {

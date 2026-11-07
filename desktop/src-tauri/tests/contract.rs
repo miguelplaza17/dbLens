@@ -370,6 +370,7 @@ fn connections() {
             id: "f".into(),
             name: "F".into(),
             expanded: true,
+            parent_id: String::new(),
         }],
         agents_manage_connections: false,
         key_in_file: true,
@@ -394,7 +395,7 @@ fn connections() {
     );
     assert_eq!(
         keys(&snap["folders"][0]),
-        sorted(&["id", "name", "expanded"])
+        sorted(&["id", "name", "expanded", "parentId"])
     );
 }
 

@@ -681,8 +681,26 @@ pub async fn move_connection(
 }
 
 #[tauri::command]
-pub async fn add_folder(state: State<'_, AppState>, name: String) -> DbResult<ConnectionFolder> {
-    state.with_store(|store| store.add_folder(&name)).await
+pub async fn add_folder(
+    state: State<'_, AppState>,
+    name: String,
+    parent_id: Option<String>,
+) -> DbResult<ConnectionFolder> {
+    state
+        .with_store(|store| store.add_folder(&name, parent_id.as_deref().unwrap_or("")))
+        .await
+}
+
+#[tauri::command]
+pub async fn move_folder(
+    state: State<'_, AppState>,
+    id: String,
+    parent_id: String,
+    before_id: Option<String>,
+) -> DbResult<()> {
+    state
+        .with_store(|store| store.move_folder(&id, &parent_id, before_id.as_deref()))
+        .await
 }
 
 #[tauri::command]

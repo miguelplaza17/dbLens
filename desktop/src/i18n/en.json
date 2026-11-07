@@ -111,6 +111,7 @@
   "New Connection": "New Connection",
   "New Connection…": "New Connection…",
   "New Folder": "New Folder",
+  "New Subfolder": "New Subfolder",
   "New Row": "New Row",
   "New Window": "New Window",
   "New row in %@": "New row in %@",
@@ -362,5 +363,6 @@
   "Access by Connection": "Access by Connection",
   "Choose…": "Choose…",
   "Choose which tools agents may use on this connection": "Choose which tools agents may use on this connection",
-  "Hidden connections don't show up for agents. Tools that write also need Let Agents Write. Everything agents run shows in the SQL panel's History.": "Hidden connections don't show up for agents. Tools that write also need Let Agents Write. Everything agents run shows in the SQL panel's History."
+  "Hidden connections don't show up for agents. Tools that write also need Let Agents Write. Everything agents run shows in the SQL panel's History.": "Hidden connections don't show up for agents. Tools that write also need Let Agents Write. Everything agents run shows in the SQL panel's History.",
+  "Top Level": "Top Level"
 }

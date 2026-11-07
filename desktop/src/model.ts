@@ -361,10 +361,42 @@ export class AppModel {
     await this.loadStore();
   }
 
-  async addFolder(name: string) {
-    const folder = await this.attempt(() => api.addFolder(name));
+  async addFolder(name: string, parentId = "") {
+    const folder = await this.attempt(() => api.addFolder(name, parentId || null));
     await this.loadStore();
     return folder;
+  }
+
+  /** Puts a folder inside `parentId` ("" is the top level), in front of `beforeId` or last. */
+  async moveFolder(id: string, parentId: string, beforeId: string | null = null) {
+    if (parentId && this.folderIsIn(parentId, id)) return;
+    await this.attempt(() => api.moveFolder(id, parentId, beforeId));
+    await this.loadStore();
+  }
+
+  /** Whether `id` is `ancestor` or sits somewhere inside it. */
+  folderIsIn(id: string, ancestor: string): boolean {
+    const seen = new Set<string>();
+    for (let current = id; current && !seen.has(current); ) {
+      if (current === ancestor) return true;
+      seen.add(current);
+      current = this.store.folders.find((f) => f.id === current)?.parentId ?? "";
+    }
+    return false;
+  }
+
+  /** The folder's place from the top level down: "Servers / Staging". */
+  folderPath(id: string): string {
+    const names: string[] = [];
+    const seen = new Set<string>();
+    for (let current = id; current && !seen.has(current); ) {
+      seen.add(current);
+      const folder = this.store.folders.find((f) => f.id === current);
+      if (!folder) break;
+      names.unshift(folder.name);
+      current = folder.parentId;
+    }
+    return names.join(" / ");
   }
 
   async renameFolder(id: string, name: string) {

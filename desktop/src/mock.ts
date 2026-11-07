@@ -324,13 +324,16 @@ function redisDemo(): Table[] {
 // MARK: - Saved connections
 
 const now = new Date().toISOString();
-const folders: ConnectionFolder[] = [{ id: "f-work", name: "Work", expanded: true }];
+const folders: ConnectionFolder[] = [
+  { id: "f-work", name: "Work", expanded: true, parentId: "" },
+  { id: "f-staging", name: "Staging", expanded: true, parentId: "f-work" },
+];
 const saved: Array<SavedConnection & { url: string }> = [
   conn("c-analytics", "analytics @ server", "postgres", "postgres://report:secret@analytics.internal:5432/analytics", "", 0),
   conn("c-demo", "demo @ localhost", "postgres", "postgres://demo:demo@localhost:5432/demo", "", 1),
   conn("c-cache", "cache @ localhost", "redis", "redis://localhost:6379/0", "", 2),
   conn("c-prod", "production @ db.example.com", "postgres", "postgres://app:hunter2@db.example.com:5432/production?sslmode=require", "f-work", 0),
-  conn("c-shop", "shop @ mysql.example.com", "mysql", "mysql://shop:pw@mysql.example.com:3306/shop", "f-work", 1),
+  conn("c-shop", "shop @ mysql.example.com", "mysql", "mysql://shop:pw@mysql.example.com:3306/shop", "f-staging", 0),
 ];
 
 function conn(id: string, name: string, engine: Engine, url: string, folderId: string, sortIndex: number) {
@@ -822,9 +825,23 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     if (c) c.folderId = String(a.folderId ?? "");
   },
   add_folder: (a) => {
-    const f = { id: `f-${Date.now()}`, name: String(a.name), expanded: true };
+    const parentId = folders.some((x) => x.id === a.parentId) ? String(a.parentId) : "";
+    const f = { id: `f-${Date.now()}`, name: String(a.name), expanded: true, parentId };
     folders.push(f);
     return { ...f };
+  },
+  move_folder: (a) => {
+    const parentId = String(a.parentId ?? "");
+    // Never into itself or one of its own subfolders.
+    for (let p = parentId; p; p = folders.find((x) => x.id === p)?.parentId ?? "") {
+      if (p === a.id) throw "A folder can't go inside itself.";
+    }
+    const i = folders.findIndex((x) => x.id === a.id);
+    if (i < 0 || a.beforeId === a.id) return;
+    const [f] = folders.splice(i, 1);
+    f.parentId = parentId;
+    const at = folders.findIndex((x) => x.id === a.beforeId);
+    folders.splice(at < 0 ? folders.length : at, 0, f);
   },
   rename_folder: (a) => {
     const f = folders.find((x) => x.id === a.id);
@@ -832,8 +849,10 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   },
   delete_folder: (a) => {
     const i = folders.findIndex((x) => x.id === a.id);
+    const parent = i >= 0 ? folders[i].parentId : "";
     if (i >= 0) folders.splice(i, 1);
-    for (const c of saved) if (c.folderId === a.id) c.folderId = "";
+    for (const f of folders) if (f.parentId === a.id) f.parentId = parent;
+    for (const c of saved) if (c.folderId === a.id) c.folderId = parent;
   },
   set_folder_expanded: (a) => {
     const f = folders.find((x) => x.id === a.id);

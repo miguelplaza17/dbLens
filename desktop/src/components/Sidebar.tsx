@@ -1,14 +1,14 @@
 // The sidebar: a filter, the saved connections (in folders), and the tables of
 // the open connection grouped by schema (ContentView.swift).
 
-import { forwardRef, useMemo, useState, type ReactNode } from "react";
+import { forwardRef, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { EngineIcon } from "../engineIcons";
-import { api, engineNames, relationId, type Relation, type SavedConnection } from "../api";
+import { api, engineNames, relationId, type ConnectionFolder, type Relation, type SavedConnection } from "../api";
 import { t } from "../i18n";
 import { useModel } from "../model";
 import { withKeys } from "../shortcuts";
 import { copyText } from "../format";
-import { beginConnectionDrag } from "../native/dragConnections";
+import { beginConnectionDrag, beginFolderDrag } from "../native/dragConnections";
 import { copyUrl, copyUrlWithPassword, openAgentTools, openInTerminal } from "../history/connectionActions";
 import { accessSummary } from "../agentAccess";
 import { Icon, type IconName } from "./Icon";
@@ -32,6 +32,13 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
   const matches = (c: SavedConnection) => !needle || c.name.toLowerCase().includes(needle);
   const byFolder = (folderId: string) =>
     connections.filter((c) => c.folderId === folderId && matches(c)).sort((a, b) => a.sortIndex - b.sortIndex);
+  const folders = model.store.folders;
+  const folderIds = new Set(folders.map((f) => f.id));
+  /** The folders right inside `parent` ("" is the top level); one whose parent is gone shows at the top. */
+  const subfolders = (parent: string) => folders.filter((f) => (folderIds.has(f.parentId) ? f.parentId : "") === parent);
+  /** While filtering, a folder shows when something inside it, at any depth, matches. */
+  const hasMatch = (id: string, seen = new Set<string>()): boolean =>
+    !seen.has(id) && (seen.add(id), byFolder(id).length > 0 || subfolders(id).some((f) => hasMatch(f.id, seen)));
 
   const groups = useMemo(() => {
     const map = new Map<string, Relation[]>();
@@ -61,9 +68,9 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
       { title: t("Agent Tools…"), detail: accessSummary(c), action: () => openAgentTools(model, c) },
       ...(active ? [{ title: t("Disconnect"), icon: "disconnect" as IconName, action: () => void model.disconnect() }] : []),
       { separator: true, title: "" },
-      ...model.store.folders
+      ...folders
         .filter((f) => f.id !== c.folderId)
-        .map((f) => ({ title: t("Move to %@", f.name), icon: "folder" as IconName, action: () => void model.moveConnection(c, f.id) })),
+        .map((f) => ({ title: t("Move to %@", model.folderPath(f.id)), icon: "folder" as IconName, action: () => void model.moveConnection(c, f.id) })),
       ...(c.folderId ? [{ title: t("No Folder"), action: () => void model.moveConnection(c, "") }] : []),
       { separator: true, title: "" },
       {
@@ -83,10 +90,18 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
     ]);
   };
 
-  const folderMenu = (event: React.MouseEvent, id: string) => {
+  const folderMenu = (event: React.MouseEvent, folder: ConnectionFolder) => {
+    const id = folder.id;
     model.showMenu(event, [
       { title: t("Rename…"), icon: "edit", action: () => setRenaming(id) },
-      { title: t("New Folder"), icon: "folderPlus", action: newFolder },
+      { title: t("New Subfolder"), icon: "folderPlus", action: () => void newFolder(id) },
+      { title: t("New Folder"), icon: "folderPlus", action: () => void newFolder() },
+      { separator: true, title: "" },
+      // Anywhere but inside itself.
+      ...folders
+        .filter((f) => f.id !== folder.parentId && !model.folderIsIn(f.id, id))
+        .map((f) => ({ title: t("Move to %@", model.folderPath(f.id)), icon: "folder" as IconName, action: () => void model.moveFolder(id, f.id) })),
+      ...(folder.parentId ? [{ title: t("Move to %@", t("Top Level")), action: () => void model.moveFolder(id, "") }] : []),
       { separator: true, title: "" },
       { title: t("Delete Folder"), icon: "trash", destructive: true, action: () => void model.deleteFolder(id) },
     ]);
@@ -111,12 +126,49 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
     model.showToast(t("Copied"));
   };
 
-  async function newFolder() {
-    const folder = await model.addFolder(t("New Folder"));
+  async function newFolder(parentId = "") {
+    const folder = await model.addFolder(t("New Folder"), parentId);
     if (folder) setRenaming(folder.id);
   }
 
-  const row = (c: SavedConnection, nested: boolean) => {
+  /** A folder, then (when open) its connections and its subfolders, each a level in. */
+  const folderTree = (folder: ConnectionFolder, depth: number): ReactNode => {
+    if (needle && !hasMatch(folder.id)) return null;
+    const inside = byFolder(folder.id);
+    const open = folder.expanded || !!needle;
+    return (
+      <div key={folder.id}>
+        <SidebarRow
+          icon="folder"
+          title={folder.name}
+          depth={depth}
+          disclosure={open ? "open" : "closed"}
+          renaming={renaming === folder.id}
+          onRename={(name) => {
+            setRenaming(null);
+            void model.renameFolder(folder.id, name);
+          }}
+          onClick={() => void model.toggleFolder(folder.id)}
+          onContextMenu={(e) => folderMenu(e, folder)}
+          // Onto another folder: inside it; onto its top edge: in front of it.
+          onMouseDown={(e) =>
+            beginFolderDrag(
+              e,
+              (spot) => spot.before !== folder.id && !(spot.folder && model.folderIsIn(spot.folder, folder.id)),
+              (spot) => void model.moveFolder(folder.id, spot.folder, spot.before),
+            )
+          }
+          dropFolder={folder.id}
+          folderParent={folder.parentId}
+          trailing={!open && inside.length > 0 ? <span className="count">{inside.length}</span> : null}
+        />
+        {open && inside.map((c) => row(c, depth + 1))}
+        {open && subfolders(folder.id).map((f) => folderTree(f, depth + 1))}
+      </div>
+    );
+  };
+
+  const row = (c: SavedConnection, depth: number) => {
     const active = model.activeSavedId === c.id;
     const busy = model.connecting === c.id;
     return (
@@ -124,7 +176,7 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
         key={c.id}
         icon="database"
         iconNode={<EngineIcon engine={c.engine} />}
-        nested={nested}
+        depth={depth}
         selected={active}
         title={c.name}
         renaming={renaming === c.id}
@@ -155,11 +207,11 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
           spellCheck={false}
         />
       </div>
-      <div className="sidebar-scroll" onContextMenu={(e) => e.target === e.currentTarget && model.showMenu(e, [{ title: t("New Folder"), icon: "folderPlus", action: newFolder }])}>
+      <div className="sidebar-scroll" onContextMenu={(e) => e.target === e.currentTarget && model.showMenu(e, [{ title: t("New Folder"), icon: "folderPlus", action: () => void newFolder() }])}>
         <div className="sidebar-section-header" data-drop-folder="">
           <span>{t("Connections")}</span>
           <span className="sidebar-section-actions">
-            <button className="icon-button" title={t("New Folder")} aria-label={t("New Folder")} onClick={newFolder}>
+            <button className="icon-button" title={t("New Folder")} aria-label={t("New Folder")} onClick={() => void newFolder()}>
               <Icon name="folderPlus" size={14} />
             </button>
             <button
@@ -172,31 +224,8 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
             </button>
           </span>
         </div>
-        {byFolder("").map((c) => row(c, false))}
-        {model.store.folders.map((folder) => {
-          const inside = byFolder(folder.id);
-          if (needle && inside.length === 0) return null;
-          const open = folder.expanded || !!needle;
-          return (
-            <div key={folder.id}>
-              <SidebarRow
-                icon="folder"
-                title={folder.name}
-                disclosure={open ? "open" : "closed"}
-                renaming={renaming === folder.id}
-                onRename={(name) => {
-                  setRenaming(null);
-                  void model.renameFolder(folder.id, name);
-                }}
-                onClick={() => void model.toggleFolder(folder.id)}
-                onContextMenu={(e) => folderMenu(e, folder.id)}
-                dropFolder={folder.id}
-                trailing={!open && inside.length > 0 ? <span className="count">{inside.length}</span> : null}
-              />
-              {open && inside.map((c) => row(c, true))}
-            </div>
-          );
-        })}
+        {byFolder("").map((c) => row(c, 0))}
+        {subfolders("").map((folder) => folderTree(folder, 0))}
 
         {model.session &&
           groups.map(([schema, relations]) => {
@@ -242,7 +271,8 @@ function SidebarRow(props: {
   /** Drawn instead of `icon` (a kind of database's own icon). */
   iconNode?: ReactNode;
   title: string;
-  nested?: boolean;
+  /** Folder levels in: 0 at the top level. */
+  depth?: number;
   selected?: boolean;
   muted?: boolean;
   verbatim?: boolean;
@@ -257,13 +287,17 @@ function SidebarRow(props: {
   onMouseDown?: (event: React.MouseEvent) => void;
   /** Dropping a connection here moves it into this folder. */
   dropFolder?: string;
+  /** A folder row's parent ("" at the top level): a folder dropped on its top edge lands there. */
+  folderParent?: string;
 }) {
-  const className = ["sidebar-row", props.nested && "nested", props.selected && "selected", props.muted && "muted"]
+  const depth = props.depth ?? 0;
+  const style = depth > 0 ? ({ "--depth": depth } as CSSProperties) : undefined;
+  const className = ["sidebar-row", depth > 0 && "nested", props.selected && "selected", props.muted && "muted"]
     .filter(Boolean)
     .join(" ");
   if (props.renaming) {
     return (
-      <div className={className}>
+      <div className={className} style={style}>
         {props.iconNode ?? <Icon name={props.icon} size={15} />}
         <input
           className="rename-field"
@@ -288,6 +322,8 @@ function SidebarRow(props: {
       onContextMenu={props.onContextMenu}
       onMouseDown={props.onMouseDown}
       data-drop-folder={props.dropFolder}
+      data-folder-parent={props.folderParent}
+      style={style}
       aria-current={props.selected ? "true" : undefined}
     >
       {props.disclosure && <Icon name={props.disclosure === "open" ? "chevronDown" : "chevronRight"} size={12} />}
