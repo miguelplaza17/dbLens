@@ -81,10 +81,27 @@ struct Sidebar: View {
     private enum DropTarget: Hashable { case row(UUID), folder(UUID), beforeFolder(UUID), top }
 
     private func targeting(_ target: DropTarget) -> (Bool) -> Void {
-        { inside in
-            withAnimation(.snappy(duration: 0.18)) {
-                if inside { dropTarget = target } else if dropTarget == target { dropTarget = nil }
-            }
+        { inside in inside ? hover(target) : leave(target) }
+    }
+
+    /// The pending "nothing is targeted any more", cancelled when the pointer
+    /// reaches the next target in time.
+    @State private var leaveTask: Task<Void, Never>?
+
+    /// Lights `target` up, smoothly.
+    private func hover(_ target: DropTarget) {
+        leaveTask?.cancel()
+        guard dropTarget != target else { return }
+        withAnimation(Motion.hover) { dropTarget = target }
+    }
+
+    /// Lets `target` go after a short grace, unless another one is lit by then.
+    private func leave(_ target: DropTarget) {
+        leaveTask?.cancel()
+        leaveTask = Task {
+            try? await Task.sleep(for: Motion.leaveGrace)
+            guard !Task.isCancelled, dropTarget == target else { return }
+            withAnimation(Motion.hover) { dropTarget = nil }
         }
     }
 
@@ -284,7 +301,7 @@ struct Sidebar: View {
             // The disclosure arrow, like a sidebar outline's: it opens and closes
             // the folder. The rest of the row has no tap gesture, so it drags.
             Button {
-                withAnimation(.snappy) { model.setFolderExpanded(folder.id, !folder.expanded) }
+                withAnimation(Motion.disclose) { model.setFolderExpanded(folder.id, !folder.expanded) }
             } label: {
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.semibold))
@@ -336,7 +353,9 @@ struct Sidebar: View {
         .onDrop(of: [.utf8PlainText, .plainText], delegate: FolderDropDelegate(
             folder: folder.id,
             reorders: draggingFolder != nil && draggingFolder != folder.id,
-            target: $dropTarget
+            current: { dropTarget },
+            hover: hover,
+            leave: leave
         ) { item, inFront in
             if inFront {
                 drop([item], beforeFolder: folder)
@@ -348,9 +367,9 @@ struct Sidebar: View {
         // Spring-loaded, like Finder: a closed folder opens after a moment under a drag.
         .task(id: lit) {
             guard lit, !folder.expanded else { return }
-            try? await Task.sleep(for: .milliseconds(500))
+            try? await Task.sleep(for: Motion.springLoad)
             if !Task.isCancelled, dropTarget == .folder(folder.id) {
-                withAnimation(.snappy) { model.setFolderExpanded(folder.id, true) }
+                withAnimation(Motion.disclose) { model.setFolderExpanded(folder.id, true) }
             }
         }
     }
@@ -388,10 +407,13 @@ struct Sidebar: View {
               let id = UUID(uuidString: String(item.dropFirst(Self.folderPrefix.count))) else {
             return drop(items, before: nil, into: target.id.uuidString)
         }
-        dropTarget = nil
+        leaveTask?.cancel()
         draggingFolder = nil
         var moved = false
-        withAnimation(.snappy) { moved = model.moveFolder(id, into: target.parentID, before: target.id) }
+        withAnimation(Motion.land) {
+            dropTarget = nil
+            moved = model.moveFolder(id, into: target.parentID, before: target.id)
+        }
         return moved
     }
 
@@ -399,26 +421,28 @@ struct Sidebar: View {
     private struct FolderDropDelegate: DropDelegate {
         let folder: UUID
         let reorders: Bool
-        @Binding var target: DropTarget?
+        let current: () -> DropTarget?
+        let hover: (DropTarget) -> Void
+        let leave: (DropTarget) -> Void
         let perform: (String, Bool) -> Bool
 
         /// The top edge (and the slot it opens above the folder) means "in front of".
         private func zone(_ info: DropInfo) -> DropTarget {
             // A thin band: the open slot above the folder, or its top 8 pt.
-            let edge = target == .beforeFolder(folder) ? Space.xxl + Space.xs + Space.sm : Space.sm
+            let edge = current() == .beforeFolder(folder) ? Space.xxl + Space.xs + Space.sm : Space.sm
             return reorders && info.location.y < edge ? .beforeFolder(folder) : .folder(folder)
         }
 
-        func dropEntered(info: DropInfo) { show(zone(info)) }
+        func dropEntered(info: DropInfo) { hover(zone(info)) }
 
         func dropUpdated(info: DropInfo) -> DropProposal? {
             let next = zone(info)
-            if next != target { show(next) }
+            if next != current() { hover(next) }
             return DropProposal(operation: .move)
         }
 
         func dropExited(info: DropInfo) {
-            if target == .folder(folder) || target == .beforeFolder(folder) { show(nil) }
+            if let lit = current(), lit == .folder(folder) || lit == .beforeFolder(folder) { leave(lit) }
         }
 
         func performDrop(info: DropInfo) -> Bool {
@@ -431,9 +455,6 @@ struct Sidebar: View {
             return true
         }
 
-        private func show(_ next: DropTarget?) {
-            withAnimation(.snappy(duration: 0.18)) { target = next }
-        }
     }
 
     /// The outlined space where a dragged connection will land.
@@ -442,7 +463,7 @@ struct Sidebar: View {
             .strokeBorder(Palette.accent, style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))  // grid: ok dashed outline
             .background(Palette.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop slot
             .frame(height: Space.xxl)
-            .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .top)))
+            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
     }
 
     /// While a connection is dragged over this row, the row steps down and leaves
@@ -473,17 +494,26 @@ struct Sidebar: View {
     /// A dragged folder goes into that folder (never into itself or its own subfolders).
     @discardableResult
     private func drop(_ items: [String], before target: SavedConnection?, into folderID: String) -> Bool {
-        dropTarget = nil
+        leaveTask?.cancel()
         draggingFolder = nil
         if let item = items.first, item.hasPrefix(Self.folderPrefix) {
             guard let id = UUID(uuidString: String(item.dropFirst(Self.folderPrefix.count))) else { return false }
             var moved = false
-            withAnimation(.snappy) { moved = model.moveFolder(id, into: UUID(uuidString: folderID)) }
+            withAnimation(Motion.land) {
+                dropTarget = nil
+                moved = model.moveFolder(id, into: UUID(uuidString: folderID))
+            }
             return moved
         }
         guard let id = items.first.flatMap(UUID.init(uuidString:)),
-              let dragged = connections.first(where: { $0.uuid == id }) else { return false }
-        withAnimation(.snappy) { model.move(dragged, before: target, into: folderID, all: connections) }
+              let dragged = connections.first(where: { $0.uuid == id }) else {
+            withAnimation(Motion.hover) { dropTarget = nil }
+            return false
+        }
+        withAnimation(Motion.land) {
+            dropTarget = nil
+            model.move(dragged, before: target, into: folderID, all: connections)
+        }
         return true
     }
 
@@ -513,11 +543,11 @@ struct Sidebar: View {
         Button("New Folder", systemImage: "folder.badge.plus") { newFolder() }
         Menu("Move to", systemImage: "folder") {
             ForEach(model.folders.filter { !model.folder($0.id, isIn: folder.id) }) { other in
-                Button(model.path(of: other.id)) { withAnimation(.snappy) { _ = model.moveFolder(folder.id, into: other.id) } }
+                Button(model.path(of: other.id)) { withAnimation(Motion.land) { _ = model.moveFolder(folder.id, into: other.id) } }
                     .disabled(folder.parentID == other.id)
             }
             if model.folders.count > 1 { Divider() }
-            Button("Top Level") { withAnimation(.snappy) { _ = model.moveFolder(folder.id, into: nil) } }
+            Button("Top Level") { withAnimation(Motion.land) { _ = model.moveFolder(folder.id, into: nil) } }
                 .disabled(folder.parentID == nil)
         }
         Divider()
