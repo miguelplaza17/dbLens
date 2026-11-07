@@ -204,6 +204,7 @@
   "New Connection (Command-N)": "Nova Conexão (Command-N)",
   "New Connection…": "Nova Conexão…",
   "New Folder": "Nova Pasta",
+  "New Subfolder": "Nova Subpasta",
   "New Row": "Nova Linha",
   "New Row…": "Nova Linha…",
   "New connections and deleting are in the main window's sidebar.": "Novas conexões e exclusão ficam na barra lateral da janela principal.",
@@ -345,7 +346,6 @@
   "The command returned no rows. See the log in the SQL panel.": "O comando não devolveu linhas. Veja o log na coluna do SQL.",
   "The command was canceled.": "O comando foi cancelado.",
   "The connection was closed.": "A conexão foi fechada.",
-  "The connections in it move out of the folder; none is deleted.": "As conexões dela saem da pasta; nenhuma é apagada.",
   "The database \"%@\" doesn't exist on this server.": "O banco \"%@\" não existe neste servidor.",
   "The database host is not valid for an SSH tunnel.": "O host do banco não é válido para um túnel SSH.",
   "The host \"%@\" wasn't found.": "O host \"%@\" não foi encontrado.",
@@ -460,5 +460,7 @@
   "Hidden connections don't show up for agents. Tools that write also need Let Agents Write. Everything agents run shows in the SQL panel's History.": "Conexões ocultas não aparecem para os agentes. Ferramentas que escrevem também precisam de Permitir que Agentes Escrevam. Tudo o que os agentes rodam aparece no Histórico do painel SQL.",
   "hidden from agents": "oculta para agentes",
   "Read only": "Só leitura",
-  "Reads and writes": "Lê e escreve"
+  "Reads and writes": "Lê e escreve",
+  "Its subfolders and connections move up one level; none is deleted.": "As subpastas e conexões dela sobem um nível; nada é apagado.",
+  "Top Level": "Nível Superior"
 }

@@ -53,6 +53,28 @@ enum SelfTest {
                 model.deleteFolder(folder.id)
                 check("connections file into folders and come out when one is deleted",
                       filed && saved.folderID.isEmpty && !model.folders.contains { $0.id == folder.id })
+                // Subfolders: a folder nests in another, never in itself, and its contents move up when it goes.
+                let outer = model.addFolder(named: "Outer")
+                let inner = model.addFolder(named: "Inner", in: outer.id)
+                let deeper = model.addFolder(named: "Deeper", in: inner.id)
+                model.move(saved, before: nil, into: inner.id.uuidString, all: all)
+                let nested = model.subfolders(of: outer.id).map(\.id) == [inner.id] && model.path(of: deeper.id) == "Outer / Inner / Deeper"
+                let noLoop = !model.moveFolder(outer.id, into: deeper.id) && !model.moveFolder(inner.id, into: inner.id)
+                model.deleteFolder(inner.id)
+                let movedUp = saved.folderID == outer.id.uuidString && model.subfolders(of: outer.id).map(\.id) == [deeper.id]
+                check("folders nest in folders, never in themselves, and their contents move up when one is deleted",
+                      nested && noLoop && movedUp, "nested \(nested), no loop \(noLoop), moved up \(movedUp)")
+                // Reordering: a folder dragged in front of another lands there, at that one's level.
+                let second = model.addFolder(named: "Second")
+                let reordered = model.moveFolder(second.id, into: nil, before: outer.id)
+                    && model.subfolders(of: nil).map(\.id) == [second.id, outer.id]
+                    && model.moveFolder(second.id, into: outer.id, before: deeper.id)
+                    && model.subfolders(of: outer.id).map(\.id) == [second.id, deeper.id]
+                check("folders reorder in front of each other, at any level", reordered)
+                model.deleteFolder(second.id)
+                model.deleteFolder(deeper.id)
+                model.deleteFolder(outer.id)
+                check("deleting the last folder takes the connection back to the top level", saved.folderID.isEmpty && model.folders.isEmpty)
             }
             // Let Agents Write: what the switch saves must reach the file another process (the MCP server) reads.
             if let saved {

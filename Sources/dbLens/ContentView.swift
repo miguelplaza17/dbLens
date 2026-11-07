@@ -1,5 +1,6 @@
 import SwiftData
 import SwiftUI
+import UniformTypeIdentifiers
 import DBLensKit
 
 /// Connections and tables on the left; on the right one grid that shows either
@@ -73,7 +74,11 @@ struct Sidebar: View {
     /// Where a dragged connection would land right now: a row, a folder, or the title.
     @State private var dropTarget: DropTarget?
 
-    private enum DropTarget: Hashable { case row(UUID), folder(UUID), top }
+    /// The folder being dragged, if a folder is: only then does a folder's top edge
+    /// take it in front of that folder instead of into it.
+    @State private var draggingFolder: UUID?
+
+    private enum DropTarget: Hashable { case row(UUID), folder(UUID), beforeFolder(UUID), top }
 
     private func targeting(_ target: DropTarget) -> (Bool) -> Void {
         { inside in
@@ -129,57 +134,7 @@ struct Sidebar: View {
         List(selection: selection) {
             Section {
                 // Folders first, like Finder; then the connections outside any folder.
-                ForEach(model.folders) { folder in
-                    DisclosureGroup(isExpanded: Binding(get: { folder.expanded },
-                                                        set: { model.setFolderExpanded(folder.id, $0) })) {
-                        ForEach(AppModel.ordered(connections, in: folder.id.uuidString)) { connection in
-                            connectionRow(connection)
-                        }
-                        // Where a connection dropped on the folder lands: last inside it.
-                        if dropTarget == .folder(folder.id) { dropSlot }
-                    } label: {
-                        let lit = dropTarget == .folder(folder.id)
-                        HStack(spacing: Space.sm) {
-                            Image(systemName: lit ? "folder.fill" : "folder")
-                            if editingFolder == folder.id {
-                                // The name, typed in place: Return or a click elsewhere keeps it, Escape leaves it.
-                                TextField("Folder Name", text: $folderName)
-                                    .textFieldStyle(.plain)
-                                    .focused($folderFieldFocused)
-                                    .onSubmit(commitFolderName)
-                                    .onExitCommand { editingFolder = nil }
-                                    .onAppear { folderFieldFocused = true }
-                            } else {
-                                Text(verbatim: folder.name).lineLimit(1)
-                            }
-                            Spacer(minLength: 0)
-                            if lit {
-                                Text("drop to move").font(.caption)
-                            }
-                        }
-                        .foregroundStyle(lit ? Color.white : Color.primary)
-                        .padding(.horizontal, lit ? Space.sm : 0)
-                        .frame(maxWidth: .infinity, minHeight: Space.xxl, alignment: .leading)
-                        .background(Palette.accent.opacity(lit ? 1 : 0), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop highlight
-                        .contentShape(Rectangle())
-                        // A click on the folder opens or closes it, like its arrow.
-                        .onTapGesture {
-                            guard editingFolder != folder.id else { return }
-                            withAnimation(.snappy) { model.setFolderExpanded(folder.id, !folder.expanded) }
-                        }
-                        .dropDestination(for: String.self, action: { items, _ in drop(items, before: nil, into: folder.id.uuidString) },
-                                         isTargeted: targeting(.folder(folder.id)))
-                        .contextMenu { folderMenu(folder) }
-                        // Spring-loaded, like Finder: a closed folder opens after a moment under a drag.
-                        .task(id: lit) {
-                            guard lit, !folder.expanded else { return }
-                            try? await Task.sleep(for: .milliseconds(500))
-                            if !Task.isCancelled, dropTarget == .folder(folder.id) {
-                                withAnimation(.snappy) { model.setFolderExpanded(folder.id, true) }
-                            }
-                        }
-                    }
-                }
+                folderTree(in: nil)
                 ForEach(AppModel.ordered(connections, in: "")) { connection in
                     connectionRow(connection)
                 }
@@ -264,7 +219,148 @@ struct Sidebar: View {
         }
     }
 
-    /// A connection in the list: drag it onto another to put it there, onto a folder to file it.
+    /// The folders inside `parent` (nil is the top level), each with its own
+    /// subfolders first and then its connections. Type-erased, since it nests itself.
+    private func folderTree(in parent: UUID?) -> AnyView {
+        AnyView(ForEach(model.subfolders(of: parent)) { folder in
+            folderGroup(folder)
+        })
+    }
+
+    private func folderGroup(_ folder: ConnectionFolder) -> some View {
+        DisclosureGroup(isExpanded: Binding(get: { folder.expanded },
+                                            set: { model.setFolderExpanded(folder.id, $0) })) {
+            folderTree(in: folder.id)
+            ForEach(AppModel.ordered(connections, in: folder.id.uuidString)) { connection in
+                connectionRow(connection)
+            }
+            // Where a connection dropped on the folder lands: last inside it.
+            if dropTarget == .folder(folder.id) { dropSlot }
+        } label: {
+            let lit = dropTarget == .folder(folder.id)
+            let before = dropTarget == .beforeFolder(folder.id)
+            HStack(spacing: Space.sm) {
+                Image(systemName: lit ? "folder.fill" : "folder")
+                if editingFolder == folder.id {
+                    // The name, typed in place: Return or a click elsewhere keeps it, Escape leaves it.
+                    TextField("Folder Name", text: $folderName)
+                        .textFieldStyle(.plain)
+                        .focused($folderFieldFocused)
+                        .onSubmit(commitFolderName)
+                        .onExitCommand { editingFolder = nil }
+                        .onAppear { folderFieldFocused = true }
+                } else {
+                    Text(verbatim: folder.name).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                if lit {
+                    Text("drop to move").font(.caption)
+                }
+            }
+            .foregroundStyle(lit ? Palette.onAccent : Color.primary)
+            .padding(.horizontal, lit ? Space.sm : 0)
+            .frame(maxWidth: .infinity, minHeight: Space.xxl, alignment: .leading)
+            .background(Palette.accent.opacity(lit ? 1 : 0), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop highlight
+            .contentShape(Rectangle())
+            // A click on the folder opens or closes it, like its arrow.
+            .onTapGesture {
+                guard editingFolder != folder.id else { return }
+                withAnimation(.snappy) { model.setFolderExpanded(folder.id, !folder.expanded) }
+            }
+            // Dragged onto another folder's top edge, a folder goes in front of it
+            // (the same level); onto the rest of it, it becomes a subfolder there.
+            .padding(.top, before ? Space.xxl + Space.xs : 0)
+            .overlay(alignment: .top) {
+                if before {
+                    dropSlot.transition(.opacity)
+                }
+            }
+            .onDrag {
+                draggingFolder = folder.id
+                return NSItemProvider(object: (Self.folderPrefix + folder.id.uuidString) as NSString)
+            } preview: {
+                FolderDragCard(name: folder.name)
+            }
+            .onDrop(of: [.utf8PlainText, .plainText], delegate: FolderDropDelegate(
+                folder: folder.id,
+                reorders: draggingFolder != nil && draggingFolder != folder.id,
+                target: $dropTarget
+            ) { item, inFront in
+                if inFront {
+                    drop([item], beforeFolder: folder)
+                } else {
+                    drop([item], before: nil, into: folder.id.uuidString)
+                }
+            })
+            .contextMenu { folderMenu(folder) }
+            // Spring-loaded, like Finder: a closed folder opens after a moment under a drag.
+            .task(id: lit) {
+                guard lit, !folder.expanded else { return }
+                try? await Task.sleep(for: .milliseconds(500))
+                if !Task.isCancelled, dropTarget == .folder(folder.id) {
+                    withAnimation(.snappy) { model.setFolderExpanded(folder.id, true) }
+                }
+            }
+        }
+    }
+
+    /// What a dragged folder carries, so drops tell it from a connection.
+    private static let folderPrefix = "folder:"
+
+    /// A dragged folder lands in front of `target`, in its parent. Anything else goes into `target`.
+    @discardableResult
+    private func drop(_ items: [String], beforeFolder target: ConnectionFolder) -> Bool {
+        guard let item = items.first, item.hasPrefix(Self.folderPrefix),
+              let id = UUID(uuidString: String(item.dropFirst(Self.folderPrefix.count))) else {
+            return drop(items, before: nil, into: target.id.uuidString)
+        }
+        dropTarget = nil
+        draggingFolder = nil
+        var moved = false
+        withAnimation(.snappy) { moved = model.moveFolder(id, into: target.parentID, before: target.id) }
+        return moved
+    }
+
+    /// Drops on a folder: where the pointer is says in front of it or into it.
+    private struct FolderDropDelegate: DropDelegate {
+        let folder: UUID
+        let reorders: Bool
+        @Binding var target: DropTarget?
+        let perform: (String, Bool) -> Bool
+
+        /// The top edge (and the slot it opens above the folder) means "in front of".
+        private func zone(_ info: DropInfo) -> DropTarget {
+            let edge = target == .beforeFolder(folder) ? Space.xxl + Space.xs + Space.md : Space.md
+            return reorders && info.location.y < edge ? .beforeFolder(folder) : .folder(folder)
+        }
+
+        func dropEntered(info: DropInfo) { show(zone(info)) }
+
+        func dropUpdated(info: DropInfo) -> DropProposal? {
+            let next = zone(info)
+            if next != target { show(next) }
+            return DropProposal(operation: .move)
+        }
+
+        func dropExited(info: DropInfo) {
+            if target == .folder(folder) || target == .beforeFolder(folder) { show(nil) }
+        }
+
+        func performDrop(info: DropInfo) -> Bool {
+            let inFront = zone(info) == .beforeFolder(folder)
+            guard let provider = info.itemProviders(for: [.utf8PlainText, .plainText]).first else { return false }
+            _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+                guard let item = object as? String else { return }
+                DispatchQueue.main.async { _ = perform(item, inFront) }
+            }
+            return true
+        }
+
+        private func show(_ next: DropTarget?) {
+            withAnimation(.snappy(duration: 0.18)) { target = next }
+        }
+    }
+
     /// The outlined space where a dragged connection will land.
     private var dropSlot: some View {
         RoundedRectangle(cornerRadius: 6, style: .continuous)  // grid: ok drop slot
@@ -297,9 +393,17 @@ struct Sidebar: View {
     }
 
     /// A dragged connection id lands before `target`, or last in the folder.
+    /// A dragged folder goes into that folder (never into itself or its own subfolders).
     @discardableResult
     private func drop(_ items: [String], before target: SavedConnection?, into folderID: String) -> Bool {
         dropTarget = nil
+        draggingFolder = nil
+        if let item = items.first, item.hasPrefix(Self.folderPrefix) {
+            guard let id = UUID(uuidString: String(item.dropFirst(Self.folderPrefix.count))) else { return false }
+            var moved = false
+            withAnimation(.snappy) { moved = model.moveFolder(id, into: UUID(uuidString: folderID)) }
+            return moved
+        }
         guard let id = items.first.flatMap(UUID.init(uuidString:)),
               let dragged = connections.first(where: { $0.uuid == id }) else { return false }
         withAnimation(.snappy) { model.move(dragged, before: target, into: folderID, all: connections) }
@@ -318,8 +422,8 @@ struct Sidebar: View {
         editingFolder = nil
     }
 
-    private func newFolder() {
-        let folder = model.addFolder(named: String(localized: "New Folder"))
+    private func newFolder(in parent: UUID? = nil) {
+        let folder = model.addFolder(named: String(localized: "New Folder"), in: parent)
         startNaming(folder)
     }
 
@@ -328,10 +432,20 @@ struct Sidebar: View {
         Button("Rename…", systemImage: "pencil") {
             startNaming(folder)
         }
+        Button("New Subfolder", systemImage: "folder.badge.plus") { newFolder(in: folder.id) }
         Button("New Folder", systemImage: "folder.badge.plus") { newFolder() }
+        Menu("Move to", systemImage: "folder") {
+            ForEach(model.folders.filter { !model.folder($0.id, isIn: folder.id) }) { other in
+                Button(model.path(of: other.id)) { withAnimation(.snappy) { _ = model.moveFolder(folder.id, into: other.id) } }
+                    .disabled(folder.parentID == other.id)
+            }
+            if model.folders.count > 1 { Divider() }
+            Button("Top Level") { withAnimation(.snappy) { _ = model.moveFolder(folder.id, into: nil) } }
+                .disabled(folder.parentID == nil)
+        }
         Divider()
         Button("Delete Folder", systemImage: "trash", role: .destructive) { model.deleteFolder(folder.id) }
-            .help("The connections in it move out of the folder; none is deleted.")
+            .help("Its subfolders and connections move up one level; none is deleted.")
     }
 
     @ViewBuilder
@@ -349,7 +463,7 @@ struct Sidebar: View {
         }
         Menu("Move to", systemImage: "folder") {
             ForEach(model.folders) { folder in
-                Button(folder.name) { model.move(connection, before: nil, into: folder.id.uuidString, all: connections) }
+                Button(model.path(of: folder.id)) { model.move(connection, before: nil, into: folder.id.uuidString, all: connections) }
                     .disabled(connection.folderID == folder.id.uuidString)
             }
             if !model.folders.isEmpty { Divider() }
@@ -370,6 +484,28 @@ struct Sidebar: View {
         Button("Delete…", systemImage: "trash", role: .destructive) {
             if confirmDelete { deleting = connection } else { model.delete(connection) }
         }
+    }
+}
+
+/// What follows the pointer while a folder is dragged: a small card with its name.
+private struct FolderDragCard: View {
+    let name: String
+
+    var body: some View {
+        Label {
+            Text(verbatim: name).lineLimit(1)
+        } icon: {
+            Image(systemName: "folder")
+        }
+        .font(.callout)
+        .padding(.horizontal, Space.sm)
+        .padding(.vertical, Space.xs)
+        .frame(maxWidth: 160, alignment: .leading)
+        .fixedSize()
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(Palette.accent.opacity(0.6)))
+        .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+        .opacity(0.85)
     }
 }
 

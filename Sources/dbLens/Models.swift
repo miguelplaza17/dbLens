@@ -74,11 +74,13 @@ enum Shown: String, CaseIterable {
 
 /// One line of the SQL log: a run, an edit, or an error.
 /// A folder in the sidebar's Connections list. Folders live in the settings;
-/// each connection keeps its folder's id.
+/// each connection keeps its folder's id. A folder can sit in another one.
 struct ConnectionFolder: Codable, Identifiable, Hashable {
     var id = UUID()
     var name: String
     var expanded = true
+    /// The folder it sits in, or nil at the top level. Optional, so older settings still read.
+    var parentID: UUID?
 }
 
 /// A statement run in the SQL panel, kept per connection for the History list.
@@ -178,7 +180,8 @@ final class AppModel {
     }
 
     /// The sidebar's connection folders, in order.
-    var folders: [ConnectionFolder] = (UserDefaults.standard.data(forKey: "connectionFolders"))
+    /// Test and snapshot runs start with none, so the real ones never show there.
+    var folders: [ConnectionFolder] = (Store.isOverridden ? nil : UserDefaults.standard.data(forKey: "connectionFolders"))
         .flatMap { try? JSONDecoder().decode([ConnectionFolder].self, from: $0) } ?? [] {
         didSet {
             if !Store.isOverridden, let data = try? JSONEncoder().encode(folders) {
@@ -188,10 +191,58 @@ final class AppModel {
     }
 
     @discardableResult
-    func addFolder(named name: String) -> ConnectionFolder {
-        let folder = ConnectionFolder(name: name)
+    func addFolder(named name: String, in parent: UUID? = nil) -> ConnectionFolder {
+        let folder = ConnectionFolder(name: name, parentID: parent)
         folders.append(folder)
+        if let parent { setFolderExpanded(parent, true) }
         return folder
+    }
+
+    /// The folders directly inside `parent` (nil is the top level), in order.
+    /// A folder whose parent is gone shows at the top level.
+    func subfolders(of parent: UUID?) -> [ConnectionFolder] {
+        let ids = Set(folders.map(\.id))
+        return folders.filter { folder in
+            guard let parentID = folder.parentID, ids.contains(parentID) else { return parent == nil }
+            return parentID == parent
+        }
+    }
+
+    /// The folder's place, from the top level down: "Servers / Staging".
+    func path(of id: UUID) -> String {
+        var names: [String] = []
+        var current = folders.first { $0.id == id }
+        var seen: Set<UUID> = []
+        while let folder = current, seen.insert(folder.id).inserted {
+            names.insert(folder.name, at: 0)
+            current = folder.parentID.flatMap { parent in folders.first { $0.id == parent } }
+        }
+        return names.joined(separator: " / ")
+    }
+
+    /// Whether `id` is `ancestor` or sits somewhere inside it.
+    func folder(_ id: UUID, isIn ancestor: UUID) -> Bool {
+        var current: UUID? = id
+        var seen: Set<UUID> = []
+        while let folder = current, seen.insert(folder).inserted {
+            if folder == ancestor { return true }
+            current = folders.first { $0.id == folder }?.parentID
+        }
+        return false
+    }
+
+    /// Puts a folder inside another (nil is the top level), before `target`
+    /// there or last. A folder never goes into itself or one of its own subfolders.
+    @discardableResult
+    func moveFolder(_ id: UUID, into parent: UUID?, before target: UUID? = nil) -> Bool {
+        if let parent, folder(parent, isIn: id) { return false }
+        guard id != target, let index = folders.firstIndex(where: { $0.id == id }) else { return false }
+        var folder = folders.remove(at: index)
+        folder.parentID = parent
+        let place = target.flatMap { t in folders.firstIndex { $0.id == t } } ?? folders.endIndex
+        folders.insert(folder, at: place)
+        if let parent { setFolderExpanded(parent, true) }
+        return true
     }
 
     func renameFolder(_ id: UUID, to name: String) {
@@ -200,12 +251,17 @@ final class AppModel {
         folders[index].name = trimmed
     }
 
-    /// The folder goes; its connections move to the top level, after the others.
+    /// The folder goes; its subfolders and connections move up into its parent
+    /// (or the top level), after the others there.
     func deleteFolder(_ id: UUID) {
+        let parent = folders.first { $0.id == id }?.parentID
         folders.removeAll { $0.id == id }
+        for index in folders.indices where folders[index].parentID == id {
+            folders[index].parentID = parent
+        }
         let all = (try? context.fetch(FetchDescriptor<SavedConnection>())) ?? []
         for connection in all where connection.folderID == id.uuidString {
-            move(connection, before: nil, into: "", all: all)
+            move(connection, before: nil, into: parent?.uuidString ?? "", all: all)
         }
     }
 
