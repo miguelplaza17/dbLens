@@ -90,21 +90,33 @@ struct Sidebar: View {
 
     private enum Row: Hashable { case connection(UUID), relation(String), folder(UUID) }
 
-    /// A folder can be selected, like in Finder: the List only drags rows it can
-    /// select, and File > New Subfolder works on the selected folder.
+    /// The row the sidebar shows selected: exactly the one last clicked. The
+    /// List drags the selected row, so a selection that didn't follow the
+    /// click (folders not selectable, connections not kept) dragged another row.
+    @State private var selectedRow: Row?
+
     private var selection: Binding<Row?> {
         Binding {
-            if let id = model.selectedFolderID, model.folders.contains(where: { $0.id == id }) { return .folder(id) }
-            return model.shown == .table ? model.selectedRelation.map(Row.relation) : nil
+            selectedRow
         } set: { row in
-            if case .folder(let id) = row { model.selectedFolderID = id; return }
-            model.selectedFolderID = nil
+            selectedRow = row
             switch row {
             case .connection(let id):
-                if let connection = connections.first(where: { $0.uuid == id }) { Task { await model.connect(connection) } }
+                if id != model.activeID, let connection = connections.first(where: { $0.uuid == id }) {
+                    Task { await model.connect(connection) }
+                }
             case .relation(let id): Task { await model.showTable(id) }
             case .folder, nil: break
             }
+        }
+    }
+
+    /// Tables picked elsewhere (Back, Forward, a query) show as selected here too.
+    private func syncSelection() {
+        if model.shown == .table, let id = model.selectedRelation {
+            selectedRow = .relation(id)
+        } else if case .relation = selectedRow {
+            selectedRow = nil
         }
     }
 
@@ -197,10 +209,10 @@ struct Sidebar: View {
             if !focused, editingFolder != nil { commitFolderName() }
         }
         .onAppear(perform: loadFolded)
+        .onChange(of: model.selectedRelation) { syncSelection() }
+        .onChange(of: model.shown) { syncSelection() }
         // File > New Folder.
         .onChange(of: model.newFolderRequests) { newFolder() }
-        // File > New Subfolder, in the selected folder.
-        .onChange(of: model.newSubfolderRequests) { if let id = model.selectedFolderID { newFolder(in: id) } }
         .onChange(of: model.activeID) { loadFolded() }
         .confirmationDialog("Delete the key “\(deletingKey?.name ?? "")”?", isPresented: .init(
             get: { deletingKey != nil }, set: { if !$0 { deletingKey = nil } }
@@ -269,13 +281,20 @@ struct Sidebar: View {
         let lit = dropTarget == .folder(folder.id)
         let before = dropTarget == .beforeFolder(folder.id)
         return HStack(spacing: Space.xs) {
-            // The disclosure arrow, like a sidebar outline's.
-            Image(systemName: "chevron.right")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(lit ? Palette.onAccent : Color.secondary)
-                .rotationEffect(.degrees(folder.expanded ? 90 : 0))
-                .frame(width: Space.md)
-                .accessibilityHidden(true)
+            // The disclosure arrow, like a sidebar outline's: it opens and closes
+            // the folder. The rest of the row has no tap gesture, so it drags.
+            Button {
+                withAnimation(.snappy) { model.setFolderExpanded(folder.id, !folder.expanded) }
+            } label: {
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(lit ? Palette.onAccent : Color.secondary)
+                    .rotationEffect(.degrees(folder.expanded ? 90 : 0))
+                    .frame(width: Space.md, height: Space.xl)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(folder.expanded ? Text("Collapse") : Text("Expand"))
             HStack(spacing: Space.sm) {
                 Image(systemName: lit ? "folder.fill" : "folder")
                 if editingFolder == folder.id {
@@ -301,16 +320,6 @@ struct Sidebar: View {
         .background(Palette.accent.opacity(lit ? 1 : 0), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop highlight
         .contentShape(Rectangle())
         .padding(.leading, CGFloat(depth) * Space.lg)
-        // A click on the folder or its arrow opens or closes it.
-        .onTapGesture {
-            guard editingFolder != folder.id else { return }
-            withAnimation(.snappy) { model.setFolderExpanded(folder.id, !folder.expanded) }
-        }
-        // Not one combined element: that turned the name field into a button,
-        // so a new folder's name couldn't be typed.
-        .accessibilityAction(named: folder.expanded ? Text("Collapse") : Text("Expand")) {
-            model.setFolderExpanded(folder.id, !folder.expanded)
-        }
         // Dragged onto another folder's top edge, a folder goes in front of it
         // (the same level); onto the rest of it, it becomes a subfolder there.
         .padding(.top, before ? Space.xxl + Space.xs : 0)
@@ -319,12 +328,11 @@ struct Sidebar: View {
                 dropSlot.transition(.opacity)
             }
         }
-        .onDrag {
-            draggingFolder = folder.id
-            return NSItemProvider(object: (Self.folderPrefix + folder.id.uuidString) as NSString)
-        } preview: {
-            FolderDragCard(name: folder.name)
-        }
+        // The same drag as a connection's (no tap gesture on the row: it took
+        // the mouse before the List could start a drag). The card appears as
+        // the drag starts, which is when a folder's top edge means "in front".
+        .onHover { if $0 { hoveredPayload = Self.folderPrefix + folder.id.uuidString } }
+        .draggable(dragPayload(Self.folderPrefix + folder.id.uuidString)) { dragCard(Self.folderPrefix + folder.id.uuidString) }
         .onDrop(of: [.utf8PlainText, .plainText], delegate: FolderDropDelegate(
             folder: folder.id,
             reorders: draggingFolder != nil && draggingFolder != folder.id,
@@ -350,6 +358,29 @@ struct Sidebar: View {
     /// What a dragged folder carries, so drops tell it from a connection.
     private static let folderPrefix = "folder:"
 
+    /// The row under the pointer (its drag payload). The List hands a drag the
+    /// payload some other row registered once rows have moved, so a drag
+    /// always carries the row the pointer is on, which hover tracks exactly.
+    @State private var hoveredPayload: String?
+
+    private func dragPayload(_ own: String) -> String {
+        hoveredPayload ?? own
+    }
+
+    /// The card that follows the pointer: the row being dragged, as `dragPayload` says.
+    @ViewBuilder
+    private func dragCard(_ own: String) -> some View {
+        let payload = dragPayload(own)
+        if payload.hasPrefix(Self.folderPrefix) {
+            let id = UUID(uuidString: String(payload.dropFirst(Self.folderPrefix.count)))
+            FolderDragCard(name: model.folders.first { $0.id == id }?.name ?? "")
+                .onAppear { draggingFolder = id }
+        } else if let connection = connections.first(where: { $0.uuid.uuidString == payload }) {
+            ConnectionDragCard(connection: connection)
+                .onAppear { draggingFolder = nil }
+        }
+    }
+
     /// A dragged folder lands in front of `target`, in its parent. Anything else goes into `target`.
     @discardableResult
     private func drop(_ items: [String], beforeFolder target: ConnectionFolder) -> Bool {
@@ -373,7 +404,8 @@ struct Sidebar: View {
 
         /// The top edge (and the slot it opens above the folder) means "in front of".
         private func zone(_ info: DropInfo) -> DropTarget {
-            let edge = target == .beforeFolder(folder) ? Space.xxl + Space.xs + Space.md : Space.md
+            // A thin band: the open slot above the folder, or its top 8 pt.
+            let edge = target == .beforeFolder(folder) ? Space.xxl + Space.xs + Space.sm : Space.sm
             return reorders && info.location.y < edge ? .beforeFolder(folder) : .folder(folder)
         }
 
@@ -430,7 +462,8 @@ struct Sidebar: View {
                 }
             }
             .tag(Row.connection(connection.uuid))
-            .draggable(connection.uuid.uuidString) { ConnectionDragCard(connection: connection) }
+            .onHover { if $0 { hoveredPayload = connection.uuid.uuidString } }
+            .draggable(dragPayload(connection.uuid.uuidString)) { dragCard(connection.uuid.uuidString) }
             .dropDestination(for: String.self, action: { items, _ in drop(items, before: connection, into: connection.folderID) },
                              isTargeted: targeting(.row(connection.uuid)))
             .contextMenu { menu(for: connection) }

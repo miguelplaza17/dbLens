@@ -181,10 +181,6 @@ final class AppModel {
 
     /// Grows with File > New Folder; the sidebar makes the folder and puts its name in edit.
     var newFolderRequests = 0
-    /// Grows with File > New Subfolder (in the selected folder).
-    var newSubfolderRequests = 0
-    /// The folder selected in the sidebar, if one is.
-    var selectedFolderID: UUID?
 
     /// The sidebar's connection folders, in order.
     /// Test and snapshot runs start with none, so the real ones never show there.
