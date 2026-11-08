@@ -389,9 +389,11 @@ enum MCPServer {
             let session = try await Connector.connect(url, ssh: ssh)
             let given = (arguments["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let name = given.isEmpty ? (Connector.summary(url)?.suggestedName ?? engine.name) : given
-            guard try !connections().contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) else {
+            guard try !connections().contains(where: {
+                $0.name.caseInsensitiveCompare(name) == .orderedSame && $0.engine == engine.rawValue
+            }) else {
                 session.tunnel?.close()
-                throw DatabaseError(message: "A connection named \"\(name)\" already exists; pass another name.")
+                throw DatabaseError(message: "A \(engine.name) connection named \"\(name)\" already exists; pass another name.")
             }
             let connection = SavedConnection(name: name)
             connection.engine = engine.rawValue
@@ -409,11 +411,7 @@ enum MCPServer {
         private func deleteConnection(_ arguments: [String: Any]) throws -> Any {
             try requireManage()
             let name = try text(arguments, "connection")
-            let matches = try connections().filter { !$0.agentsHidden }
-                .filter { $0.name.caseInsensitiveCompare(name) == .orderedSame || $0.uuid.uuidString == name }
-            guard matches.count == 1, let connection = matches.first else {
-                throw DatabaseError(message: matches.isEmpty ? "No connection \"\(name)\"." : "Several connections are named \"\(name)\"; rename one in dbLens.")
-            }
+            let connection = try pick(name, engine: arguments["engine"] as? String)
             sessions.removeValue(forKey: connection.uuid)?.tunnel?.close()
             Secrets.removeURL(for: connection.uuid)
             UserDefaults.standard.removeObject(forKey: "sqlHistory.\(connection.uuid.uuidString)")
@@ -437,17 +435,38 @@ enum MCPServer {
             try ModelContext(container).fetch(FetchDescriptor<SavedConnection>(sortBy: [SortDescriptor(\.name)]))
         }
 
+        /// The connection called `name` (any case) or with that id, narrowed by
+        /// `engine` ("redis", "PostgreSQL"...) when given. Same name with other
+        /// engines is fine: asking without `engine` then lists them.
+        private func pick(_ name: String, engine: String?) throws -> SavedConnection {
+            let all = try connections().filter { !$0.agentsHidden }
+            var wanted: Engine?
+            if let engine, !engine.trimmingCharacters(in: .whitespaces).isEmpty {
+                guard let parsed = Engine.named(engine) else {
+                    throw DatabaseError(message: "Unknown engine \"\(engine)\". Use one of: \(Engine.allCases.map(\.name).joined(separator: ", ")).")
+                }
+                wanted = parsed
+            }
+            let matches = all.filter {
+                ($0.name.caseInsensitiveCompare(name) == .orderedSame || $0.uuid.uuidString == name)
+                    && (wanted == nil || $0.engine == wanted?.rawValue)
+            }
+            guard matches.count == 1, let connection = matches.first else {
+                if matches.isEmpty {
+                    let saved = all.map { "\($0.name) (\(Engine(rawValue: $0.engine)?.name ?? $0.engine))" }.joined(separator: ", ")
+                    throw DatabaseError(message: "No connection \"\(name)\"\(wanted.map { " of type \($0.name)" } ?? ""). Saved: \(saved).")
+                }
+                let kinds = matches.map { Engine(rawValue: $0.engine)?.name ?? $0.engine }.joined(separator: ", ")
+                throw DatabaseError(message: "Several connections are named \"\(name)\" (\(kinds)). Pass engine to choose one.")
+            }
+            return connection
+        }
+
         /// The named connection, opened once and kept for the next calls.
         /// The named connection, if the user lets agents use `tool` on it.
         private func open(_ arguments: [String: Any], for tool: String) async throws -> (SavedConnection, any DatabaseSession) {
             let name = try text(arguments, "connection")
-            let all = try connections().filter { !$0.agentsHidden }
-            let matches = all.filter { $0.name.caseInsensitiveCompare(name) == .orderedSame || $0.uuid.uuidString == name }
-            guard matches.count == 1, let connection = matches.first else {
-                let names = all.map(\.name).joined(separator: ", ")
-                throw DatabaseError(message: matches.isEmpty ? "No connection \"\(name)\". Saved: \(names)."
-                                                             : "Several connections are named \"\(name)\"; rename one in dbLens.")
-            }
+            let connection = try pick(name, engine: arguments["engine"] as? String)
             guard connection.agentsMayUse(tool) else {
                 let allowed = MCPServer.connectionTools.filter(connection.agentsMayUse)
                 throw DatabaseError(message: """
@@ -521,6 +540,10 @@ enum MCPServer {
         // MARK: Tool list
 
         private static let connection: [String: Any] = ["type": "string", "description": "Connection name, from list_connections."]
+        private static let engine: [String: Any] = [
+            "type": "string", "enum": Engine.allCases.map(\.name),
+            "description": "Type of the connection (its engine in list_connections). Needed only when two connections share a name, e.g. \"Alloro\" on PostgreSQL and on Redis.",
+        ]
 
         static let tools: [[String: Any]] = [
             [
@@ -534,7 +557,7 @@ enum MCPServer {
                 "description": "Saves a new connection in dbLens from its URL, after connecting to check it (a failure says why: refused, unknown host, wrong password…). The URL is stored encrypted; afterwards only the name is used. Optionally through SSH. Writing stays off on it until the user allows it. Needs the user's Settings > Agents > Let agents add and remove connections. Databases: all.",
                 "inputSchema": ["type": "object", "properties": [
                     "url": ["type": "string", "description": "Full connection URL: postgres://, mysql://, mariadb://, sqlite:///path, redis://, rediss://, mongodb://, mongodb+srv://."],
-                    "name": ["type": "string", "description": "Name to show. Default: from the URL (user @ host)."],
+                    "name": ["type": "string", "description": "Name to show. Default: from the URL (user @ host). Must be unique among connections of the same engine."],
                     "ssh_host": ["type": "string", "description": "Connect through this SSH host (a ~/.ssh/config alias works)."],
                     "ssh_user": ["type": "string"],
                     "ssh_port": ["type": "integer"],
@@ -545,20 +568,20 @@ enum MCPServer {
             [
                 "name": "delete_connection",
                 "description": "Removes a saved connection from dbLens, with its encrypted URL and SQL history. The database itself is not touched. Confirm with the user first. Needs the user's Settings > Agents > Let agents add and remove connections. Databases: all.",
-                "inputSchema": ["type": "object", "properties": ["connection": connection], "required": ["connection"]],
+                "inputSchema": ["type": "object", "properties": ["connection": connection, "engine": engine], "required": ["connection"]],
                 "annotations": ["readOnlyHint": false, "destructiveHint": true],
             ],
             [
                 "name": "list_tables",
                 "description": "Tables and views of a connection (Redis: keys; MongoDB: collections), with their schema and estimated row count. Databases: all.",
-                "inputSchema": ["type": "object", "properties": ["connection": connection], "required": ["connection"]],
+                "inputSchema": ["type": "object", "properties": ["connection": connection, "engine": engine], "required": ["connection"]],
                 "annotations": ["readOnlyHint": true],
             ],
             [
                 "name": "describe_schema",
                 "description": "The whole relational structure in one call: every table and view with its columns (type, PK, NOT NULL), estimated rows, and foreign keys. Start here to understand a database. Databases: PostgreSQL, MySQL/MariaDB, SQLite, MongoDB (fields sampled, references guessed). Not Redis: use list_tables.",
                 "inputSchema": ["type": "object", "properties": [
-                    "connection": connection,
+                    "connection": connection, "engine": engine,
                     "schema": ["type": "string", "description": "Only this schema (PostgreSQL). Default: all."],
                 ], "required": ["connection"]],
                 "annotations": ["readOnlyHint": true],
@@ -566,14 +589,14 @@ enum MCPServer {
             [
                 "name": "list_extensions",
                 "description": "What the database adds to plain SQL, to write queries only with functions that exist: PostgreSQL extensions (installed with version and schema, and available to install), MySQL active plugins, SQLite compile options (JSON1, FTS5…), Redis modules. Always with the server version. Databases: all; MongoDB only reports its version.",
-                "inputSchema": ["type": "object", "properties": ["connection": connection], "required": ["connection"]],
+                "inputSchema": ["type": "object", "properties": ["connection": connection, "engine": engine], "required": ["connection"]],
                 "annotations": ["readOnlyHint": true],
             ],
             [
                 "name": "install_extension",
                 "description": "Installs an available PostgreSQL extension (CREATE EXTENSION). Only where the user turned on Let Agents Write, and the database user needs the privilege. Confirm with the user first. Databases: PostgreSQL only.",
                 "inputSchema": ["type": "object", "properties": [
-                    "connection": connection,
+                    "connection": connection, "engine": engine,
                     "name": ["type": "string", "description": "Extension name, from list_extensions' available list."],
                     "schema": ["type": "string", "description": "Schema to put it in. Default: the server's choice."],
                 ], "required": ["connection", "name"]],
@@ -583,7 +606,7 @@ enum MCPServer {
                 "name": "describe_table",
                 "description": "A table's columns with types and nullability, its primary key, its foreign keys, and the tables that reference it. Use before writing queries. Databases: all. Redis and MongoDB: the fields of the first entries, with types.",
                 "inputSchema": ["type": "object", "properties": [
-                    "connection": connection,
+                    "connection": connection, "engine": engine,
                     "table": ["type": "string", "description": "Table name, or schema.name when several schemas have it."],
                 ], "required": ["connection", "table"]],
                 "annotations": ["readOnlyHint": true],
@@ -592,7 +615,7 @@ enum MCPServer {
                 "name": "query",
                 "description": "Runs one read-only statement and returns its rows. SQL for PostgreSQL and MySQL (inside a read-only transaction: writes fail) and SQLite (only statements SQLite itself says change nothing); mongosh syntax for MongoDB (db.users.find({...}), aggregate without $out/$merge, countDocuments, distinct); one reading command for Redis (GET, HGETALL, LRANGE, SCAN…). Databases: all.",
                 "inputSchema": ["type": "object", "properties": [
-                    "connection": connection,
+                    "connection": connection, "engine": engine,
                     "query": ["type": "string", "description": "One statement."],
                     "max_rows": ["type": "integer", "description": "Rows to return, 1 to 1000. Default 100."],
                 ], "required": ["connection", "query"]],
@@ -602,7 +625,7 @@ enum MCPServer {
                 "name": "test_changes",
                 "description": "Tries a change or a whole migration without keeping it: runs every statement inside a transaction that is always rolled back, and reports what each did (rows affected) or which one failed and why. PostgreSQL and SQLite: data and schema (DDL). MySQL: data changes only, since its DDL commits by itself. MongoDB and Redis can't undo, so they refuse. Use before execute. Leave out BEGIN/COMMIT: dbLens owns the transaction. Needs Let Agents Write, since the statements really run (and lock) before the rollback. Databases: PostgreSQL and SQLite (everything), MySQL/MariaDB (data changes only). Not MongoDB or Redis.",
                 "inputSchema": ["type": "object", "properties": [
-                    "connection": connection,
+                    "connection": connection, "engine": engine,
                     "statements": ["type": "string", "description": "One statement or a script, separated by semicolons."],
                 ], "required": ["connection", "statements"]],
                 "annotations": ["readOnlyHint": false, "destructiveHint": false, "idempotentHint": true],
@@ -611,7 +634,7 @@ enum MCPServer {
                 "name": "execute",
                 "description": "Changes data or schema, for real: INSERT, UPDATE, DELETE, migrations (DDL), MongoDB writes, Redis commands. Only on connections where the user turned on Let Agents Write in dbLens. Scripts run all or nothing where the database allows (PostgreSQL, SQLite, MySQL without DDL); otherwise the result says so. Run test_changes first and confirm with the user. If the project has a migration tool (Prisma, Rails, Flyway…), use the tool instead, so it records the migration. Databases: all. All or nothing on PostgreSQL, SQLite, and MySQL/MariaDB without DDL.",
                 "inputSchema": ["type": "object", "properties": [
-                    "connection": connection,
+                    "connection": connection, "engine": engine,
                     "statements": ["type": "string", "description": "One statement or a script, separated by semicolons. Leave out BEGIN/COMMIT."],
                     "atomic": ["type": "boolean", "description": "true: all or nothing, or refuse when the database can't. false: plain, each statement on its own. Default: all or nothing where possible."],
                 ], "required": ["connection", "statements"]],

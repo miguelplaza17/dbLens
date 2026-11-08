@@ -309,32 +309,61 @@ fn allowed_tools(c: &SavedConnection) -> Vec<&'static str> {
         .collect()
 }
 
-/// The saved connection named (any case) or with that id; ones the user hid
-/// from agents don't exist for them.
-fn pick(snapshot: &StoreSnapshot, name: &str) -> DbResult<SavedConnection> {
-    let matches: Vec<&SavedConnection> = snapshot
-        .connections
+/// Reads an engine the way people write it: "redis", "PostgreSQL", "postgres",
+/// "mariadb"... (any case).
+pub(crate) fn engine_named(text: &str) -> Option<Engine> {
+    match text.trim().to_lowercase().as_str() {
+        "postgres" | "postgresql" | "pg" => Some(Engine::Postgres),
+        "mysql" | "mariadb" => Some(Engine::Mysql),
+        "sqlite" => Some(Engine::Sqlite),
+        "redis" | "valkey" => Some(Engine::Redis),
+        "mongo" | "mongodb" => Some(Engine::Mongodb),
+        _ => None,
+    }
+}
+
+/// The saved connection named (any case) or with that id, narrowed by
+/// `engine` when given; ones the user hid from agents don't exist for them.
+/// The same name on different engines is allowed: without `engine` the error
+/// lists them.
+fn pick(snapshot: &StoreSnapshot, name: &str, engine: Option<&str>) -> DbResult<SavedConnection> {
+    let wanted = match engine.map(str::trim).filter(|e| !e.is_empty()) {
+        Some(text) => Some(engine_named(text).ok_or_else(|| {
+            DbError::msg(format!(
+                "Unknown engine \"{text}\". Use one of: {}.",
+                Engine::ALL.iter().map(|e| e.name()).collect::<Vec<_>>().join(", ")
+            ))
+        })?),
+        None => None,
+    };
+    let visible: Vec<&SavedConnection> =
+        snapshot.connections.iter().filter(|c| !c.agents_hidden).collect();
+    let matches: Vec<&SavedConnection> = visible
         .iter()
-        .filter(|c| !c.agents_hidden)
+        .copied()
         .filter(|c| c.name.to_lowercase() == name.to_lowercase() || c.id == name)
+        .filter(|c| wanted.map_or(true, |w| c.engine == w))
         .collect();
     match matches.as_slice() {
         [one] => Ok((*one).clone()),
         [] => {
-            let names: Vec<&str> = snapshot
-                .connections
+            let saved: Vec<String> = visible
                 .iter()
-                .filter(|c| !c.agents_hidden)
-                .map(|c| c.name.as_str())
+                .map(|c| format!("{} ({})", c.name, c.engine.name()))
                 .collect();
+            let kind = wanted.map(|w| format!(" of type {}", w.name())).unwrap_or_default();
             Err(DbError::msg(format!(
-                "No connection \"{name}\". Saved: {}.",
-                names.join(", ")
+                "No connection \"{name}\"{kind}. Saved: {}.",
+                saved.join(", ")
             )))
         }
-        _ => Err(DbError::msg(format!(
-            "Several connections are named \"{name}\"; rename one in dbLens."
-        ))),
+        _ => {
+            let kinds: Vec<&str> = matches.iter().map(|c| c.engine.name()).collect();
+            Err(DbError::msg(format!(
+                "Several connections are named \"{name}\" ({}). Pass engine to choose one.",
+                kinds.join(", ")
+            )))
+        }
     }
 }
 
@@ -645,9 +674,10 @@ impl Server {
         flight: &Flight,
     ) -> DbResult<(SavedConnection, Arc<Connection>)> {
         let name = text_of(arguments, "connection")?;
+        let engine = arguments.get("engine").and_then(Value::as_str).map(str::to_string);
         let (saved, url) = self
             .with(move |s| {
-                let saved = pick(&s.snapshot(), &name)?;
+                let saved = pick(&s.snapshot(), &name, engine.as_deref())?;
                 let url = s.url(&saved.id).map(str::to_string);
                 Ok((saved, url))
             })
@@ -758,16 +788,18 @@ impl Server {
         let version = connection.session.server_version();
         let print = fingerprint(&url, ssh.as_ref());
         let (check, draft_url, draft_ssh) = (name.clone(), url, ssh);
+        let kind = engine;
         let saved = self
             .with(move |s| {
                 let taken = s
                     .snapshot()
                     .connections
                     .iter()
-                    .any(|c| c.name.to_lowercase() == check.to_lowercase());
+                    .any(|c| c.engine == kind && c.name.to_lowercase() == check.to_lowercase());
                 if taken {
                     return Err(DbError::msg(format!(
-                        "A connection named \"{check}\" already exists; pass another name."
+                        "A {} connection named \"{check}\" already exists; pass another name.",
+                        kind.name()
                     )));
                 }
                 s.save(crate::store::ConnectionDraft {
@@ -801,7 +833,10 @@ impl Server {
         self.require_manage().await?;
         let name = text_of(arguments, "connection")?;
         let lookup = name.clone();
-        let saved = self.with(move |s| pick(&s.snapshot(), &lookup)).await?;
+        let engine = arguments.get("engine").and_then(Value::as_str).map(str::to_string);
+        let saved = self
+            .with(move |s| pick(&s.snapshot(), &lookup, engine.as_deref()))
+            .await?;
         let slot = self
             .sessions
             .lock()
@@ -1203,6 +1238,11 @@ pub(crate) fn tool_list() -> Value {
 fn tools() -> Value {
     let connection =
         json!({"type": "string", "description": "Connection name, from list_connections."});
+    let engine = json!({
+        "type": "string",
+        "enum": Engine::ALL.iter().map(|e| e.name()).collect::<Vec<_>>(),
+        "description": "Type of the connection (its engine in list_connections). Needed only when two connections share a name, e.g. \"Alloro\" on PostgreSQL and on Redis.",
+    });
     let read = json!({"readOnlyHint": true});
     json!([
         {
@@ -1227,20 +1267,20 @@ fn tools() -> Value {
         {
             "name": "delete_connection",
             "description": "Removes a saved connection from dbLens, with its encrypted URL. The database itself is not touched. Confirm with the user first. Needs the user's Settings > Agents > Let agents add and remove connections. Databases: all.",
-            "inputSchema": {"type": "object", "properties": {"connection": connection}, "required": ["connection"]},
+            "inputSchema": {"type": "object", "properties": {"connection": connection, "engine": engine}, "required": ["connection"]},
             "annotations": {"readOnlyHint": false, "destructiveHint": true},
         },
         {
             "name": "list_tables",
             "description": "Tables and views of a connection (Redis: keys; MongoDB: collections), with their schema and estimated row count. Databases: all.",
-            "inputSchema": {"type": "object", "properties": {"connection": connection}, "required": ["connection"]},
+            "inputSchema": {"type": "object", "properties": {"connection": connection, "engine": engine}, "required": ["connection"]},
             "annotations": read,
         },
         {
             "name": "describe_schema",
             "description": "The whole relational structure in one call: every table and view with its columns (type, PK, NOT NULL), estimated rows, and foreign keys. Start here to understand a database. Databases: PostgreSQL, MySQL/MariaDB, SQLite, MongoDB (fields sampled, references guessed). Not Redis: use list_tables.",
             "inputSchema": {"type": "object", "properties": {
-                "connection": connection,
+                "connection": connection, "engine": engine,
                 "schema": {"type": "string", "description": "Only this schema (PostgreSQL). Default: all."},
             }, "required": ["connection"]},
             "annotations": read,
@@ -1248,14 +1288,14 @@ fn tools() -> Value {
         {
             "name": "list_extensions",
             "description": "What the database adds to plain SQL, to write queries only with functions that exist: PostgreSQL extensions (installed with version and schema, and available to install), MySQL active plugins, SQLite compile options (JSON1, FTS5...), Redis modules. Always with the server version. Databases: all; MongoDB only reports its version.",
-            "inputSchema": {"type": "object", "properties": {"connection": connection}, "required": ["connection"]},
+            "inputSchema": {"type": "object", "properties": {"connection": connection, "engine": engine}, "required": ["connection"]},
             "annotations": read,
         },
         {
             "name": "install_extension",
             "description": "Installs an available PostgreSQL extension (CREATE EXTENSION). Only where the user turned on Let Agents Write, and the database user needs the privilege. Confirm with the user first. Databases: PostgreSQL only.",
             "inputSchema": {"type": "object", "properties": {
-                "connection": connection,
+                "connection": connection, "engine": engine,
                 "name": {"type": "string", "description": "Extension name, from list_extensions' available list."},
                 "schema": {"type": "string", "description": "Schema to put it in. Default: the server's choice."},
             }, "required": ["connection", "name"]},
@@ -1265,7 +1305,7 @@ fn tools() -> Value {
             "name": "describe_table",
             "description": "A table's columns with types and nullability, its primary key, its foreign keys, and the tables that reference it. Use before writing queries. Databases: all. Redis and MongoDB: the fields of the first entries, with types.",
             "inputSchema": {"type": "object", "properties": {
-                "connection": connection,
+                "connection": connection, "engine": engine,
                 "table": {"type": "string", "description": "Table name, or schema.name when several schemas have it."},
             }, "required": ["connection", "table"]},
             "annotations": read,
@@ -1274,7 +1314,7 @@ fn tools() -> Value {
             "name": "query",
             "description": "Runs one read-only statement and returns its rows. SQL for PostgreSQL and MySQL (inside a read-only transaction: writes fail) and SQLite (only statements SQLite itself says change nothing); mongosh syntax for MongoDB (db.users.find({...}), aggregate without $out/$merge, countDocuments, distinct); one reading command for Redis (GET, HGETALL, LRANGE, SCAN...). Databases: all.",
             "inputSchema": {"type": "object", "properties": {
-                "connection": connection,
+                "connection": connection, "engine": engine,
                 "query": {"type": "string", "description": "One statement."},
                 "max_rows": {"type": "integer", "description": "Rows to return, 1 to 1000. Default 100."},
             }, "required": ["connection", "query"]},
@@ -1284,7 +1324,7 @@ fn tools() -> Value {
             "name": "test_changes",
             "description": "Tries a change or a whole migration without keeping it: runs every statement inside a transaction that is always rolled back, and reports what each did (rows affected) or which one failed and why. PostgreSQL and SQLite: data and schema (DDL). MySQL: data changes only, since its DDL commits by itself. MongoDB and Redis can't undo, so they refuse. Use before execute. Leave out BEGIN/COMMIT: dbLens owns the transaction. Needs Let Agents Write, since the statements really run (and lock) before the rollback. Databases: PostgreSQL and SQLite (everything), MySQL/MariaDB (data changes only). Not MongoDB or Redis.",
             "inputSchema": {"type": "object", "properties": {
-                "connection": connection,
+                "connection": connection, "engine": engine,
                 "statements": {"type": "string", "description": "One statement or a script, separated by semicolons."},
             }, "required": ["connection", "statements"]},
             "annotations": {"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true},
@@ -1293,7 +1333,7 @@ fn tools() -> Value {
             "name": "execute",
             "description": "Changes data or schema, for real: INSERT, UPDATE, DELETE, migrations (DDL), MongoDB writes, Redis commands. Only on connections where the user turned on Let Agents Write in dbLens. Scripts run all or nothing where the database allows (PostgreSQL, SQLite, MySQL without DDL); otherwise the result says so. Run test_changes first and confirm with the user. If the project has a migration tool (Prisma, Rails, Flyway...), use the tool instead, so it records the migration. Databases: all. All or nothing on PostgreSQL, SQLite, and MySQL/MariaDB without DDL.",
             "inputSchema": {"type": "object", "properties": {
-                "connection": connection,
+                "connection": connection, "engine": engine,
                 "statements": {"type": "string", "description": "One statement or a script, separated by semicolons. Leave out BEGIN/COMMIT."},
                 "atomic": {"type": "boolean", "description": "true: all or nothing, or refuse when the database can't. false: plain, each statement on its own. Default: all or nothing where possible."},
             }, "required": ["connection", "statements"]},

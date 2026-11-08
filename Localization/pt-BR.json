@@ -369,6 +369,7 @@
   "This connection goes through SSH. Connect to it in dbLens, then open the terminal: it uses the same tunnel.": "Esta conexão passa por SSH. Conecte nela no dbLens e depois abra o terminal: ele usa o mesmo túnel.",
   "This connection's URL wasn't found. Edit the connection and paste the URL again.": "A URL desta conexão não foi encontrada. Edite a conexão e cole a URL de novo.",
   "This database has no tables to draw yet.": "Este banco ainda não tem tabelas para desenhar.",
+  "There is already a %@ connection named \"%@\". Choose another name.": "Já existe uma conexão %@ chamada “%@”. Escolha outro nome.",
   "This doesn't look like a database URL.": "Isso não parece uma URL de banco de dados.",
   "This file is read-only.": "Este arquivo é somente leitura.",
   "This file isn't a SQLite database.": "Este arquivo não é um banco SQLite.",

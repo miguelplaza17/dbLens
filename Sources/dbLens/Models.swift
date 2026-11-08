@@ -454,10 +454,16 @@ final class AppModel {
             throw PostgresError(message: engine.map { String(localized: "dbLens can't connect to \($0.name) yet. Support is on the way.") }
                                 ?? String(localized: "This doesn't look like a database URL."))
         }
-        let session = try await Connector.connect(text, ssh: ssh)
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalName = trimmed.isEmpty ? Connector.summary(text)?.suggestedName ?? engine.name : trimmed
+        let others = (try? context.fetch(FetchDescriptor<SavedConnection>())) ?? []
+        if others.contains(where: { $0.uuid != existing?.uuid && $0.engine == engine.rawValue
+                                    && $0.name.caseInsensitiveCompare(finalName) == .orderedSame }) {
+            throw PostgresError(message: String(localized: "There is already a \(engine.name) connection named \"\(finalName)\". Choose another name."))
+        }
+        let session = try await Connector.connect(text, ssh: ssh)
         let connection = existing ?? SavedConnection(name: "")
-        connection.name = trimmed.isEmpty ? Connector.summary(text)?.suggestedName ?? engine.name : trimmed
+        connection.name = finalName
         connection.ssh = ssh
         connection.engine = engine.rawValue
         try Secrets.setURL(Connector.clean(text), for: connection.uuid)

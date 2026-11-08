@@ -15,6 +15,16 @@ public enum Engine: String, CaseIterable, Sendable, Codable {
         }
     }
 
+    /// The engine a person or agent means by "redis", "PostgreSQL", "postgres",
+    /// "mariadb"... (any case); nil when it is none of them.
+    public static func named(_ text: String) -> Engine? {
+        let key = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let aliases: [String: Engine] = ["postgres": .postgres, "postgresql": .postgres, "pg": .postgres,
+                                         "mysql": .mysql, "mariadb": .mysql, "sqlite": .sqlite,
+                                         "redis": .redis, "valkey": .redis, "mongo": .mongodb, "mongodb": .mongodb]
+        return aliases[key]
+    }
+
     /// The URL scheme the form writes.
     public var scheme: String {
         switch self {
