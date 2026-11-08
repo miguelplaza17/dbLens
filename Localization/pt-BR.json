@@ -371,7 +371,7 @@
   "This database has no tables to draw yet.": "Este banco ainda não tem tabelas para desenhar.",
   "There is already a %@ connection named \"%@\". Choose another name.": "Já existe uma conexão %@ chamada “%@”. Escolha outro nome.",
   "Notes for Agents": "Notas para agentes",
-  "What it holds, naming conventions, tables to avoid": "O que tem aqui, convenções de nomes, tabelas a evitar",
+  "Optional: what it holds, naming conventions, tables to avoid": "Opcional: o que tem aqui, convenções de nomes, tabelas a evitar",
   "same name as another %@ connection": "mesmo nome de outra conexão %@",
   "This doesn't look like a database URL.": "Isso não parece uma URL de banco de dados.",
   "This file is read-only.": "Este arquivo é somente leitura.",

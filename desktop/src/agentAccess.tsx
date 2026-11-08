@@ -64,7 +64,7 @@ export function AgentAccessEditor({ connection, onChange }: { connection: SavedC
           className="notes-field"
           rows={3}
           value={notes}
-          placeholder={t("What it holds, naming conventions, tables to avoid")}
+          placeholder={t("Optional: what it holds, naming conventions, tables to avoid")}
           onChange={(e) => setNotes(e.target.value)}
           onBlur={() => notes.trim() !== access.notes.trim() && onChange({ ...access, notes: notes.trim() })}
         />

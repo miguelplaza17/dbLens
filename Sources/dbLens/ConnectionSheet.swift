@@ -129,7 +129,7 @@ struct ConnectionSheet: View {
                         }
                     }
                     TextField("Name", text: $name, prompt: Text(parsed?.suggestedName ?? String(localized: "Optional")))
-                    TextField("Notes for Agents", text: $notes, prompt: Text("What it holds, naming conventions, tables to avoid"), axis: .vertical)
+                    TextField("Notes for Agents", text: $notes, prompt: Text("Optional: what it holds, naming conventions, tables to avoid"), axis: .vertical)
                         .lineLimit(1...6)
                 } header: {
                     HStack {
