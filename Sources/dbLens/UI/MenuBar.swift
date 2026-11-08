@@ -19,6 +19,20 @@ enum MenuBar {
         NSApp.activate()
     }
 
+    /// The main window, in front and out of the Dock if it was minimized.
+    /// False when there is none (it was closed): the caller opens a new one.
+    @MainActor @discardableResult static func showMainWindow() -> Bool {
+        bringForward()
+        // The main window: a titled window that is not Settings or a panel (minimized ones included).
+        let main = NSApp.windows.filter {
+            $0.styleMask.contains(.titled) && !($0 is NSPanel) && $0.identifier?.rawValue.localizedCaseInsensitiveContains("settings") != true
+        }
+        guard let window = main.first else { return false }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+        return true
+    }
+
     /// With no window left, the Dock icon goes and only the menu bar item stays.
     @MainActor static func hideIfNoWindows() {
         guard keepsRunning else { return }
@@ -34,8 +48,7 @@ struct MenuBarContent: View {
 
     var body: some View {
         Button("Open dbLens") {
-            MenuBar.bringForward()
-            openWindow(id: "main")
+            if !MenuBar.showMainWindow() { openWindow(id: "main") }
         }
         if let connection = model.activeConnection, model.session != nil {
             Text("Connected to \(connection.name)")

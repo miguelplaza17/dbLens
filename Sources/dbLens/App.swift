@@ -165,7 +165,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// A click on the Dock icon (or opening the app again) with no window brings the window back.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag { MenuBar.bringForward() }
+        // Minimized windows count as not visible: bring the window out of the Dock too.
+        _ = flag
+        MenuBar.showMainWindow()
         return true
     }
 
