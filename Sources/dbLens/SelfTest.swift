@@ -101,6 +101,21 @@ enum SelfTest {
                       saved.agentsMayUse("query") && !saved.agentsMayUse("execute"))
                 saved.setAgents("execute", allowed: true)
                 try? model.context.save()
+                // Notes for Agents: saved for the MCP server's process, and trimmed.
+                _ = try? await model.save(url: url, name: saved.name, editing: saved, notes: "  Only items matters.  ")
+                let notesContainer = try? ModelContainer(for: SavedConnection.self, configurations: ModelConfiguration(url: Store.url))
+                let notesRead = (try? notesContainer.map { try ModelContext($0).fetch(FetchDescriptor<SavedConnection>()) })??.first { $0.uuid == saved.uuid }
+                check("Notes for Agents are saved for other processes, trimmed", notesRead?.agentsNotes == "Only items matters.", notesRead?.agentsNotes ?? "nil")
+                // One name per kind of database: a second connection of the same engine can't take it.
+                do {
+                    _ = try await model.save(url: url, name: saved.name.uppercased())
+                    check("a second connection of the same engine can't reuse a name (any case)", false)
+                } catch {
+                    check("a second connection of the same engine can't reuse a name (any case)", connections().count == 1, error.localizedDescription)
+                }
+                // Renaming a connection to its own name is fine.
+                let renamed = try? await model.save(url: url, name: saved.name, editing: saved)
+                check("a connection keeps its own name when edited", renamed?.uuid == saved.uuid && connections().count == 1)
             }
             let boxDir = FileManager.default.temporaryDirectory.appending(path: "dbLens-box-\(UUID().uuidString)")
             try? FileManager.default.createDirectory(at: boxDir, withIntermediateDirectories: true)

@@ -1446,3 +1446,82 @@ fn tools() -> Value {
         },
     ])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn saved(id: &str, name: &str, engine: Engine) -> SavedConnection {
+        SavedConnection {
+            id: id.into(),
+            name: name.into(),
+            engine,
+            created_at: String::new(),
+            last_used: None,
+            folder_id: String::new(),
+            sort_index: 0,
+            ssh: None,
+            agents_can_write: false,
+            agents_hidden: false,
+            agents_blocked_tools: vec![],
+            agents_notes: String::new(),
+        }
+    }
+
+    fn snapshot(list: Vec<SavedConnection>) -> StoreSnapshot {
+        StoreSnapshot {
+            connections: list,
+            folders: vec![],
+            agents_manage_connections: false,
+            key_in_file: false,
+        }
+    }
+
+    #[test]
+    fn engines_are_read_the_way_people_write_them() {
+        assert_eq!(engine_named(" Redis "), Some(Engine::Redis));
+        assert_eq!(engine_named("PostgreSQL"), Some(Engine::Postgres));
+        assert_eq!(engine_named("mariadb"), Some(Engine::Mysql));
+        assert_eq!(engine_named("Mongo"), Some(Engine::Mongodb));
+        assert_eq!(engine_named("oracle"), None);
+        for engine in Engine::ALL {
+            assert_eq!(engine_named(engine.name()), Some(engine));
+        }
+    }
+
+    #[test]
+    fn pick_by_name_engine_and_ref() {
+        let mut hidden = saved("h", "Secret", Engine::Postgres);
+        hidden.agents_hidden = true;
+        let snap = snapshot(vec![
+            saved("a", "Alloro", Engine::Postgres),
+            saved("b", "Alloro", Engine::Redis),
+            saved("c", "Latvs", Engine::Mysql),
+            saved("d", "Odd (Redis)", Engine::Sqlite),
+            hidden,
+        ]);
+        let ambiguous = pick(&snap, "alloro", None).unwrap_err().to_string();
+        assert!(
+            ambiguous.contains("Pass engine") && ambiguous.contains("Redis"),
+            "{ambiguous}"
+        );
+        assert_eq!(pick(&snap, "Alloro", Some("redis")).unwrap().id, "b");
+        assert_eq!(pick(&snap, "alloro", Some("PostgreSQL")).unwrap().id, "a");
+        assert_eq!(pick(&snap, "Alloro (Redis)", None).unwrap().id, "b");
+        assert_eq!(pick(&snap, "latvs", None).unwrap().id, "c");
+        assert_eq!(pick(&snap, "c", None).unwrap().id, "c", "by id");
+        // A connection literally named like a ref wins over reading it as one.
+        assert_eq!(pick(&snap, "Odd (Redis)", None).unwrap().id, "d");
+        // Wrong engine, unknown engine, hidden.
+        let wrong = pick(&snap, "Latvs", Some("redis")).unwrap_err().to_string();
+        assert!(
+            wrong.contains("of type Redis") && wrong.contains("Latvs (MySQL)"),
+            "{wrong}"
+        );
+        assert!(pick(&snap, "Latvs", Some("oracle"))
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown engine"));
+        assert!(pick(&snap, "Secret", None).is_err());
+    }
+}

@@ -391,9 +391,9 @@ func schemaGraphFromServers(_ variable: String) async throws {
         guard let url, let command = try? ClientCommand.make(for: url), let tool = command.resolve() else { continue }
         // Instead of an interactive session, run one query and check the answer.
         let extra = tool.hasSuffix("psql") ? ["-At", "-c", query] : [query]
-        let script = command.script(executable: tool).replacingOccurrences(of: "clear\n", with: "")
-            .replacingOccurrences(of: "\n", with: " " + extra.map { "'\($0)'" }.joined(separator: " ") + "\n",
-                                  options: .backwards, range: nil)
+        // The query goes after the last line (the exec), not after every line (an export has none).
+        let base = command.script(executable: tool).replacingOccurrences(of: "clear\n", with: "")
+        let script = String(base.dropLast()) + " " + extra.map { "'\($0)'" }.joined(separator: " ") + "\n"
         let file = FileManager.default.temporaryDirectory.appending(path: "dblens-test-\(UUID().uuidString).command")
         try script.write(to: file, atomically: true, encoding: .utf8)
         let process = Process()

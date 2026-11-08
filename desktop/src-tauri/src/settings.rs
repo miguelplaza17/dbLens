@@ -369,6 +369,21 @@ mod tests {
     }
 
     #[test]
+    fn keep_in_tray_defaults_by_platform_and_changes() {
+        let s = Settings::default();
+        // On by default where a tray is always there, off on Linux.
+        assert_eq!(s.keep_in_tray, cfg!(not(target_os = "linux")));
+        let off = s.patched(&json!({ "keepInTray": false })).unwrap();
+        assert!(!off.keep_in_tray);
+        assert!(s.patched(&json!({ "keepInTray": "yes" })).is_err());
+        // An older settings file without the field gets the default.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"accent":"mint"}"#).unwrap();
+        assert_eq!(Settings::load(&path).keep_in_tray, s.keep_in_tray);
+    }
+
+    #[test]
     fn refuses_unknown_fields_types_and_accents() {
         let s = Settings::default();
         assert!(s.patched(&json!({ "acent": "mint" })).is_err());

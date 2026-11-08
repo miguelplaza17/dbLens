@@ -35,8 +35,15 @@ impl TrayState {
 
 /// Whether the app should outlive its last window.
 pub fn keeps_running(app: &AppHandle) -> bool {
-    crate::settings::current(app).keep_in_tray
-        && !app.state::<TrayState>().quitting.load(Ordering::SeqCst)
+    should_stay(
+        crate::settings::current(app).keep_in_tray,
+        app.state::<TrayState>().quitting.load(Ordering::SeqCst),
+    )
+}
+
+/// In the tray and not quitting: closing the last window must not end the app.
+fn should_stay(keep_in_tray: bool, quitting: bool) -> bool {
+    keep_in_tray && !quitting
 }
 
 /// Builds the tray icon (shown or not as the setting says).
@@ -156,5 +163,21 @@ fn on_menu(app: &AppHandle, id: &str) {
         }
         "tray-quit" => crate::close_guard::quit(app),
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_app_stays_only_in_the_tray_and_not_while_quitting() {
+        assert!(should_stay(true, false));
+        assert!(!should_stay(false, false), "the setting is off");
+        assert!(!should_stay(true, true), "Quit was asked for");
+        let state = TrayState::default();
+        assert!(!state.quitting.load(Ordering::SeqCst));
+        state.begin_quit();
+        assert!(state.quitting.load(Ordering::SeqCst));
     }
 }

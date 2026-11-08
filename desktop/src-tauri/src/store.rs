@@ -935,6 +935,56 @@ mod tests {
     }
 
     #[test]
+    fn one_name_per_engine_and_notes_for_agents() {
+        let mut store = Store::in_memory();
+        let named = |name: &str, url: &str| ConnectionDraft {
+            name: name.into(),
+            ..draft(url)
+        };
+        let pg = store
+            .save(named("Alloro", "postgres://u@localhost/db"))
+            .unwrap();
+        // The same name on another engine is fine; on the same engine (any case) it is not.
+        let redis = store
+            .save(named("alloro", "redis://localhost:6379"))
+            .unwrap();
+        let taken = store
+            .save(named("ALLORO", "postgres://u@other/db"))
+            .unwrap_err();
+        assert_eq!(taken.to_string(), NAME_TAKEN);
+        assert_eq!(store.snapshot().connections.len(), 2);
+        // Editing one keeps its own name; renaming onto a taken one (same engine) fails.
+        store
+            .save(ConnectionDraft {
+                id: Some(pg.id.clone()),
+                ..named("Alloro", "postgres://u@localhost/db")
+            })
+            .unwrap();
+        assert!(
+            store.rename(&redis.id, "Alloro").is_ok(),
+            "other engine: free"
+        );
+        let third = store.save(named("Cache", "postgres://u@x/db")).unwrap();
+        assert_eq!(
+            store.rename(&third.id, "alloro").unwrap_err().to_string(),
+            NAME_TAKEN
+        );
+        // Notes are trimmed, and survive an edit of the connection.
+        let noted = store.set_agents_notes(&pg.id, "  Only items.  ").unwrap();
+        assert_eq!(noted.agents_notes, "Only items.");
+        store
+            .save(ConnectionDraft {
+                id: Some(pg.id.clone()),
+                ..named("Alloro", "postgres://u@localhost/db")
+            })
+            .unwrap();
+        let kept = store.snapshot();
+        let kept = kept.connections.iter().find(|c| c.id == pg.id).unwrap();
+        assert_eq!(kept.agents_notes, "Only items.");
+        assert!(store.set_agents_notes("nope", "x").is_err());
+    }
+
+    #[test]
     fn saves_seals_and_reopens() {
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("test.key");
