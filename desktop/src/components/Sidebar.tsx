@@ -1,7 +1,7 @@
 // The sidebar: a filter, the saved connections (in folders), and the tables of
 // the open connection grouped by schema (ContentView.swift).
 
-import { forwardRef, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { Fragment, forwardRef, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { EngineIcon } from "../engineIcons";
 import { api, engineNames, relationId, type ConnectionFolder, type Relation, type SavedConnection } from "../api";
 import { t } from "../i18n";
@@ -138,6 +138,7 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
     const open = folder.expanded || !!needle;
     return (
       <div key={folder.id}>
+        <DropSlot slot={`before:${folder.id}`} depth={depth} />
         <SidebarRow
           icon="folder"
           title={folder.name}
@@ -152,18 +153,20 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
           onContextMenu={(e) => folderMenu(e, folder)}
           // Onto another folder: inside it; onto its top edge: in front of it.
           onMouseDown={(e) =>
-            beginFolderDrag(
-              e,
-              (spot) => spot.before !== folder.id && !(spot.folder && model.folderIsIn(spot.folder, folder.id)),
-              (spot) => void model.moveFolder(folder.id, spot.folder, spot.before),
-            )
+            beginFolderDrag(e, {
+              allowed: (spot) => spot.before !== folder.id && !(spot.folder && model.folderIsIn(spot.folder, folder.id)),
+              onDrop: (spot) => model.moveFolder(folder.id, spot.folder, spot.before),
+              onSpring: (id) => void model.openFolder(id),
+            })
           }
           dropFolder={folder.id}
           folderParent={folder.parentId}
           trailing={!open && inside.length > 0 ? <span className="count">{inside.length}</span> : null}
         />
         {open && inside.map((c) => row(c, depth + 1))}
+        {open && <DropSlot slot={`connections:${folder.id}`} depth={depth + 1} />}
         {open && subfolders(folder.id).map((f) => folderTree(f, depth + 1))}
+        {open && <DropSlot slot={`folders:${folder.id}`} depth={depth + 1} />}
       </div>
     );
   };
@@ -172,8 +175,9 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
     const active = model.activeSavedId === c.id;
     const busy = model.connecting === c.id;
     return (
+      <Fragment key={c.id}>
+      <DropSlot slot={`before:${c.id}`} depth={depth} />
       <SidebarRow
-        key={c.id}
         icon="database"
         iconNode={<EngineIcon engine={c.engine} />}
         depth={depth}
@@ -187,9 +191,18 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
         tooltip={`${engineNames[c.engine]}${c.ssh ? ` · ${t("Via SSH %@", c.ssh.host)}` : ""}`}
         onClick={() => !active && !busy && void model.connect(c)}
         onContextMenu={(e) => connectionMenu(e, c)}
-        onMouseDown={(e) => beginConnectionDrag(e, (folderId) => folderId !== c.folderId && void model.moveConnection(c, folderId))}
+        onMouseDown={(e) =>
+          beginConnectionDrag(e, {
+            allowed: (spot) => spot.row !== c.id,
+            onDrop: (spot) => model.moveConnection(c, spot.folder, spot.row),
+            onSpring: (id) => void model.openFolder(id),
+          })
+        }
+        dropRow={c.id}
+        rowFolder={c.folderId}
         trailing={busy ? <span className="spinner small" /> : active ? <span className="dot-active" aria-label={t("Connected")} /> : null}
       />
+      </Fragment>
     );
   };
 
@@ -225,7 +238,9 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
           </span>
         </div>
         {byFolder("").map((c) => row(c, 0))}
+        <DropSlot slot="connections:" depth={0} />
         {subfolders("").map((folder) => folderTree(folder, 0))}
+        <DropSlot slot="folders:" depth={0} />
 
         {model.session &&
           groups.map(([schema, relations]) => {
@@ -266,6 +281,11 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
   );
 });
 
+/** Empty until a drag can land here; then it opens (native/dragConnections.ts). */
+function DropSlot(props: { slot: string; depth: number }) {
+  return <div className="drop-slot" data-slot={props.slot} style={{ "--depth": props.depth } as CSSProperties} aria-hidden="true" />;
+}
+
 function SidebarRow(props: {
   icon: IconName;
   /** Drawn instead of `icon` (a kind of database's own icon). */
@@ -289,6 +309,9 @@ function SidebarRow(props: {
   dropFolder?: string;
   /** A folder row's parent ("" at the top level): a folder dropped on its top edge lands there. */
   folderParent?: string;
+  /** A connection row: a dragged connection lands in front of it, in `rowFolder`. */
+  dropRow?: string;
+  rowFolder?: string;
 }) {
   const depth = props.depth ?? 0;
   const style = depth > 0 ? ({ "--depth": depth } as CSSProperties) : undefined;
@@ -323,6 +346,8 @@ function SidebarRow(props: {
       onMouseDown={props.onMouseDown}
       data-drop-folder={props.dropFolder}
       data-folder-parent={props.folderParent}
+      data-drop-row={props.dropRow}
+      data-row-folder={props.rowFolder}
       style={style}
       aria-current={props.selected ? "true" : undefined}
     >

@@ -822,7 +822,13 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   connection_url: (a) => mask(saved.find((c) => c.id === a.id)?.url ?? ""),
   move_connection: (a) => {
     const c = saved.find((x) => x.id === a.id);
-    if (c) c.folderId = String(a.folderId ?? "");
+    if (!c) return;
+    const folderId = String(a.folderId ?? "");
+    const level = saved.filter((x) => x.folderId === folderId && x.id !== c.id).sort((x, y) => x.sortIndex - y.sortIndex);
+    const at = level.findIndex((x) => x.id === a.beforeId);
+    level.splice(at < 0 ? level.length : at, 0, c);
+    c.folderId = folderId;
+    level.forEach((x, i) => (x.sortIndex = i));
   },
   add_folder: (a) => {
     const parentId = folders.some((x) => x.id === a.parentId) ? String(a.parentId) : "";

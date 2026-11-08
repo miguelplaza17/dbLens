@@ -1017,21 +1017,31 @@ body.dragging-connection .sidebar-row:not(.drop-target):not(.selected):hover { b
   color: var(--on-accent);
 }
 .sidebar-row.drop-target .icon { color: var(--on-accent); }
-/* A folder dragged onto another folder's top edge goes in front of it. */
-.sidebar-row[data-folder-parent]::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  right: var(--space-sm);
-  left: var(--space-sm);
-  height: 2px;
-  border-radius: var(--radius-sm);
-  background: var(--accent);
+/* Where a dragged row will land: it opens, and the rows below move down. */
+.drop-slot {
+  height: 0;
+  margin-left: calc(var(--space-sm) + var(--depth, 0) * var(--space-lg));
+  margin-right: var(--space-sm);
+  overflow: hidden;
   opacity: 0;
-  transform: scaleX(0.92);
-  transition: opacity var(--duration-slow), transform var(--duration-slow);
+  transition: height var(--duration-slow), margin var(--duration-slow), opacity var(--duration-slow);
 }
-.sidebar-row.drop-before::before { opacity: 1; transform: scaleX(1); }
+.drop-slot::after {
+  content: "";
+  display: block;
+  box-sizing: border-box;
+  height: var(--control-height);
+  border: 1.5px dashed var(--accent);
+  border-radius: var(--radius-md);
+  background: var(--accent-faint);
+}
+.drop-slot.open {
+  height: var(--control-height);
+  margin-top: var(--space-xxs);
+  margin-bottom: var(--space-xxs);
+  opacity: 1;
+}
+.drop-slot.instant { transition: none; }
 
 /* Run with the arrow for its other modes. */
 .split-button {

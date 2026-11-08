@@ -356,8 +356,8 @@ export class AppModel {
     await this.loadStore();
   }
 
-  async moveConnection(saved: SavedConnection, folderId: string) {
-    await this.attempt(() => api.moveConnection(saved.id, folderId));
+  async moveConnection(saved: SavedConnection, folderId: string, beforeId: string | null = null) {
+    await this.attempt(() => api.moveConnection(saved.id, folderId, beforeId));
     await this.loadStore();
   }
 
@@ -372,6 +372,11 @@ export class AppModel {
     if (parentId && this.folderIsIn(parentId, id)) return;
     await this.attempt(() => api.moveFolder(id, parentId, beforeId));
     await this.loadStore();
+  }
+
+  /** Opens a folder; a closed one under a drag does this after a moment. */
+  async openFolder(id: string) {
+    if (this.store.folders.find((f) => f.id === id)?.expanded === false) await this.toggleFolder(id);
   }
 
   /** Whether `id` is `ancestor` or sits somewhere inside it. */
