@@ -88,9 +88,16 @@ enum SettingsTab: String, CaseIterable, Identifiable {
 struct GeneralSettings: View {
     @Environment(AppModel.self) private var model
     @AppStorage("confirmDelete") private var confirmDelete = true
+    @AppStorage(MenuBar.key) private var keepInMenuBar = true
 
     var body: some View {
         @Bindable var model = model
+        Section {
+            Toggle("Keep dbLens in the menu bar", isOn: $keepInMenuBar)
+        } footer: {
+            Text("Closing the window leaves dbLens running; open it again from the menu bar. Quit with ⌘Q.")
+                .foregroundStyle(.secondary)
+        }
         Section("Tables") {
             Picker("Rows per page", selection: $model.pageSize) {
                 ForEach(AppModel.pageSizes, id: \.self) { Text($0.formatted()).tag($0) }

@@ -17,6 +17,7 @@ struct DBLensApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var model = AppModel(container: Store.makeContainer())
     @State private var updater = Updater()
+    @AppStorage(MenuBar.key) private var keepInMenuBar = true
 
     init() {
         // `dbLens --mcp`: an MCP server on stdio for agents, no window.
@@ -122,6 +123,13 @@ struct DBLensApp: App {
             }
         }
 
+        MenuBarExtra("dbLens", systemImage: "cylinder.split.1x2.fill",
+                     isInserted: Binding(get: { keepInMenuBar && !Store.isOverridden }, set: { keepInMenuBar = $0 })) {
+            MenuBarContent()
+                .environment(model)
+                .environment(updater)
+        }
+
         Settings {
             SettingsView()
                 .environment(model)
@@ -136,7 +144,7 @@ struct DBLensApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Tooltips after a quarter second, not the system's second: most buttons here are icons.
-        UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 250])
+        UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 250, MenuBar.key: true])
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -147,9 +155,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Started from a terminal, the process is not a foreground app yet.
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
+        // The last window closed with dbLens kept in the menu bar: drop the Dock icon.
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { _ in
+            DispatchQueue.main.async { MenuBar.hideIfNoWindows() }
+        }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { !MenuBar.keepsRunning }
+
+    /// A click on the Dock icon (or opening the app again) with no window brings the window back.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { MenuBar.bringForward() }
+        return true
+    }
 
     /// The self-test's result becomes the exit code, after a normal quit.
     func applicationWillTerminate(_ notification: Notification) {
