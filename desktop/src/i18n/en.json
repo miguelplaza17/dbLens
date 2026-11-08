@@ -367,5 +367,10 @@
   "Top Level": "Top Level",
   "Notes for Agents": "Notes for Agents",
   "Optional: what it holds, naming conventions, tables to avoid": "Optional: what it holds, naming conventions, tables to avoid",
-  "There is already a connection with this name and type. Choose another name.": "There is already a connection with this name and type. Choose another name."
+  "There is already a connection with this name and type. Choose another name.": "There is already a connection with this name and type. Choose another name.",
+  "Open dbLens": "Open dbLens",
+  "Background": "Background",
+  "Keep dbLens in the menu bar": "Keep dbLens in the menu bar",
+  "Keep dbLens in the tray": "Keep dbLens in the tray",
+  "Closing the last window leaves dbLens running; open it again from its icon. Quit from the icon's menu or the File menu.": "Closing the last window leaves dbLens running; open it again from its icon. Quit from the icon's menu or the File menu."
 }

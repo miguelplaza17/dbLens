@@ -99,6 +99,10 @@ export function installNative(model: AppModel): () => void {
     redo: t("Redo"),
     quit: t(/Mac/.test(navigator.platform) ? "Quit dbLens" : "Quit"),
   };
+  labels["tray:open"] = t("Open dbLens");
+  labels["tray:settings"] = t("Settings…");
+  labels["tray:updates"] = t("Check for Updates…");
+  labels["tray:quit"] = labels.quit;
   for (const s of shortcuts) labels[s.action] = t(s.menu ?? s.title);
   for (const title of ["File", "Edit", "View", "Query", "Window", "Help"]) labels[`menu:${title}`] = t(title);
   void invoke("set_menu_labels", { labels }).catch(() => undefined);

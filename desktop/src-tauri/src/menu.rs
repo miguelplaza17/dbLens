@@ -498,6 +498,7 @@ pub fn set_menu_state(app: AppHandle, state: MenuState) {
 /// menu's title. Rows without an entry keep their English text.
 #[tauri::command]
 pub fn set_menu_labels(app: AppHandle, labels: HashMap<String, String>) {
+    crate::tray::set_labels(&app, &labels);
     if let Ok(map) = app.state::<MenuHandles>().0.lock() {
         for (id, item) in map.iter() {
             if let Some(text) = labels.get(id) {

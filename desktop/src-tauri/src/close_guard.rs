@@ -68,6 +68,8 @@ pub fn hold_close(window: &Window) -> bool {
 /// Quit: every window is asked as if it were closed; the app ends when the
 /// last one goes. A window whose user keeps the edits stays open.
 pub fn quit(app: &AppHandle) {
+    // Not "the last window closed, stay in the tray": the app really ends.
+    app.state::<crate::tray::TrayState>().begin_quit();
     let windows = app.webview_windows();
     if windows.is_empty() {
         app.exit(0);

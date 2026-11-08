@@ -68,6 +68,9 @@ pub struct Settings {
     pub check_for_updates: bool,
     /// Settings > Updates > "Update automatically".
     pub update_automatically: bool,
+    /// Keep dbLens running in the tray after the last window closes (tray.rs).
+    /// Off by default on Linux, where not every desktop shows a tray.
+    pub keep_in_tray: bool,
     /// Settings > Appearance > Database Icons, by kind of database.
     pub engine_icons: std::collections::BTreeMap<String, EngineIconPref>,
 }
@@ -79,6 +82,7 @@ impl Default for Settings {
             accent: "system".into(),
             check_for_updates: true,
             update_automatically: false,
+            keep_in_tray: cfg!(not(target_os = "linux")),
             engine_icons: Default::default(),
         }
     }
@@ -253,6 +257,7 @@ pub fn set_settings(
         let _ = window.set_theme(settings.native_theme());
     }
     follow_menu_theme(&app, &settings);
+    crate::tray::apply(&app, settings.keep_in_tray);
     let _ = app.emit(SETTINGS_EVENT, &settings);
     Ok(settings)
 }

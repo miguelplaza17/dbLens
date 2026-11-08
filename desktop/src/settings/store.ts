@@ -17,6 +17,8 @@ export interface Settings {
   accent: AccentId;
   checkForUpdates: boolean;
   updateAutomatically: boolean;
+  /** Keep dbLens running in the tray after the last window closes. */
+  keepInTray: boolean;
   /** Per kind of database (postgres, mysql…): logo or symbol, and its color. */
   engineIcons: Record<string, EngineIconPref>;
 }
@@ -37,6 +39,7 @@ const defaults: Settings = {
   accent: "system",
   checkForUpdates: true,
   updateAutomatically: false,
+  keepInTray: true,
   engineIcons: {},
 };
 

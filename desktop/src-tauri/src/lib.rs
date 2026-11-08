@@ -22,6 +22,7 @@ pub mod sql_script;
 pub mod ssh;
 pub mod store;
 pub mod terminal;
+pub mod tray;
 pub mod updater;
 pub mod url;
 pub mod windows;
@@ -48,11 +49,13 @@ pub fn run() {
         .manage(commands::AppState::default())
         .manage(windows::PendingOpen::default())
         .manage(close_guard::CloseGuard::default())
+        .manage(tray::TrayState::default())
         .manage(settings::SettingsState::from_env())
         .manage(history::HistoryState::from_env())
         .manage(updater::UpdaterState::default())
         .setup(|app| {
             menu::install(app.handle())?;
+            tray::install(app.handle())?;
             #[cfg(target_os = "linux")]
             {
                 linux_gtk::follow_theme(settings::current(app.handle()).native_theme());
@@ -96,6 +99,10 @@ pub fn run() {
                     state.close_owned_by_later(webview.label());
                 }
                 state.close_owned_by_later(window.label());
+                // With the app kept in the tray, the Dock icon goes with the last window.
+                if window.app_handle().webview_windows().len() <= 1 {
+                    tray::windows_gone(window.app_handle());
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -164,11 +171,24 @@ pub fn run() {
         .expect("error while building dbLens");
     // The process ends with exit() and managed state is never dropped, so the
     // sessions and their ssh tunnels are closed here, on the way out.
-    app.run(|app, event| {
-        if let RunEvent::Exit = event {
+    app.run(|app, event| match event {
+        // The last window closed (no exit code): stay in the tray when asked to.
+        RunEvent::ExitRequested {
+            code: None, api, ..
+        } if tray::keeps_running(app) => {
+            api.prevent_exit();
+        }
+        // A click on the Dock icon with no window open.
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen {
+            has_visible_windows: false,
+            ..
+        } => tray::show(app),
+        RunEvent::Exit => {
             let state = app.state::<commands::AppState>();
             tauri::async_runtime::block_on(state.close_all());
             updater::on_exit(app);
         }
+        _ => {}
     });
 }

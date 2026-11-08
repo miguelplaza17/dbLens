@@ -144,7 +144,7 @@ export default function SettingsApp() {
       <main className="settings-pane" role="tabpanel" aria-label={t(current.title)}>
         <div ref={contentRef} className="settings-content">
           <h1 className="settings-title">{t(current.title)}</h1>
-          {settings && tab === "appearance" && <AppearanceTab settings={settings} change={change} />}
+          {settings && tab === "appearance" && <AppearanceTab settings={settings} change={change} info={info} />}
           {tab === "connections" && <ConnectionsTab say={say} />}
           {tab === "agents" && <AgentsTab info={info} copy={copy} say={say} />}
           {settings && tab === "updates" && <UpdatesTab settings={settings} change={change} info={info} say={say} />}
@@ -214,7 +214,7 @@ const engineKinds: Engine[] = ["postgres", "mysql", "sqlite", "redis", "mongodb"
 
 // MARK: - Appearance (AppearanceSettings.swift, Theme.swift)
 
-function AppearanceTab({ settings, change }: { settings: Settings; change: Change }) {
+function AppearanceTab({ settings, change, info }: { settings: Settings; change: Change; info: SettingsInfo | null }) {
   const modes: { id: Appearance; title: string }[] = [
     { id: "system", title: "System" },
     { id: "light", title: "Light" },
@@ -259,6 +259,17 @@ function AppearanceTab({ settings, change }: { settings: Settings; change: Chang
             <span className="settings-row-detail">{t(accent.name)}</span>
           </div>
         </Row>
+      </Group>
+      <Group
+        title={t("Background")}
+        footer={t("Closing the last window leaves dbLens running; open it again from its icon. Quit from the icon's menu or the File menu.")}
+      >
+        <Toggle
+          id="keep-in-tray"
+          label={info?.os === "macos" ? t("Keep dbLens in the menu bar") : t("Keep dbLens in the tray")}
+          checked={settings.keepInTray}
+          onChange={(on) => change({ keepInTray: on })}
+        />
       </Group>
       <Group title={t("Database Icons")} footer={t("The logos belong to their owners.")}>
         {engineKinds.map((e) => {

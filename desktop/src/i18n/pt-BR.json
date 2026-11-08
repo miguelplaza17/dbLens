@@ -367,5 +367,10 @@
   "Top Level": "Nível Superior",
   "Notes for Agents": "Notas para agentes",
   "Optional: what it holds, naming conventions, tables to avoid": "Opcional: o que tem aqui, convenções de nomes, tabelas a evitar",
-  "There is already a connection with this name and type. Choose another name.": "Já existe uma conexão com este nome e tipo. Escolha outro nome."
+  "There is already a connection with this name and type. Choose another name.": "Já existe uma conexão com este nome e tipo. Escolha outro nome.",
+  "Open dbLens": "Abrir o dbLens",
+  "Background": "Segundo plano",
+  "Keep dbLens in the menu bar": "Manter o dbLens na barra de menus",
+  "Keep dbLens in the tray": "Manter o dbLens na bandeja",
+  "Closing the last window leaves dbLens running; open it again from its icon. Quit from the icon's menu or the File menu.": "Fechar a última janela deixa o dbLens rodando; abra de novo pelo ícone. Saia pelo menu do ícone ou pelo menu Arquivo."
 }
