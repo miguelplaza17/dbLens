@@ -465,6 +465,7 @@ select option {
   margin-top: var(--space-sm);
 }
 .sidebar-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-sm);
@@ -980,11 +981,57 @@ select option {
   animation: fade var(--duration-normal);
 }
 
-/* Dragging a saved connection onto a folder (native/dragConnections.ts). */
-body.dragging-connection { cursor: grabbing; user-select: none; }
-.drop-target { background: color-mix(in srgb, var(--accent, #0a84ff) 22%, transparent); border-radius: 6px; }
+/* Dragging a connection or a folder in the sidebar (native/dragConnections.ts). */
+body.dragging-connection, body.dragging-connection * { cursor: grabbing !important; user-select: none; }
+body.dragging-connection .sidebar-row,
+body.dragging-connection .sidebar-section-header {
+  transition: background var(--duration-slow), color var(--duration-slow), opacity var(--duration-slow);
+}
+body.dragging-connection .sidebar-row:not(.drop-target):not(.selected):hover { background: transparent; }
+.sidebar-row.dragging-source { opacity: 0.45; }
+.drag-ghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  max-width: 200px;
+  padding: var(--space-xs) var(--space-md);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  opacity: 0.94;
+  pointer-events: none;
+  will-change: transform;
+  animation: fade var(--duration-normal);
+}
+.drag-ghost .icon { color: var(--accent-text); }
+.drag-ghost span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.sidebar-row.drop-target,
+.sidebar-section-header.drop-target {
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: var(--on-accent);
+}
+.sidebar-row.drop-target .icon { color: var(--on-accent); }
 /* A folder dragged onto another folder's top edge goes in front of it. */
-.drop-before { box-shadow: inset 0 2px 0 var(--accent, #0a84ff); }
+.sidebar-row[data-folder-parent]::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: var(--space-sm);
+  left: var(--space-sm);
+  height: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  opacity: 0;
+  transform: scaleX(0.92);
+  transition: opacity var(--duration-slow), transform var(--duration-slow);
+}
+.sidebar-row.drop-before::before { opacity: 1; transform: scaleX(1); }
 
 /* Run with the arrow for its other modes. */
 .split-button {

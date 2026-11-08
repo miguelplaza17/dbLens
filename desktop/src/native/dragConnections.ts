@@ -12,6 +12,7 @@
 const THRESHOLD = 5;
 export const DROP_CLASS = "drop-target";
 export const DROP_BEFORE_CLASS = "drop-before";
+const SOURCE_CLASS = "dragging-source";
 
 /** Where a drag ends: inside `folder` ("" is the top level), in front of folder `before` when set. */
 export interface DropSpot {
@@ -37,6 +38,20 @@ function hitAt(x: number, y: number, reorder: boolean): Hit | null {
   return { el, spot: { folder, before: null } };
 }
 
+/** The card that follows the pointer: the dragged row's icon and name. */
+function makeGhost(row: HTMLElement): HTMLElement {
+  const ghost = document.createElement("div");
+  ghost.className = "drag-ghost";
+  const title = row.querySelector(".sidebar-row-title");
+  const icon = title?.previousElementSibling;
+  if (icon) ghost.append(icon.cloneNode(true));
+  const name = document.createElement("span");
+  name.textContent = title?.textContent ?? "";
+  ghost.append(name);
+  document.body.append(ghost);
+  return ghost;
+}
+
 /** The folder id under a point, "" for the top level, or null for nothing. */
 export function folderAt(x: number, y: number): string | null {
   return hitAt(x, y, false)?.spot.folder ?? null;
@@ -60,6 +75,8 @@ function beginSidebarDrag(
   if (event.button !== 0) return;
   const startX = event.clientX;
   const startY = event.clientY;
+  const source = event.currentTarget as HTMLElement;
+  let ghost: HTMLElement | null = null;
   let dragging = false;
   let hovered: HTMLElement | null = null;
   let hoveredClass = DROP_CLASS;
@@ -79,7 +96,10 @@ function beginSidebarDrag(
     if (!dragging) {
       dragging = true;
       document.body.classList.add("dragging-connection");
+      source.classList.add(SOURCE_CLASS);
+      ghost = makeGhost(source);
     }
+    if (ghost) ghost.style.transform = `translate3d(${e.clientX + 12}px, ${e.clientY + 10}px, 0)`;
     mark(e.clientX, e.clientY);
   };
   const finish = (e: MouseEvent) => {
@@ -87,6 +107,8 @@ function beginSidebarDrag(
     window.removeEventListener("mouseup", finish);
     clear();
     document.body.classList.remove("dragging-connection");
+    source.classList.remove(SOURCE_CLASS);
+    ghost?.remove();
     if (!dragging) return;
     // The click that ends a drag must not connect (or fold the folder).
     window.addEventListener("click", (c) => c.stopPropagation(), { capture: true, once: true });
