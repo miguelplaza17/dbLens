@@ -200,7 +200,9 @@ async fn sqlite_read_write_gates() {
     let tables = client
         .call_ok("list_tables", json!({"connection": "lite"}))
         .await;
-    let names: Vec<&str> = tables
+    assert_eq!(tables["connection"], "Lite");
+    assert_eq!(tables["engine"], "SQLite");
+    let names: Vec<&str> = tables["result"]
         .as_array()
         .unwrap()
         .iter()
@@ -211,7 +213,8 @@ async fn sqlite_read_write_gates() {
     let schema = client
         .call_ok("describe_schema", json!({"connection": "Lite"}))
         .await;
-    let schema = schema.as_str().unwrap();
+    assert_eq!(schema["connection"], "Lite");
+    let schema = schema["result"].as_str().unwrap();
     assert!(schema.contains("FK (team_id) -> main.team(id)"), "{schema}");
 
     let table = client

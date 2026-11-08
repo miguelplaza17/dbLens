@@ -528,7 +528,12 @@ impl Server {
         // dropped halfway.
         let mut work = {
             let (server, flight) = (self.clone(), flight.clone());
-            tokio::spawn(async move { server.call(&name, &arguments, &flight).await })
+            tokio::spawn(async move {
+                match server.call(&name, &arguments, &flight).await {
+                    Ok(result) => Ok(server.labeled(&name, &arguments, result).await),
+                    Err(e) => Err(e),
+                }
+            })
         };
         let mut finished = false;
         let outcome = tokio::select! {
@@ -569,6 +574,40 @@ impl Server {
         }
         let result = call_result(outcome?);
         Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+    }
+
+    /// Says which connection (name and engine) an answer comes from, so
+    /// results of same-named databases are never mixed up. A JSON object gets
+    /// the two keys; anything else (a list, text) goes under "result".
+    async fn labeled(&self, tool: &str, arguments: &Map<String, Value>, output: Value) -> Value {
+        let Some(name) = arguments.get("connection").and_then(Value::as_str) else {
+            return output;
+        };
+        if !CONNECTION_TOOLS.contains(&tool) {
+            return output;
+        }
+        let (name, engine) = (
+            name.to_string(),
+            arguments.get("engine").and_then(Value::as_str).map(str::to_string),
+        );
+        let Ok(saved) = self
+            .with(move |s| pick(&s.snapshot(), &name, engine.as_deref()))
+            .await
+        else {
+            return output;
+        };
+        match output {
+            Value::Object(mut object) => {
+                object
+                    .entry("connection")
+                    .or_insert_with(|| json!(saved.name));
+                object
+                    .entry("engine")
+                    .or_insert_with(|| json!(saved.engine.name()));
+                Value::Object(object)
+            }
+            other => json!({"connection": saved.name, "engine": saved.engine.name(), "result": other}),
+        }
     }
 
     async fn call(

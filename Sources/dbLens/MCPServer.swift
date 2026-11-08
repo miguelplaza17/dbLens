@@ -101,7 +101,7 @@ enum MCPServer {
                 let name = params["name"] as? String ?? ""
                 let arguments = params["arguments"] as? [String: Any] ?? [:]
                 do {
-                    let output = try await call(name, arguments)
+                    let output = labeled(name, arguments, try await call(name, arguments))
                     let text = output as? String ?? Self.json(output)
                     reply(id, ["content": [["type": "text", "text": text]], "isError": false])
                 } catch {
@@ -111,6 +111,21 @@ enum MCPServer {
             default:
                 send(["jsonrpc": "2.0", "id": id, "error": ["code": -32601, "message": "Method not found: \(method)"]])
             }
+        }
+
+        /// Says which connection (name and engine) an answer comes from, so
+        /// results of same-named databases are never mixed up. A JSON object
+        /// gets the two keys; anything else (a list, text) goes under "result".
+        private func labeled(_ tool: String, _ arguments: [String: Any], _ output: Any) -> Any {
+            guard MCPServer.connectionTools.contains(tool), let name = arguments["connection"] as? String,
+                  let connection = try? pick(name, engine: arguments["engine"] as? String) else { return output }
+            let label: [String: Any] = ["connection": connection.name,
+                                        "engine": Engine(rawValue: connection.engine)?.name ?? connection.engine]
+            if var object = output as? [String: Any] {
+                object.merge(label) { current, _ in current }
+                return object
+            }
+            return label.merging(["result": output]) { a, _ in a }
         }
 
         // MARK: Tools
