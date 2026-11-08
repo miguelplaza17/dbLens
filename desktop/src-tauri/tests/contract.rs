@@ -365,6 +365,7 @@ fn connections() {
             agents_can_write: false,
             agents_hidden: false,
             agents_blocked_tools: vec![],
+            agents_notes: String::new(),
         }],
         folders: vec![ConnectionFolder {
             id: "f".into(),
@@ -390,7 +391,8 @@ fn connections() {
             "ssh",
             "agentsCanWrite",
             "agentsHidden",
-            "agentsBlockedTools"
+            "agentsBlockedTools",
+            "agentsNotes"
         ])
     );
     assert_eq!(

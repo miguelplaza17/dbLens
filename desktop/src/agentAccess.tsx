@@ -3,6 +3,7 @@
 // In the main window's Agent Tools sheet and in Settings > Agents
 // (AgentAccessItems in AgentSettings.swift).
 
+import { useEffect, useState } from "react";
 import type { SavedConnection } from "./api";
 import { t } from "./i18n";
 
@@ -15,10 +16,12 @@ export interface AgentAccess {
   hidden: boolean;
   blockedTools: string[];
   canWrite: boolean;
+  /** What agents should know about this database; sent back with every answer from it. */
+  notes: string;
 }
 
 export function accessOf(c: SavedConnection): AgentAccess {
-  return { hidden: !!c.agentsHidden, blockedTools: c.agentsBlockedTools ?? [], canWrite: !!c.agentsCanWrite };
+  return { hidden: !!c.agentsHidden, blockedTools: c.agentsBlockedTools ?? [], canWrite: !!c.agentsCanWrite, notes: c.agentsNotes ?? "" };
 }
 
 /** Allowed unless turned off: tools added later start allowed. */
@@ -44,6 +47,9 @@ export function AgentAccessEditor({ connection, onChange }: { connection: SavedC
     const blocked = access.blockedTools.filter((x) => x !== tool);
     onChange({ ...access, blockedTools: on ? blocked : [...blocked, tool].sort() });
   };
+  // Typed locally and saved when the field loses focus, not on every key.
+  const [notes, setNotes] = useState(access.notes);
+  useEffect(() => setNotes(access.notes), [access.notes]);
   const row = (key: string, label: string, checked: boolean, disabled: boolean, change: (on: boolean) => void, code = false) => (
     <label key={key} className="form-row toggle-row">
       <span className="form-label wide">{code ? <code className="settings-code">{label}</code> : label}</span>
@@ -52,6 +58,17 @@ export function AgentAccessEditor({ connection, onChange }: { connection: SavedC
   );
   return (
     <>
+      <label className="form-row notes-row">
+        <span className="form-label wide">{t("Notes for Agents")}</span>
+        <textarea
+          className="notes-field"
+          rows={3}
+          value={notes}
+          placeholder={t("What it holds, naming conventions, tables to avoid")}
+          onChange={(e) => setNotes(e.target.value)}
+          onBlur={() => notes.trim() !== access.notes.trim() && onChange({ ...access, notes: notes.trim() })}
+        />
+      </label>
       {row("visible", t("Visible to Agents"), !access.hidden, false, (on) => onChange({ ...access, hidden: !on }))}
       {READING_TOOLS.map((tool) => row(tool, tool, mayUse(access, tool), access.hidden, (on) => setTool(tool, on), true))}
       {row("write", t("Let Agents Write"), access.canWrite, access.hidden, (on) => onChange({ ...access, canWrite: on }))}

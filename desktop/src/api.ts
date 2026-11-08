@@ -293,6 +293,8 @@ export interface SavedConnection {
   agentsHidden?: boolean;
   /** MCP tools turned off here; empty is every tool. */
   agentsBlockedTools?: string[];
+  /** What the user wants agents to know about this database (MCP answers carry it). */
+  agentsNotes?: string;
 }
 
 export interface ConnectionFolder {
@@ -615,6 +617,8 @@ export const api = {
   /** Agent Tools: hidden from agents, and the MCP tools turned off on the connection. */
   setAgentsAccess: (id: string, hidden: boolean, blockedTools: string[]) =>
     invoke<SavedConnection>("set_agents_access", { id, hidden, blockedTools }),
+  /** The notes agents get with this connection's MCP answers. */
+  setAgentsNotes: (id: string, notes: string) => invoke<SavedConnection>("set_agents_notes", { id, notes }),
   setAgentsManageConnections: (allowed: boolean) => invoke<void>("set_agents_manage_connections", { allowed }),
   /** The apps dbLens can install its MCP server into, and where each stands. */
   agentClients: () => invoke<AgentStatus[]>("agent_clients"),

@@ -436,11 +436,12 @@ function AgentsTab({ info, copy, say }: { info: SettingsInfo | null; copy: (text
   };
   const [choosing, setChoosing] = useState<string | null>(null);
   const changeAccess = (c: SavedConnection, access: AgentAccess) => {
-    const put = (x: SavedConnection, a: AgentAccess) => ({ ...x, agentsHidden: a.hidden, agentsBlockedTools: a.blockedTools, agentsCanWrite: a.canWrite });
+    const put = (x: SavedConnection, a: AgentAccess) => ({ ...x, agentsHidden: a.hidden, agentsBlockedTools: a.blockedTools, agentsCanWrite: a.canWrite, agentsNotes: a.notes });
     const before = accessOf(c);
     setConnections((list) => list && list.map((x) => (x.id === c.id ? put(x, access) : x)));
     const saving = async () => {
       if (before.canWrite !== access.canWrite) await api.setAgentsCanWrite(c.id, access.canWrite);
+      if (before.notes !== access.notes) await api.setAgentsNotes(c.id, access.notes);
       await api.setAgentsAccess(c.id, access.hidden, access.blockedTools);
     };
     void saving().catch((e) => {

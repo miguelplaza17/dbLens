@@ -139,6 +139,7 @@ pub fn run() {
             history::clear_sql_history,
             commands::set_agents_can_write,
             commands::set_agents_access,
+            commands::set_agents_notes,
             commands::set_agents_manage_connections,
             agents::agent_clients,
             agents::set_agent_installed,

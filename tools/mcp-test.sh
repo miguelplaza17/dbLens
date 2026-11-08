@@ -12,7 +12,8 @@ call() {  # call <writable 0|1> <json-rpc lines...>: prints one reply per line (
   rm -f /tmp/dbLens-mcp.store*  # each round starts from a fresh store
   printf '%s\n' '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' "$@" |
     APP_STORE=/tmp/dbLens-mcp.store APP_SEED_URL=$url APP_AGENTS_WRITE=$writable \
-    APP_AGENTS_BLOCK=${APP_AGENTS_BLOCK:-} APP_AGENTS_HIDDEN=${APP_AGENTS_HIDDEN:-} $app --mcp
+    APP_AGENTS_BLOCK=${APP_AGENTS_BLOCK:-} APP_AGENTS_HIDDEN=${APP_AGENTS_HIDDEN:-} \
+    APP_AGENTS_NOTES=${APP_AGENTS_NOTES:-} APP_AGENTS_SAMENAME=${APP_AGENTS_SAMENAME:-} $app --mcp
 }
 tool() { print -r -- "{\"jsonrpc\":\"2.0\",\"id\":$1,\"method\":\"tools/call\",\"params\":{\"name\":\"$2\",\"arguments\":$3}}" }
 rm -f /tmp/dbLens-mcp.store*
@@ -53,12 +54,22 @@ access=$(APP_AGENTS_BLOCK=query APP_AGENTS_HIDDEN=1 call 0 \
   "$(tool 41 query '{"connection":"test","query":"select 1"}')" \
   "$(tool 42 list_tables '{"connection":"test"}')" \
   "$(tool 43 query '{"connection":"hidden","query":"select 1"}')")
+# Two connections named "test" (Postgres and Redis), and the user's notes on one.
+twin=$(APP_AGENTS_SAMENAME=1 APP_AGENTS_NOTES="Tabela dblens_mcp é de teste" call 1 \
+  "$(tool 50 list_connections '{}')" \
+  "$(tool 51 query '{"connection":"test","query":"select 1"}')" \
+  "$(tool 52 query '{"connection":"test","engine":"postgres","query":"select 1"}')" \
+  "$(tool 53 query '{"connection":"test (PostgreSQL)","query":"select 2"}')" \
+  "$(tool 54 query '{"connection":"test","engine":"oracle","query":"select 1"}')" \
+  "$(tool 55 create_connection "{\"url\":\"$url\",\"name\":\"Test\"}")" \
+  "$(tool 56 list_tables '{"connection":"test","engine":"PostgreSQL"}')")
 call 1 "$(tool 12 execute '{"connection":"test","statements":"drop table dblens_mcp"}')" \
        "$(tool 18 execute '{"connection":"test","statements":"drop extension if exists pg_trgm"}')" >/dev/null
 rm -f /tmp/dbLens-mcp.store*
 print -r -- "$out
 $ro
-$access" | python3 -c '
+$access
+$twin" | python3 -c '
 import sys, json
 replies = {m["id"]: m.get("result", {}) for m in map(json.loads, sys.stdin) if m.get("id")}
 def text(i): return replies[i]["content"][0]["text"]
@@ -93,6 +104,14 @@ checks = [
     ("a tool the user turned off is refused on that connection", err(41) and "turned off query" in text(41)),
     ("the other tools still work there", not err(42) and "dblens_mcp" in text(42)),
     ("a hidden connection is unknown to agents", err(43) and "No connection" in text(43)),
+    ("same name on two engines: list_connections gives a ref to each", "\"ref\":\"test (Redis)\"" in text(50) and "\"ref\":\"test (PostgreSQL)\"" in text(50)),
+    ("the notes the user wrote come with list_connections", "Tabela dblens_mcp" in text(50)),
+    ("without engine, a shared name is ambiguous and the error lists the engines", err(51) and "Pass engine" in text(51) and "Redis" in text(51)),
+    ("engine picks one, and the answer says which and carries the notes", not err(52) and "\"engine\":\"PostgreSQL\"" in text(52) and "Tabela dblens_mcp" in text(52)),
+    ("the ref \"Name (Type)\" works as connection", not err(53) and "[[\"2\"]]" in text(53)),
+    ("an unknown engine is an error that lists the valid ones", err(54) and "PostgreSQL" in text(54)),
+    ("create_connection refuses a name already used on the same engine", err(55) and "already exists" in text(55)),
+    ("list_tables with engine labels the answer", not err(56) and "\"connection\":\"test\"" in text(56)),
     ("describe_schema lists every table with its columns", "dblens_mcp (table" in text(13) and "id integer PK" in text(13)),
 ]
 for name, ok in checks: print(("PASS " if ok else "FAIL ") + name)

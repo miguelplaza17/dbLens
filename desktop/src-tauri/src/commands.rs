@@ -645,6 +645,18 @@ pub async fn set_agents_access(
         .await
 }
 
+/// The notes the MCP server sends agents with this connection's answers.
+#[tauri::command]
+pub async fn set_agents_notes(
+    state: State<'_, AppState>,
+    id: String,
+    notes: String,
+) -> DbResult<SavedConnection> {
+    state
+        .with_store(move |store| store.set_agents_notes(&id, &notes))
+        .await
+}
+
 /// "Let agents add and remove connections" for the MCP server.
 #[tauri::command]
 pub async fn set_agents_manage_connections(

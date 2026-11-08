@@ -322,22 +322,53 @@ pub(crate) fn engine_named(text: &str) -> Option<Engine> {
     }
 }
 
+/// "Alloro (Redis)" as (name, engine), unless a connection is literally
+/// named that.
+fn split_ref(snapshot: &StoreSnapshot, text: &str) -> Option<(String, String)> {
+    let text = text.trim();
+    if snapshot
+        .connections
+        .iter()
+        .any(|c| c.name.to_lowercase() == text.to_lowercase())
+    {
+        return None;
+    }
+    let inner = text.strip_suffix(')')?;
+    let open = inner.rfind('(')?;
+    let kind = inner[open + 1..].trim();
+    engine_named(kind)?;
+    Some((inner[..open].trim().to_string(), kind.to_string()))
+}
+
 /// The saved connection named (any case) or with that id, narrowed by
 /// `engine` when given; ones the user hid from agents don't exist for them.
 /// The same name on different engines is allowed: without `engine` the error
 /// lists them.
 fn pick(snapshot: &StoreSnapshot, name: &str, engine: Option<&str>) -> DbResult<SavedConnection> {
+    // "Alloro (Redis)", the way list_connections writes `ref`.
+    let (name, engine) = match split_ref(snapshot, name) {
+        Some((base, kind)) if engine.is_none() => (base, Some(kind)),
+        _ => (name.to_string(), engine.map(str::to_string)),
+    };
+    let (name, engine) = (name.as_str(), engine.as_deref());
     let wanted = match engine.map(str::trim).filter(|e| !e.is_empty()) {
         Some(text) => Some(engine_named(text).ok_or_else(|| {
             DbError::msg(format!(
                 "Unknown engine \"{text}\". Use one of: {}.",
-                Engine::ALL.iter().map(|e| e.name()).collect::<Vec<_>>().join(", ")
+                Engine::ALL
+                    .iter()
+                    .map(|e| e.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ))
         })?),
         None => None,
     };
-    let visible: Vec<&SavedConnection> =
-        snapshot.connections.iter().filter(|c| !c.agents_hidden).collect();
+    let visible: Vec<&SavedConnection> = snapshot
+        .connections
+        .iter()
+        .filter(|c| !c.agents_hidden)
+        .collect();
     let matches: Vec<&SavedConnection> = visible
         .iter()
         .copied()
@@ -351,7 +382,9 @@ fn pick(snapshot: &StoreSnapshot, name: &str, engine: Option<&str>) -> DbResult<
                 .iter()
                 .map(|c| format!("{} ({})", c.name, c.engine.name()))
                 .collect();
-            let kind = wanted.map(|w| format!(" of type {}", w.name())).unwrap_or_default();
+            let kind = wanted
+                .map(|w| format!(" of type {}", w.name()))
+                .unwrap_or_default();
             Err(DbError::msg(format!(
                 "No connection \"{name}\"{kind}. Saved: {}.",
                 saved.join(", ")
@@ -588,7 +621,10 @@ impl Server {
         }
         let (name, engine) = (
             name.to_string(),
-            arguments.get("engine").and_then(Value::as_str).map(str::to_string),
+            arguments
+                .get("engine")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         );
         let Ok(saved) = self
             .with(move |s| pick(&s.snapshot(), &name, engine.as_deref()))
@@ -596,17 +632,24 @@ impl Server {
         else {
             return output;
         };
+        let notes = saved.agents_notes.trim().to_string();
+        let mut label = Map::new();
+        label.insert("connection".into(), json!(saved.name));
+        label.insert("engine".into(), json!(saved.engine.name()));
+        if !notes.is_empty() {
+            label.insert("notes".into(), json!(notes));
+        }
         match output {
             Value::Object(mut object) => {
-                object
-                    .entry("connection")
-                    .or_insert_with(|| json!(saved.name));
-                object
-                    .entry("engine")
-                    .or_insert_with(|| json!(saved.engine.name()));
+                for (key, value) in label {
+                    object.entry(key).or_insert(value);
+                }
                 Value::Object(object)
             }
-            other => json!({"connection": saved.name, "engine": saved.engine.name(), "result": other}),
+            other => {
+                label.insert("result".into(), other);
+                Value::Object(label)
+            }
         }
     }
 
@@ -619,17 +662,34 @@ impl Server {
         match name {
             "list_connections" => {
                 let snapshot = self.with(|s| Ok(s.snapshot())).await?;
+                let visible: Vec<&SavedConnection> = snapshot
+                    .connections
+                    .iter()
+                    .filter(|c| !c.agents_hidden)
+                    .collect();
                 Ok(Value::Array(
-                    snapshot
-                        .connections
+                    visible
                         .iter()
-                        .filter(|c| !c.agents_hidden)
                         .map(|c| {
-                            json!({
+                            let mut item = json!({
                                 "name": c.name, "engine": c.engine.name(),
                                 "via_ssh": c.ssh.is_some(), "agents_can_write": c.agents_can_write,
                                 "tools": allowed_tools(c),
-                            })
+                            });
+                            // Same name on another engine: the agent must pass
+                            // `engine` (or this ref as `connection`).
+                            let shared = visible
+                                .iter()
+                                .filter(|o| o.name.to_lowercase() == c.name.to_lowercase())
+                                .count()
+                                > 1;
+                            if shared {
+                                item["ref"] = json!(format!("{} ({})", c.name, c.engine.name()));
+                            }
+                            if !c.agents_notes.trim().is_empty() {
+                                item["notes"] = json!(c.agents_notes.trim());
+                            }
+                            item
                         })
                         .collect(),
                 ))
@@ -713,7 +773,10 @@ impl Server {
         flight: &Flight,
     ) -> DbResult<(SavedConnection, Arc<Connection>)> {
         let name = text_of(arguments, "connection")?;
-        let engine = arguments.get("engine").and_then(Value::as_str).map(str::to_string);
+        let engine = arguments
+            .get("engine")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let (saved, url) = self
             .with(move |s| {
                 let saved = pick(&s.snapshot(), &name, engine.as_deref())?;
@@ -872,7 +935,10 @@ impl Server {
         self.require_manage().await?;
         let name = text_of(arguments, "connection")?;
         let lookup = name.clone();
-        let engine = arguments.get("engine").and_then(Value::as_str).map(str::to_string);
+        let engine = arguments
+            .get("engine")
+            .and_then(Value::as_str)
+            .map(str::to_string);
         let saved = self
             .with(move |s| pick(&s.snapshot(), &lookup, engine.as_deref()))
             .await?;
@@ -1286,7 +1352,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "list_connections",
-            "description": "The database connections saved in dbLens: name, engine (PostgreSQL, MySQL, SQLite, Redis, MongoDB), whether it goes through SSH, whether agents may write, and the tools the user allows on it (other tools are refused there; connections the user hid are not listed). URLs and passwords are never shown. Databases: all (PostgreSQL, MySQL/MariaDB, SQLite, Redis/Valkey, MongoDB).",
+            "description": "The database connections saved in dbLens: name, engine (PostgreSQL, MySQL, SQLite, Redis, MongoDB), whether it goes through SSH, whether agents may write, and the user's notes about it (what it holds, conventions: read them before querying), a ref to pass as `connection` when two connections share a name, and the tools the user allows on it (other tools are refused there; connections the user hid are not listed). URLs and passwords are never shown. Databases: all (PostgreSQL, MySQL/MariaDB, SQLite, Redis/Valkey, MongoDB).",
             "inputSchema": {"type": "object", "properties": {}},
             "annotations": read,
         },

@@ -201,6 +201,7 @@ async fn sqlite_read_write_gates() {
         .call_ok("list_tables", json!({"connection": "lite"}))
         .await;
     assert_eq!(tables["connection"], "Lite");
+    assert!(tables.get("notes").is_none(), "no notes, no key");
     assert_eq!(tables["engine"], "SQLite");
     let names: Vec<&str> = tables["result"]
         .as_array()
@@ -598,4 +599,100 @@ async fn binary_serves_stdio_from_the_store_folder() {
     assert_eq!(out["rows"], json!([["x"]]));
     drop(stdin);
     assert!(child.wait().await.unwrap().success());
+}
+
+/// The same name on two engines: told apart by `engine` or by the ref, one name
+/// per engine, and the user's notes ride along with every answer.
+#[tokio::test]
+async fn same_name_on_two_engines_and_notes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.db");
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("create table t(id integer primary key); insert into t values (7);")
+        .unwrap();
+    let store = shared();
+    let lite = save(&store, "Alloro", &format!("sqlite://{}", path.display()));
+    let redis = save(&store, "Alloro", "redis://127.0.0.1:1/");
+    store
+        .lock()
+        .unwrap()
+        .set_agents_notes(&lite, "  Only table t matters.  ")
+        .unwrap();
+    // Same engine, same name (any case): refused by the store, also on rename.
+    let dup = store.lock().unwrap().save(ConnectionDraft {
+        id: None,
+        name: "ALLORO".into(),
+        url: format!("sqlite://{}", path.display()),
+        ssh: None,
+        folder_id: None,
+    });
+    assert!(dup
+        .unwrap_err()
+        .to_string()
+        .contains("already a connection"));
+    store
+        .lock()
+        .unwrap()
+        .rename(&redis, "Alloro Cache")
+        .unwrap();
+    assert!(
+        store.lock().unwrap().rename(&redis, "alloro").is_ok(),
+        "other engine, free"
+    );
+    assert!(
+        store.lock().unwrap().rename(&lite, "alloro").is_ok(),
+        "itself"
+    );
+
+    let mut client = Client::start(StoreSource::Shared(store.clone()));
+    let list = client.call_ok("list_connections", json!({})).await;
+    let list = list.as_array().unwrap();
+    let refs: Vec<&str> = list.iter().map(|c| c["ref"].as_str().unwrap()).collect();
+    assert_eq!(refs.len(), 2);
+    assert!(
+        refs.contains(&"alloro (SQLite)") && refs.contains(&"alloro (Redis)"),
+        "{refs:?}"
+    );
+    let with_notes = list.iter().find(|c| c["engine"] == "SQLite").unwrap();
+    assert_eq!(with_notes["notes"], "Only table t matters.");
+
+    // Without engine: ambiguous, and the error says which engines.
+    let (error, text) = client
+        .call(
+            "query",
+            json!({"connection": "alloro", "query": "select 1"}),
+        )
+        .await;
+    assert!(
+        error && text.contains("Pass engine") && text.contains("Redis"),
+        "{text}"
+    );
+    // Unknown engine.
+    let (error, text) = client
+        .call(
+            "query",
+            json!({"connection": "alloro", "engine": "oracle", "query": "select 1"}),
+        )
+        .await;
+    assert!(error && text.contains("PostgreSQL"), "{text}");
+    // engine picks one; the answer names it and carries the notes.
+    let rows = client
+        .call_ok(
+            "query",
+            json!({"connection": "alloro", "engine": "sqlite", "query": "select id from t"}),
+        )
+        .await;
+    assert_eq!(rows["rows"], json!([["7"]]));
+    assert_eq!(rows["connection"], "alloro");
+    assert_eq!(rows["engine"], "SQLite");
+    assert_eq!(rows["notes"], "Only table t matters.");
+    // The ref works as the name.
+    let rows = client
+        .call_ok(
+            "query",
+            json!({"connection": "alloro (SQLite)", "query": "select id from t"}),
+        )
+        .await;
+    assert_eq!(rows["rows"], json!([["7"]]));
 }

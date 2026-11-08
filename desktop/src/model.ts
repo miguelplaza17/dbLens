@@ -351,6 +351,7 @@ export class AppModel {
   async setAgentsAccess(saved: SavedConnection, access: AgentAccess) {
     await this.attempt(async () => {
       if (!!saved.agentsCanWrite !== access.canWrite) await api.setAgentsCanWrite(saved.id, access.canWrite);
+      if ((saved.agentsNotes ?? "") !== access.notes) await api.setAgentsNotes(saved.id, access.notes);
       return api.setAgentsAccess(saved.id, access.hidden, access.blockedTools);
     });
     await this.loadStore();

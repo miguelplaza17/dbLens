@@ -791,6 +791,13 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     const { url: _u, ...rest } = c;
     return { ...rest };
   },
+  set_agents_notes: (a) => {
+    const c = saved.find((x) => x.id === a.id);
+    if (!c) throw "No such connection.";
+    c.agentsNotes = String(a.notes ?? "").trim();
+    const { url: _u, ...rest } = c;
+    return { ...rest };
+  },
   set_agents_access: (a) => {
     const c = saved.find((x) => x.id === a.id);
     if (!c) throw "No such connection.";

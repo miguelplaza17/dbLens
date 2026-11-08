@@ -36,6 +36,11 @@ const SEALED_FILE: &str = "connections.enc";
 const KEY_FILE: &str = "connections.key";
 const LOCK_FILE: &str = "connections.lock";
 
+/// Two connections of the same engine can't share a name (the MCP server
+/// picks them by name and engine). Translated in the UI.
+pub const NAME_TAKEN: &str =
+    "There is already a connection with this name and type. Choose another name.";
+
 /// A saved connection as the sidebar shows it. The URL is never in here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,6 +71,10 @@ pub struct SavedConnection {
     /// tool, so tools added later start allowed. Writing ones also need `agents_can_write`.
     #[serde(default)]
     pub agents_blocked_tools: Vec<String>,
+    /// What the user wants agents to know about this database (what it holds,
+    /// conventions, traps). Sent back with every MCP answer from it.
+    #[serde(default)]
+    pub agents_notes: String,
 }
 
 impl SavedConnection {
@@ -247,6 +256,17 @@ impl Store {
         self.url(id).map(crate::url::redact)
     }
 
+    /// Whether another connection (not `except`) already has this name on this
+    /// engine. The same name on different engines is fine: agents tell them
+    /// apart by engine.
+    fn name_taken(&self, except: Option<&str>, name: &str, engine: Engine) -> bool {
+        self.meta.connections.iter().any(|c| {
+            Some(c.id.as_str()) != except
+                && c.engine == engine
+                && c.name.to_lowercase() == name.to_lowercase()
+        })
+    }
+
     pub fn save(&mut self, draft: ConnectionDraft) -> DbResult<SavedConnection> {
         let mut url = crate::url::clean(&draft.url);
         if let Some(saved) = draft.id.as_deref().and_then(|id| self.urls.get(id)) {
@@ -264,6 +284,9 @@ impl Store {
             .id
             .as_deref()
             .and_then(|id| self.meta.connections.iter().position(|c| c.id == id));
+        if self.name_taken(draft.id.as_deref(), &name, summary.engine) {
+            return Err(DbError::msg(NAME_TAKEN));
+        }
         let saved = match existing {
             Some(at) => {
                 let c = &mut self.meta.connections[at];
@@ -297,6 +320,7 @@ impl Store {
                     agents_can_write: false,
                     agents_hidden: false,
                     agents_blocked_tools: Vec::new(),
+                    agents_notes: String::new(),
                 };
                 self.meta.connections.push(c.clone());
                 c
@@ -314,6 +338,16 @@ impl Store {
     }
 
     pub fn rename(&mut self, id: &str, name: &str) -> DbResult<SavedConnection> {
+        let engine = self
+            .meta
+            .connections
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.engine)
+            .ok_or_else(|| DbError::msg("No such connection."))?;
+        if !name.trim().is_empty() && self.name_taken(Some(id), name.trim(), engine) {
+            return Err(DbError::msg(NAME_TAKEN));
+        }
         let c = self
             .meta
             .connections
@@ -360,6 +394,20 @@ impl Store {
         blocked.dedup();
         c.agents_hidden = hidden;
         c.agents_blocked_tools = blocked;
+        let c = c.clone();
+        self.persist()?;
+        Ok(c)
+    }
+
+    /// The notes agents get with this connection's answers.
+    pub fn set_agents_notes(&mut self, id: &str, notes: &str) -> DbResult<SavedConnection> {
+        let c = self
+            .meta
+            .connections
+            .iter_mut()
+            .find(|c| c.id == id)
+            .ok_or_else(|| DbError::msg("No such connection."))?;
+        c.agents_notes = notes.trim().to_string();
         let c = c.clone();
         self.persist()?;
         Ok(c)

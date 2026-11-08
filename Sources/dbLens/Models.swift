@@ -27,6 +27,9 @@ final class SavedConnection {
     /// MCP tools agents may not use on this connection, comma-separated
     /// (`MCPServer.connectionTools`). Empty: every tool. New tools start allowed.
     var agentsBlockedTools: String = ""
+    /// What the user wants agents to know about this database (what it holds,
+    /// conventions, traps). Sent back with every MCP answer from it.
+    var agentsNotes: String = ""
     /// Place in the sidebar, within its folder (or the top level).
     var sortIndex: Int = 0
     /// The sidebar folder it sits in (`ConnectionFolder.id`), or "" at the top level.
@@ -448,7 +451,7 @@ final class AppModel {
     /// given), then saves it and keeps the session.
     @discardableResult
     func save(url text: String, name: String, ssh: SSHTunnel.Config? = nil,
-              editing existing: SavedConnection? = nil) async throws -> SavedConnection {
+              editing existing: SavedConnection? = nil, notes: String? = nil) async throws -> SavedConnection {
         let engine = Engine.detect(text)
         guard let engine, engine.isAvailable else {
             throw PostgresError(message: engine.map { String(localized: "dbLens can't connect to \($0.name) yet. Support is on the way.") }
@@ -464,6 +467,7 @@ final class AppModel {
         let session = try await Connector.connect(text, ssh: ssh)
         let connection = existing ?? SavedConnection(name: "")
         connection.name = finalName
+        if let notes { connection.agentsNotes = notes.trimmingCharacters(in: .whitespacesAndNewlines) }
         connection.ssh = ssh
         connection.engine = engine.rawValue
         try Secrets.setURL(Connector.clean(text), for: connection.uuid)

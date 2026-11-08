@@ -24,6 +24,7 @@ struct ConnectionSheet: View {
     @State private var mode = Mode.url
     @State private var url = ""
     @State private var name = ""
+    @State private var notes = ""
     @State private var host = ""
     @State private var port = ""
     @State private var database = ""
@@ -128,6 +129,8 @@ struct ConnectionSheet: View {
                         }
                     }
                     TextField("Name", text: $name, prompt: Text(parsed?.suggestedName ?? String(localized: "Optional")))
+                    TextField("Notes for Agents", text: $notes, prompt: Text("What it holds, naming conventions, tables to avoid"), axis: .vertical)
+                        .lineLimit(1...6)
                 } header: {
                     HStack {
                         Text(editing == nil ? String(localized: "New Connection") : String(localized: "Edit Connection"))
@@ -203,6 +206,7 @@ struct ConnectionSheet: View {
                 original = editing.url
                 url = editing.url.map(ConnectionURL.redact) ?? ""
                 name = editing.name
+                notes = editing.agentsNotes
                 if let ssh = editing.ssh {
                     useSSH = true
                     sshHost = ssh.host
@@ -296,7 +300,7 @@ struct ConnectionSheet: View {
         error = nil
         defer { working = false }
         do {
-            try await model.save(url: text, name: name, ssh: ssh, editing: editing)
+            try await model.save(url: text, name: name, ssh: ssh, editing: editing, notes: notes)
             dismiss()
         } catch {
             self.error = error.localizedDescription

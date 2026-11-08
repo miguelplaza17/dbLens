@@ -58,6 +58,13 @@ enum MCPServer {
                 connection.engine = Engine.detect(url)?.rawValue ?? "postgres"
                 connection.agentsCanWrite = env["APP_AGENTS_WRITE"] == "1"
                 connection.agentsBlockedTools = env["APP_AGENTS_BLOCK"] ?? ""
+                connection.agentsNotes = env["APP_AGENTS_NOTES"] ?? ""
+                if env["APP_AGENTS_SAMENAME"] == "1" {  // "test" again, on another engine (never opened)
+                    let twin = SavedConnection(name: "test")
+                    twin.engine = connection.engine == Engine.redis.rawValue ? Engine.postgres.rawValue : Engine.redis.rawValue
+                    try? Secrets.setURL(twin.engine == Engine.redis.rawValue ? "redis://127.0.0.1:1" : "postgres://x@127.0.0.1:1/x", for: twin.uuid)
+                    container.mainContext.insert(twin)
+                }
                 if env["APP_AGENTS_HIDDEN"] == "1" {  // a second, hidden connection to the same server
                     let hidden = SavedConnection(name: "hidden")
                     hidden.engine = connection.engine
@@ -119,8 +126,10 @@ enum MCPServer {
         private func labeled(_ tool: String, _ arguments: [String: Any], _ output: Any) -> Any {
             guard MCPServer.connectionTools.contains(tool), let name = arguments["connection"] as? String,
                   let connection = try? pick(name, engine: arguments["engine"] as? String) else { return output }
-            let label: [String: Any] = ["connection": connection.name,
+            var label: [String: Any] = ["connection": connection.name,
                                         "engine": Engine(rawValue: connection.engine)?.name ?? connection.engine]
+            let notes = connection.agentsNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !notes.isEmpty { label["notes"] = notes }
             if var object = output as? [String: Any] {
                 object.merge(label) { current, _ in current }
                 return object
@@ -133,10 +142,18 @@ enum MCPServer {
         private func call(_ name: String, _ arguments: [String: Any]) async throws -> Any {
             switch name {
             case "list_connections":
-                return try connections().filter { !$0.agentsHidden }.map { connection in
-                    ["name": connection.name, "engine": Engine(rawValue: connection.engine)?.name ?? connection.engine,
-                     "via_ssh": connection.ssh != nil, "agents_can_write": connection.agentsCanWrite,
-                     "tools": MCPServer.connectionTools.filter(connection.agentsMayUse)] as [String: Any]
+                let visible = try connections().filter { !$0.agentsHidden }
+                return visible.map { connection in
+                    let engine = Engine(rawValue: connection.engine)?.name ?? connection.engine
+                    let shared = visible.filter { $0.name.caseInsensitiveCompare(connection.name) == .orderedSame }.count > 1
+                    var item: [String: Any] = ["name": connection.name, "engine": engine,
+                                               "via_ssh": connection.ssh != nil, "agents_can_write": connection.agentsCanWrite,
+                                               "tools": MCPServer.connectionTools.filter(connection.agentsMayUse)]
+                    // Same name on another engine: the agent must pass `engine` (or this ref as `connection`).
+                    if shared { item["ref"] = "\(connection.name) (\(engine))" }
+                    let notes = connection.agentsNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !notes.isEmpty { item["notes"] = notes }
+                    return item
                 }
             case "create_connection":
                 return try await createConnection(arguments)
@@ -455,6 +472,15 @@ enum MCPServer {
         /// engines is fine: asking without `engine` then lists them.
         private func pick(_ name: String, engine: String?) throws -> SavedConnection {
             let all = try connections().filter { !$0.agentsHidden }
+            var name = name
+            var engine = engine
+            // "Alloro (Redis)", the way list_connections writes `ref`.
+            if engine == nil, !all.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }),
+               name.hasSuffix(")"), let open = name.lastIndex(of: "("),
+               Engine.named(String(name[name.index(after: open)..<name.index(before: name.endIndex)])) != nil {
+                engine = String(name[name.index(after: open)..<name.index(before: name.endIndex)])
+                name = name[..<open].trimmingCharacters(in: .whitespaces)
+            }
             var wanted: Engine?
             if let engine, !engine.trimmingCharacters(in: .whitespaces).isEmpty {
                 guard let parsed = Engine.named(engine) else {
@@ -563,7 +589,7 @@ enum MCPServer {
         static let tools: [[String: Any]] = [
             [
                 "name": "list_connections",
-                "description": "The database connections saved in dbLens: name, engine (PostgreSQL, MySQL, SQLite, Redis, MongoDB), whether it goes through SSH, whether agents may write, and the tools the user allows on it (other tools are refused there; connections the user hid are not listed). URLs and passwords are never shown. Databases: all (PostgreSQL, MySQL/MariaDB, SQLite, Redis/Valkey, MongoDB).",
+                "description": "The database connections saved in dbLens: name, engine (PostgreSQL, MySQL, SQLite, Redis, MongoDB), the user's notes about it (what it holds, conventions: read them before querying), a ref to pass as `connection` when two connections share a name, whether it goes through SSH, whether agents may write, and the tools the user allows on it (other tools are refused there; connections the user hid are not listed). URLs and passwords are never shown. Databases: all (PostgreSQL, MySQL/MariaDB, SQLite, Redis/Valkey, MongoDB).",
                 "inputSchema": ["type": "object", "properties": [:]],
                 "annotations": ["readOnlyHint": true],
             ],
