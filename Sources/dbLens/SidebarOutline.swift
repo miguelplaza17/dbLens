@@ -342,13 +342,19 @@ struct ConnectionsOutline: NSViewRepresentable {
             parent.rename(id, editCancelled ? nil : field.stringValue)
         }
 
-        /// The open connection is the selected row.
+        /// The connection just clicked, from the click until its connection has started.
+        private var clicked: UUID?
+
+        /// The selected row is the connection being opened, or else the open one:
+        /// a click stays where it landed while the old connection is still up.
         private func syncSelection() {
-            guard let outline, let active = parent.model.activeID, parent.model.session != nil || parent.model.connectingID != nil else {
-                if outline?.selectedRow ?? -1 >= 0, parent.model.activeID == nil { outline?.deselectAll(nil) }
+            guard let outline else { return }
+            let model = parent.model
+            guard let wanted = clicked ?? model.connectingID ?? (model.session != nil ? model.activeID : nil) else {
+                if outline.selectedRow >= 0, model.activeID == nil { outline.deselectAll(nil) }
                 return
             }
-            let row = outline.row(forItem: node(.connection, active))
+            let row = outline.row(forItem: node(.connection, wanted))
             if row >= 0, outline.selectedRow != row {
                 outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
             }
@@ -387,7 +393,17 @@ struct ConnectionsOutline: NSViewRepresentable {
             guard !syncing, let outline, let item = outline.item(atRow: outline.selectedRow) as? SidebarNode,
                   item.kind == .connection, let saved = connection(item.id) else { return }
             let model = parent.model
-            Task { await model.connect(saved) }
+            let id = saved.uuid
+            clicked = id
+            Task {
+                await model.connect(saved)
+                guard clicked == id else { return }
+                clicked = nil
+                // A click refused while another connection opens goes back to that one.
+                syncing = true
+                syncSelection()
+                syncing = false
+            }
         }
 
         // MARK: Delegate: dragging

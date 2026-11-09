@@ -97,6 +97,7 @@ struct ConnectionSheet: View {
                             .font(.system(.body, design: .monospaced))
                             .lineLimit(1)
                             .autocorrectionDisabled()
+                            .leadingField("URL")
                     } else {
                         Picker("Type", selection: $engine) {
                             ForEach(Engine.allCases, id: \.self) { kind in
@@ -108,19 +109,26 @@ struct ConnectionSheet: View {
                                 HStack(spacing: Space.sm) {
                                     TextField("File", text: $database, prompt: Text(verbatim: "~/Projects/app/data.sqlite"))
                                         .labelsHidden()
+                                        .multilineTextAlignment(.leading)
                                         .autocorrectionDisabled()
                                     Button("Choose…", action: chooseDatabaseFile)
                                 }
+                                .frame(width: fieldWidth)
                             }
                         } else {
                             TextField("Host", text: $host, prompt: Text(verbatim: "db.example.com"))
                                 .autocorrectionDisabled()
+                                .leadingField("Host")
                             TextField("Port", text: $port, prompt: Text(verbatim: engine.defaultPort.map(String.init) ?? ""))
+                                .leadingField("Port")
                             TextField("Database", text: $database, prompt: Text(verbatim: user.isEmpty ? "postgres" : user))
                                 .autocorrectionDisabled()
+                                .leadingField("Database")
                             TextField("User", text: $user, prompt: Text(verbatim: "postgres"))
                                 .autocorrectionDisabled()
+                                .leadingField("User")
                             SecureField("Password", text: $password)
+                                .leadingField("Password")
                             if engine == .postgres {
                                 Picker("SSL", selection: $sslmode) {
                                     ForEach(Self.sslModes, id: \.0) { Text($0.1).tag($0.0) }
@@ -129,8 +137,10 @@ struct ConnectionSheet: View {
                         }
                     }
                     TextField("Name", text: $name, prompt: Text(parsed?.suggestedName ?? String(localized: "Optional")))
+                        .leadingField("Name")
                     TextField("Notes for Agents", text: $notes, prompt: Text("Optional: what it holds, naming conventions, tables to avoid"), axis: .vertical)
                         .lineLimit(1...6)
+                        .leadingField("Notes for Agents")
                 } header: {
                     HStack {
                         Text(editing == nil ? String(localized: "New Connection") : String(localized: "Edit Connection"))
@@ -150,16 +160,21 @@ struct ConnectionSheet: View {
                     if useSSH && detected != .sqlite {
                         TextField("Server", text: $sshHost, prompt: Text("host, IP, or user@host"))
                             .autocorrectionDisabled()
+                            .leadingField("Server")
                         TextField("Port", text: $sshPort, prompt: Text("22"))
+                            .leadingField("Port")
                         TextField("User", text: $sshUser, prompt: Text("from ~/.ssh/config"))
                             .autocorrectionDisabled()
+                            .leadingField("User")
                         LabeledContent("Key") {
                             HStack(spacing: Space.sm) {
                                 TextField("Key", text: $sshKey, prompt: Text("ssh-agent or ~/.ssh/config"))
                                     .labelsHidden()
+                                    .multilineTextAlignment(.leading)
                                     .autocorrectionDisabled()
                                 Button("Choose…", action: chooseKey)
                             }
+                            .frame(width: fieldWidth)
                         }
                     }
                 } footer: {
@@ -304,6 +319,21 @@ struct ConnectionSheet: View {
             dismiss()
         } catch {
             self.error = error.localizedDescription
+        }
+    }
+}
+
+/// Where the sheet's fields start and end, the same on every row.
+private let fieldWidth: CGFloat = 360 // grid: ok
+
+private extension View {
+    /// A form row with its text from the left: the grouped form's right-aligned
+    /// fields hide the spaces at the end of what is typed.
+    func leadingField(_ title: LocalizedStringKey) -> some View {
+        LabeledContent(title) {
+            labelsHidden()
+                .multilineTextAlignment(.leading)
+                .frame(width: fieldWidth)
         }
     }
 }

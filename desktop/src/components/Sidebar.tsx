@@ -181,7 +181,7 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
         icon="database"
         iconNode={<EngineIcon engine={c.engine} />}
         depth={depth}
-        selected={active}
+        selected={model.connecting ? busy : active}
         title={c.name}
         renaming={renaming === c.id}
         onRename={(name) => {
