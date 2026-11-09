@@ -2,10 +2,10 @@ import AppKit
 import SwiftUI
 import DBLensKit
 
-/// The panel at the bottom of the window: two cards side by side, the SQL
-/// editor with its Run button and the log. Drag the gap between them to
-/// resize. Command-Return runs the selection, or everything when nothing is
-/// selected; the result shows in the grid above.
+/// The panel at the bottom of the window, flush with it like Xcode's debug
+/// area: the SQL editor and, beside it, the log, under a thin divider. Drag the
+/// divider to resize. Command-Return runs the selection, or everything when
+/// nothing is selected; the result shows in the grid above. Run is in the toolbar.
 struct SQLPanel: View {
     @Environment(AppModel.self) private var model
     @AppStorage("sqlPanel.logWidth") private var logWidth: Double = 360
@@ -14,7 +14,7 @@ struct SQLPanel: View {
     var body: some View {
         @Bindable var model = model
         GeometryReader { geometry in
-            let maxLog = max(220, geometry.size.width - 320 - Space.md)
+            let maxLog = max(220, geometry.size.width - 320)
             HStack(spacing: 0) {
                 VStack(spacing: 0) {
                     header
@@ -26,23 +26,21 @@ struct SQLPanel: View {
                             if model.hasSchemaBoard, model.schemaGraph == nil { await model.loadSchema() }
                         }
                 }
-                .card()
-                Color.clear
-                    .frame(width: Space.md)
-                    .contentShape(Rectangle())
-                    .pointerStyle(.columnResize)
-                    .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                        .onChanged { drag in
-                            let start = dragStart ?? min(logWidth, maxLog)
-                            dragStart = start
-                            logWidth = min(max(start - drag.translation.width, 220), maxLog)
-                        }
-                        .onEnded { _ in dragStart = nil })
-                LogView()
-                    .card()
-                    .frame(width: min(max(logWidth, 220), maxLog))
+                if model.showLog {
+                    PaneDivider(axis: .vertical) { translation in
+                        let start = dragStart ?? min(logWidth, maxLog)
+                        dragStart = start
+                        logWidth = min(max(start - translation, 220), maxLog)
+                    } ended: {
+                        dragStart = nil
+                    }
+                    LogView()
+                        .frame(width: min(max(logWidth, 220), maxLog))
+                        .transition(.move(edge: .trailing).combined(with: .opacity))
+                }
             }
         }
+        .background(.background)
     }
 
     @State private var showingHistory = false
@@ -54,8 +52,6 @@ struct SQLPanel: View {
             Button("Hide SQL Panel", systemImage: "rectangle.bottomthird.inset.filled") {
                 withAnimation(.snappy(duration: 0.25)) { model.showSQLPanel = false }
             }
-            .labelStyle(.iconOnly)
-            .buttonStyle(.borderless)
             .help("Hide the SQL panel (Command-Shift-Y)")
             Text(model.editorLanguage.title)
                 .fontWeight(.semibold)
@@ -68,7 +64,6 @@ struct SQLPanel: View {
             }
             Spacer()
             Button("History", systemImage: "clock.arrow.circlepath") { showingHistory.toggle() }
-                .buttonStyle(.bordered)
                 .help("Statements run on this connection: click to put one in the editor, double-click to run it")
                 .disabled(model.session == nil)
                 .popover(isPresented: $showingHistory, arrowEdge: .top) {
@@ -78,45 +73,56 @@ struct SQLPanel: View {
                     }
                 }
             Button("Terminal", systemImage: "apple.terminal") { model.openInTerminal() }
-                .buttonStyle(.bordered)
                 .help("Open the database's own client (psql, mysql, sqlite3, redis-cli, mongosh), connected (Command-Shift-T)")
                 .disabled(model.session == nil)
-            if model.running {
-                Button("Cancel") { model.cancel() }
-            } else {
-                if !model.usesCommands && !model.usesQueries {
-                    // Run, with an arrow for its other two modes: all blue with a connection, all gray without.
-                    let ready = model.session != nil
-                    Menu {
-                        Button("Rehearse", systemImage: "testtube.2") { Task { await model.run(.rehearse) } }
-                            .help("Run in a transaction that is always rolled back: see what it would do, change nothing (Option-Command-Return)")
-                        Button("All or Nothing", systemImage: "shippingbox") { Task { await model.run(.atomic) } }
-                            .help("Run every statement in one transaction: all of them, or none (Shift-Command-Return)")
-                    } label: {
-                        Label("Run", systemImage: "play.fill")
-                    } primaryAction: {
-                        Task { await model.run() }
-                    }
-                    .menuStyle(.button)
-                    .buttonStyle(.borderedProminent)
-                    .compositingGroup()
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 6).fill(ready ? Palette.accent : Color.clear) // grid: ok
-                            .blendMode(.color).allowsHitTesting(false)
-                    }
-                    .disabled(!ready)
-                    .help("Run (Command-Return)")
-                } else {
-                    Button("Run", systemImage: "play.fill") { Task { await model.run() } }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(model.session == nil)
-                        .help("Run (Command-Return)")
-                }
+            Toggle(isOn: Binding(get: { model.showLog }, set: { on in
+                withAnimation(.snappy(duration: 0.25)) { model.showLog = on }
+            })) {
+                Label(model.showLog ? "Hide Log" : "Show Log", systemImage: "rectangle.righthalf.inset.filled")
             }
+            .toggleStyle(.button)
+            .help("Show or hide the log (Option-Command-Y)")
         }
+        .labelStyle(.iconOnly)
+        .buttonStyle(.borderless)
         .controlSize(.small)
+        .frame(height: PaneBar.height)
         .padding(.horizontal, Space.md)
-        .padding(.vertical, Space.sm)
+    }
+}
+
+enum PaneBar {
+    /// The height of the bars above the panes.
+    static let height = Space.xxl + Space.xs
+}
+
+/// Run, in the window's toolbar: with an arrow for its other two modes where
+/// the database has them, and Cancel while something runs.
+struct RunControl: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        if model.running {
+            Button("Cancel", systemImage: "stop.fill") { model.cancel() }
+                .help("Cancel the query (Command-.)")
+        } else if !model.usesCommands && !model.usesQueries {
+            Menu {
+                Button("Rehearse", systemImage: "testtube.2") { Task { await model.run(.rehearse) } }
+                    .help("Run in a transaction that is always rolled back: see what it would do, change nothing (Option-Command-Return)")
+                Button("All or Nothing", systemImage: "shippingbox") { Task { await model.run(.atomic) } }
+                    .help("Run every statement in one transaction: all of them, or none (Shift-Command-Return)")
+            } label: {
+                Label("Run", systemImage: "play.fill")
+            } primaryAction: {
+                Task { await model.run() }
+            }
+            .disabled(model.session == nil)
+            .help("Run (Command-Return)")
+        } else {
+            Button("Run", systemImage: "play.fill") { Task { await model.run() } }
+                .disabled(model.session == nil)
+                .help("Run (Command-Return)")
+        }
     }
 }
 
@@ -138,9 +144,8 @@ struct LogView: View {
                     .help("Copy the log (message and SQL)")
             }
             .controlSize(.small)
-            .frame(minHeight: Space.xxl)
+            .frame(height: PaneBar.height)
             .padding(.horizontal, Space.md)
-            .padding(.vertical, Space.sm)
             Divider()
             ScrollView {
                 VStack {

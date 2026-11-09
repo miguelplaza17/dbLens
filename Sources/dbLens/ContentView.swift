@@ -19,7 +19,9 @@ struct ContentView: View {
                 .id(model.connectionsVersion)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 360)
         } detail: {
-            BottomPanelLayout(showPanel: model.showSQLPanel) {
+            BottomPanelLayout(showPanel: model.showSQLPanel, collapse: {
+                withAnimation(.snappy(duration: 0.25)) { model.showSQLPanel = false }
+            }) {
                 Detail()
             } panel: {
                 SQLPanel()
@@ -276,6 +278,11 @@ struct Detail: View {
                         .help("Go forward again (Command-])")
                         .disabled(!model.canGoForwardInHistory)
                 }
+                // Run lives with the editor: only while the SQL panel is open.
+                if model.showSQLPanel {
+                    ToolbarItem(placement: .primaryAction) { RunControl() }
+                    ToolbarSpacer(.fixed, placement: .primaryAction)
+                }
                 ToolbarItem(placement: .primaryAction) {
                     Toggle(isOn: Binding(get: { model.shown == .schema },
                                          set: { on in Task { if on { await model.showSchema() } else { model.shown = .table } } })) {
@@ -339,10 +346,12 @@ struct Detail: View {
 // MARK: Bottom panel
 
 /// The main content with a panel docked at the bottom, like Xcode's debug
-/// area. Drag the line between them to resize; the height is remembered.
+/// area: flush with the window, under a thin divider. Drag the divider to
+/// resize (the height is remembered), or past the panel's smallest size to fold it away.
 /// (VSplitView ignored the toolbar's safe area and slid the grid under it.)
 struct BottomPanelLayout<Content: View, Panel: View>: View {
     let showPanel: Bool
+    let collapse: () -> Void
     @ViewBuilder let content: Content
     @ViewBuilder let panel: Panel
 
@@ -351,6 +360,8 @@ struct BottomPanelLayout<Content: View, Panel: View>: View {
 
     private static var minPanel: Double { 140 }
     private static var minContent: Double { 160 }
+    /// How far past the smallest size a drag folds the panel away.
+    private static var collapseMargin: Double { 60 }
 
     var body: some View {
         GeometryReader { geometry in
@@ -359,25 +370,23 @@ struct BottomPanelLayout<Content: View, Panel: View>: View {
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 if showPanel {
-                    // The gap above the card is the handle: drag it to resize.
-                    Capsule()
-                        .fill(.tertiary)
-                        .frame(width: 36, height: 4)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: Space.md)
-                        .contentShape(Rectangle())
-                        .pointerStyle(.rowResize)
-                        .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
-                            .onChanged { drag in
-                                let start = dragStart ?? min(height, limit)
-                                dragStart = start
-                                height = min(max(start - drag.translation.height, Self.minPanel), limit)
-                            }
-                            .onEnded { _ in dragStart = nil })
-                    // The panel draws its own cards; here it only gets its place.
+                    PaneDivider(axis: .horizontal) { translation in
+                        let start = dragStart ?? min(height, limit)
+                        dragStart = start
+                        let wanted = start - translation
+                        if wanted < Self.minPanel - Self.collapseMargin {
+                            // It reopens at the height it had before this drag.
+                            height = start
+                            dragStart = nil
+                            collapse()
+                        } else {
+                            height = min(max(wanted, Self.minPanel), limit)
+                        }
+                    } ended: {
+                        dragStart = nil
+                    }
                     panel
                         .frame(height: min(max(height, Self.minPanel), limit))
-                        .padding([.horizontal, .bottom], Space.sm)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
@@ -385,22 +394,24 @@ struct BottomPanelLayout<Content: View, Panel: View>: View {
     }
 }
 
-extension View {
-    /// A floating card like the sidebar: rounded, bordered, with a soft shadow.
-    func card() -> some View {
-        modifier(CardStyle())
-    }
-}
+/// The line between two panes: the system's divider, one point thick, with a
+/// wider area around it to grab, as in a split view.
+struct PaneDivider: View {
+    let axis: Axis
+    let changed: (CGFloat) -> Void
+    let ended: () -> Void
 
-private struct CardStyle: ViewModifier {
-    /// Matches the sidebar card's corners.
-    private let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
-
-    func body(content: Content) -> some View {
-        content
-            .clipShape(shape)
-            .background(.background.secondary, in: shape)
-            .overlay(shape.strokeBorder(.separator, lineWidth: 1))
-            .shadow(color: .black.opacity(0.35), radius: 12, y: 4)
+    var body: some View {
+        Divider()
+            .overlay {
+                Color.clear
+                    .frame(width: axis == .vertical ? Space.sm : nil, height: axis == .horizontal ? Space.sm : nil)
+                    .contentShape(Rectangle())
+                    .pointerStyle(axis == .horizontal ? .rowResize : .columnResize)
+                    .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                        .onChanged { changed(axis == .horizontal ? $0.translation.height : $0.translation.width) }
+                        .onEnded { _ in ended() })
+            }
+            .zIndex(1)
     }
 }

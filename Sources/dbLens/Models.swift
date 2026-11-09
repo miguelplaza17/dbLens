@@ -143,6 +143,10 @@ final class AppModel {
     var showSQLPanel = UserDefaults.standard.object(forKey: "sqlPanel.shown") as? Bool ?? true {
         didSet { if !Store.isOverridden { UserDefaults.standard.set(showSQLPanel, forKey: "sqlPanel.shown") } }
     }
+    /// The log beside the SQL editor.
+    var showLog = UserDefaults.standard.object(forKey: "sqlPanel.showLog") as? Bool ?? true {
+        didSet { if !Store.isOverridden { UserDefaults.standard.set(showLog, forKey: "sqlPanel.showLog") } }
+    }
 
     // The open connection.
     private(set) var session: (any DatabaseSession)?

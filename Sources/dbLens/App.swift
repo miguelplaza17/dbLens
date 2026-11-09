@@ -82,6 +82,11 @@ struct DBLensApp: App {
                     withAnimation(.snappy(duration: 0.25)) { model.showSQLPanel.toggle() }
                 }
                 .keyboardShortcut("y", modifiers: [.command, .shift])
+                Button(model.showLog ? String(localized: "Hide Log") : String(localized: "Show Log")) {
+                    withAnimation(.snappy(duration: 0.25)) { model.showLog.toggle() }
+                }
+                .keyboardShortcut("y", modifiers: [.command, .option])
+                .disabled(!model.showSQLPanel)
             }
             CommandMenu("Database") {
                 Button("Run SQL") { Task { await model.run() } }
