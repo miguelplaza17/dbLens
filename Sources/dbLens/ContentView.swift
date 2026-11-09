@@ -114,7 +114,8 @@ struct Sidebar: View {
 
     var body: some View {
         GeometryReader { geometry in
-            let wanted = outlineHeight + ConnectionsOutline.inset * 2
+            // A little empty room under the rows, so a row can be dropped after the last one (or out of a folder, to the end).
+            let wanted = outlineHeight + ConnectionsOutline.inset * 2 + Space.xxl
             let room = model.session == nil ? geometry.size.height : geometry.size.height * Self.connectionsShare
             VStack(spacing: 0) {
                 connectionsHeader

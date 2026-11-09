@@ -279,6 +279,26 @@ struct ConnectionsOutline: NSViewRepresentable {
             return node(text.hasPrefix("f:") ? .folder : .connection, id)
         }
 
+        private enum Place { case refuse, inside(SidebarNode), among(SidebarNode?, Int) }
+
+        /// Where a dragged folder lands, from the pointer's place on the folder row under it
+        /// (nil: not over a folder row, so the outline's own proposal stands).
+        private func folderPlace(for moving: SidebarNode, info: NSDraggingInfo, in outline: NSOutlineView) -> Place? {
+            let point = outline.convert(info.draggingLocation, from: nil)
+            let row = outline.row(at: point)
+            guard row >= 0, let over = outline.item(atRow: row) as? SidebarNode, over.kind == .folder else { return nil }
+            // Never into itself or its own subfolders.
+            if parent.model.folder(over.id, isIn: moving.id) { return .refuse }
+            let rect = outline.rect(ofRow: row)
+            let fraction = rect.height > 0 ? (point.y - rect.minY) / rect.height : 0.5
+            let owner = outline.parent(forItem: over) as? SidebarNode
+            let siblings = kids(of: owner)
+            guard let at = siblings.firstIndex(of: over) else { return nil }
+            if fraction < 0.25 { return .among(owner, at) }
+            if fraction > 0.75 { return .among(owner, at + 1) }
+            return .inside(over)
+        }
+
         /// Where a row may land. A connection goes among a folder's connections
         /// (they come first), a folder among its subfolders; the outline is asked
         /// to show exactly that place, so the gap opens where the drop will go.
@@ -287,6 +307,22 @@ struct ConnectionsOutline: NSViewRepresentable {
             guard let moving = dragged(info) else { return [] }
             var target = item as? SidebarNode
             var position = index
+            // A folder is placed by where the pointer is on the row under it, not by
+            // where the outline guesses: the top quarter puts it in front of that
+            // folder, the bottom quarter after it, the middle inside it. (The
+            // outline offers "inside an open folder" for a drop on its top edge,
+            // so a folder could never be put in order at its own level.)
+            if moving.kind == .folder, let place = folderPlace(for: moving, info: info, in: outlineView) {
+                switch place {
+                case .refuse: return []
+                case .inside(let over):
+                    outlineView.setDropItem(over, dropChildIndex: NSOutlineViewDropOnItemIndex)
+                    return .move
+                case .among(let parentNode, let at):
+                    target = parentNode
+                    position = at
+                }
+            }
             // Over a connection: after it, in its folder.
             if let over = target, over.kind == .connection {
                 guard let saved = connection(over.id) else { return [] }
@@ -300,7 +336,8 @@ struct ConnectionsOutline: NSViewRepresentable {
             }
             let siblings = kids(of: target)
             let connectionCount = siblings.filter { $0.kind == .connection }.count
-            if position == NSOutlineViewDropOnItemIndex {
+            // Any negative index means "on" the item (or the empty part of the list), not a place among its rows.
+            if position < 0 {
                 // On a folder: into it. On the empty part: the end of the top level.
                 if target != nil { outlineView.setDropItem(target, dropChildIndex: NSOutlineViewDropOnItemIndex); return .move }
                 position = siblings.count
