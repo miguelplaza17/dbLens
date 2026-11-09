@@ -5,7 +5,7 @@ import DBLensKit
 /// The panel at the bottom of the window, flush with it like Xcode's debug
 /// area: the SQL editor and, beside it, the log, under a thin divider. Drag the
 /// divider to resize. Command-Return runs the selection, or everything when
-/// nothing is selected; the result shows in the grid above. Run is in the toolbar.
+/// nothing is selected; the result shows in the grid above.
 struct SQLPanel: View {
     @Environment(AppModel.self) private var model
     @AppStorage("sqlPanel.logWidth") private var logWidth: Double = 360
@@ -47,6 +47,19 @@ struct SQLPanel: View {
 
     private var header: some View {
         HStack(spacing: Space.sm) {
+            tools
+                .labelStyle(.iconOnly)
+                .buttonStyle(.borderless)
+            RunControl()
+        }
+        .controlSize(.small)
+        .frame(height: PaneBar.height)
+        .padding(.horizontal, Space.md)
+    }
+
+    /// Everything but Run, which keeps its title and its accent fill.
+    private var tools: some View {
+        HStack(spacing: Space.sm) {
             // The panel's own toggle sits here while it's open, like the sidebar's;
             // folded away, it moves to the window toolbar.
             Button("Hide SQL Panel", systemImage: "rectangle.bottomthird.inset.filled") {
@@ -83,11 +96,6 @@ struct SQLPanel: View {
             .toggleStyle(.button)
             .help("Show or hide the log (Option-Command-Y)")
         }
-        .labelStyle(.iconOnly)
-        .buttonStyle(.borderless)
-        .controlSize(.small)
-        .frame(height: PaneBar.height)
-        .padding(.horizontal, Space.md)
     }
 }
 
@@ -96,16 +104,19 @@ enum PaneBar {
     static let height = Space.xxl + Space.xs
 }
 
-/// Run, in the window's toolbar: with an arrow for its other two modes where
-/// the database has them, and Cancel while something runs.
+/// Run, at the end of the editor's bar: with an arrow for its other two modes
+/// where the database has them, and Cancel while something runs.
 struct RunControl: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         if model.running {
             Button("Cancel", systemImage: "stop.fill") { model.cancel() }
+                .buttonStyle(.bordered)
                 .help("Cancel the query (Command-.)")
         } else if !model.usesCommands && !model.usesQueries {
+            // All blue with a connection, all gray without.
+            let ready = model.session != nil
             Menu {
                 Button("Rehearse", systemImage: "testtube.2") { Task { await model.run(.rehearse) } }
                     .help("Run in a transaction that is always rolled back: see what it would do, change nothing (Option-Command-Return)")
@@ -116,10 +127,18 @@ struct RunControl: View {
             } primaryAction: {
                 Task { await model.run() }
             }
-            .disabled(model.session == nil)
+            .menuStyle(.button)
+            .buttonStyle(.borderedProminent)
+            .compositingGroup()
+            .overlay {
+                RoundedRectangle(cornerRadius: 6).fill(ready ? Palette.accent : Color.clear) // grid: ok
+                    .blendMode(.color).allowsHitTesting(false)
+            }
+            .disabled(!ready)
             .help("Run (Command-Return)")
         } else {
             Button("Run", systemImage: "play.fill") { Task { await model.run() } }
+                .buttonStyle(.borderedProminent)
                 .disabled(model.session == nil)
                 .help("Run (Command-Return)")
         }

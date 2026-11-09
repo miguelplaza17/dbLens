@@ -278,11 +278,6 @@ struct Detail: View {
                         .help("Go forward again (Command-])")
                         .disabled(!model.canGoForwardInHistory)
                 }
-                // Run lives with the editor: only while the SQL panel is open.
-                if model.showSQLPanel {
-                    ToolbarItem(placement: .primaryAction) { RunControl() }
-                    ToolbarSpacer(.fixed, placement: .primaryAction)
-                }
                 ToolbarItem(placement: .primaryAction) {
                     Toggle(isOn: Binding(get: { model.shown == .schema },
                                          set: { on in Task { if on { await model.showSchema() } else { model.shown = .table } } })) {
