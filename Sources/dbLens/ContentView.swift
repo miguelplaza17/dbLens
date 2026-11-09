@@ -72,6 +72,7 @@ struct Sidebar: View {
     @State private var editingFolder: UUID?
     /// What the connection rows need, as the outline reports it.
     @State private var outlineHeight: CGFloat = 0
+    @State private var outlineShownHeight: CGFloat = 0
 
     private enum Row: Hashable { case relation(String) }
 
@@ -119,41 +120,45 @@ struct Sidebar: View {
             let room = model.session == nil ? geometry.size.height : geometry.size.height * Self.connectionsShare
             VStack(spacing: 0) {
                 connectionsHeader
-                ConnectionsOutline(model: model, connections: connections, editingFolder: editingFolder,
-                                   startNaming: startNaming, newFolder: { newFolder(in: $0) },
-                                   rename: { id, name in
-                                       if let name { model.renameFolder(id, to: name) }
-                                       editingFolder = nil
-                                   },
-                                   askDelete: { connection in
-                                       if confirmDelete { deleting = connection } else { model.delete(connection) }
-                                   },
-                                   maxHeight: room, contentHeight: $outlineHeight)
-                    .frame(height: ConnectionsOutline.frameHeight(rows: outlineHeight, maxHeight: room))
-                if model.session != nil {
-                    List(selection: selection) {
-                        ForEach(schemas, id: \.0) { schema, relations in
-                            // Redis keys group by prefix; keys without one go under "keys".
-                            // Each group folds with its disclosure arrow; a filter shows every match.
-                            Section(isExpanded: expanded(schema)) {
-                                ForEach(relations) { relation in
-                                    Label(relation.name, systemImage: relation.symbol)
-                                        .tag(Row.relation(relation.id))
-                                        .contextMenu { relationMenu(relation) }
+                // The tables sit over the outline's frame, not under it: the frame has to
+                // change at once, and the tables follow the rows it holds as they move.
+                ZStack(alignment: .top) {
+                    ConnectionsOutline(model: model, connections: connections, editingFolder: editingFolder,
+                                       startNaming: startNaming, newFolder: { newFolder(in: $0) },
+                                       rename: { id, name in
+                                           if let name { model.renameFolder(id, to: name) }
+                                           editingFolder = nil
+                                       },
+                                       askDelete: { connection in
+                                           if confirmDelete { deleting = connection } else { model.delete(connection) }
+                                       },
+                                       maxHeight: room, contentHeight: $outlineHeight, shownHeight: $outlineShownHeight)
+                        .frame(height: ConnectionsOutline.frameHeight(rows: outlineHeight, maxHeight: room))
+                    if model.session != nil {
+                        List(selection: selection) {
+                            ForEach(schemas, id: \.0) { schema, relations in
+                                // Redis keys group by prefix; keys without one go under "keys".
+                                // Each group folds with its disclosure arrow; a filter shows every match.
+                                Section(isExpanded: expanded(schema)) {
+                                    ForEach(relations) { relation in
+                                        Label(relation.name, systemImage: relation.symbol)
+                                            .tag(Row.relation(relation.id))
+                                            .contextMenu { relationMenu(relation) }
+                                    }
+                                } header: {
+                                    Text(schema.isEmpty ? String(localized: "keys") : schema)
                                 }
-                            } header: {
-                                Text(schema.isEmpty ? String(localized: "keys") : schema)
+                            }
+                            if model.usesCommands, model.relations.count >= 5_000 {
+                                Text("Showing the first 5,000 keys. Use the filter, or SCAN in the command panel.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
                         }
-                        if model.usesCommands, model.relations.count >= 5_000 {
-                            Text("Showing the first 5,000 keys. Use the filter, or SCAN in the command panel.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                        .padding(.top, ConnectionsOutline.frameHeight(rows: outlineShownHeight, maxHeight: room))
                     }
-                } else {
-                    Spacer(minLength: 0)
                 }
+                .frame(maxHeight: .infinity, alignment: .top)
             }
         }
         .searchable(text: $filter, placement: .sidebar, prompt: model.usesCommands ? Text("Filter Keys") : model.usesQueries ? Text("Filter Collections") : Text("Filter Tables"))

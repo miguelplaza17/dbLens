@@ -44,6 +44,9 @@ struct ConnectionsOutline: NSViewRepresentable {
     let maxHeight: CGFloat
     /// The height all the rows need, reported back so the sidebar can size the outline.
     @Binding var contentHeight: CGFloat
+    /// The height the rows seem to take: while a folder opens or closes it follows
+    /// them, and whatever sits under the outline moves with it.
+    @Binding var shownHeight: CGFloat
 
     /// Points per row (the system's sidebar rows).
     static let rowHeight: CGFloat = 28
@@ -87,6 +90,8 @@ struct ConnectionsOutline: NSViewRepresentable {
         outline.frameNeeded = { [weak coordinator = context.coordinator] item in
             (item as? SidebarNode).flatMap { coordinator?.frameNeeded(opening: $0) } ?? 0
         }
+        outline.rowsSliding = { [weak coordinator = context.coordinator] bottom in coordinator?.slide(to: bottom) }
+        outline.rowsSlid = { [weak coordinator = context.coordinator] in coordinator?.reportHeight() }
 
         let scroll = NSScrollView()
         scroll.documentView = outline
@@ -200,11 +205,26 @@ struct ConnectionsOutline: NSViewRepresentable {
         }
 
         /// What the rows need, for the sidebar to size the outline by.
-        private func reportHeight() {
+        func reportHeight() {
             guard let outline else { return }
             let rows = outline.numberOfRows
             let height = rows > 0 ? outline.rect(ofRow: rows - 1).maxY : 0
             setHeight(height)
+            // Mid-slide, `slide(to:)` has this in hand.
+            guard !((outline as? SidebarOutlineView)?.isSliding ?? false) else { return }
+            let shown = parent.$shownHeight
+            if abs(shown.wrappedValue - height) > 0.5 {
+                DispatchQueue.main.async { shown.wrappedValue = height }
+            }
+        }
+
+        /// The rows have started to move: what's under the outline goes with them, on their curve.
+        func slide(to bottom: CGFloat) {
+            withAnimation(.timingCurve(SidebarOutlineView.slideCurve.0, SidebarOutlineView.slideCurve.1,
+                                       SidebarOutlineView.slideCurve.2, SidebarOutlineView.slideCurve.3,
+                                       duration: SidebarOutlineView.slideDuration)) {
+                parent.shownHeight = bottom
+            }
         }
 
         private func setHeight(_ height: CGFloat) {
@@ -610,9 +630,14 @@ final class SidebarOutlineView: NSOutlineView {
     var frameNeeded: ((Any) -> CGFloat)?
     /// Off for changes that don't come from the user, and during a drag.
     var animatesDisclosure = true
+    /// A folder's rows start to move; the rows will end at this height.
+    var rowsSliding: ((CGFloat) -> Void)?
+    var rowsSlid: (() -> Void)?
     private var sliding = false
+    var isSliding: Bool { sliding }
 
-    private static let slideDuration: CFTimeInterval = 0.25
+    static let slideDuration: CFTimeInterval = 0.25
+    static let slideCurve: (Double, Double, Double, Double) = (0.25, 0.1, 0.25, 1)
     private static let slideKey = "disclosure"
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -641,7 +666,10 @@ final class SidebarOutlineView: NSOutlineView {
         afterFrame(reaches: frameNeeded?(item) ?? 0, tries: 15) { [self] in
             plainExpand(item, expandChildren)
             layoutSubtreeIfNeeded()
-            slideContents(of: row(forItem: item), opening: true) { [self] in sliding = false }
+            slideContents(of: row(forItem: item), opening: true) { [self] in
+                sliding = false
+                rowsSlid?()
+            }
         }
     }
 
@@ -653,6 +681,7 @@ final class SidebarOutlineView: NSOutlineView {
         slideContents(of: row(forItem: item), opening: false) { [self] in
             plainCollapse(item, collapseChildren)
             sliding = false
+            rowsSlid?()
         }
     }
 
@@ -680,13 +709,15 @@ final class SidebarOutlineView: NSOutlineView {
         let edge = rect(ofRow: parentRow).maxY
         let travel = rect(ofRow: last).maxY - edge
         let reach = visibleRect.maxY + travel
+        rowsSliding?(rect(ofRow: numberOfRows - 1).maxY - (opening ? 0 : travel))
 
         func animation(_ from: CGFloat, _ to: CGFloat) -> CABasicAnimation {
             let move = CABasicAnimation(keyPath: "transform.translation.y")
             move.fromValue = from
             move.toValue = to
             move.duration = Self.slideDuration
-            move.timingFunction = CAMediaTimingFunction(controlPoints: 0.25, 0.1, 0.25, 1)
+            let curve = Self.slideCurve
+            move.timingFunction = CAMediaTimingFunction(controlPoints: Float(curve.0), Float(curve.1), Float(curve.2), Float(curve.3))
             move.fillMode = .both
             move.isRemovedOnCompletion = false
             return move
