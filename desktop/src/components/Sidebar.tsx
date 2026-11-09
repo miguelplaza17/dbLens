@@ -346,6 +346,7 @@ function SidebarRow(props: {
       onMouseDown={props.onMouseDown}
       data-drop-folder={props.dropFolder}
       data-folder-parent={props.folderParent}
+      data-open={props.disclosure ? String(props.disclosure === "open") : undefined}
       data-drop-row={props.dropRow}
       data-row-folder={props.rowFolder}
       style={style}

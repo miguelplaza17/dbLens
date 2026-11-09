@@ -1033,7 +1033,8 @@ body.dragging-connection .sidebar-row:not(.drop-target):not(.selected):hover { b
   margin-right: var(--space-sm);
   overflow: hidden;
   opacity: 0;
-  transition: height var(--duration-slow), margin var(--duration-slow), opacity var(--duration-slow);
+  /* Rows glide apart: the same ease the Mac's outline view uses. */
+  transition: height var(--duration-slow) cubic-bezier(0.25, 0.9, 0.3, 1), margin var(--duration-slow) cubic-bezier(0.25, 0.9, 0.3, 1), opacity var(--duration-slow);
 }
 .drop-slot::after {
   content: "";
