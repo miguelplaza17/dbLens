@@ -231,21 +231,6 @@ const Grid = forwardRef<HTMLInputElement, { result: ResultBlock }>(function Grid
           <span className="spinner small" title={t("Counting rows…")} />
         )}
         <span className="spacer" />
-        {isTable && (
-          <div className="search-field">
-            <Icon name="search" size={12} />
-            <input
-              ref={searchRef}
-              type="search"
-              value={model.tableSearch}
-              placeholder={t("Search rows")}
-              title={withKeys(t("Rows with this text in any column, across every page"), "searchRows")}
-              spellCheck={false}
-              onChange={(e) => model.searchTable(e.target.value)}
-              onKeyDown={(e) => e.key === "Escape" && model.searchTable("")}
-            />
-          </div>
-        )}
         {isTable && !editable && model.relation?.kind !== "key" && (
           <span className="tertiary" title={t("Views and tables without a primary key can't be edited here.")}>
             {t("Read Only")}
@@ -302,6 +287,67 @@ const Grid = forwardRef<HTMLInputElement, { result: ResultBlock }>(function Grid
           <Icon name="export" size={14} />
         </button>
       </footer>
+      {isTable && model.showFind && <FindBar ref={searchRef} />}
+    </div>
+  );
+});
+
+/** Search and replace under the grid, above the SQL panel. Ctrl/Cmd+F opens it,
+ *  Escape or Done closes it and shows every row again. */
+const FindBar = forwardRef<HTMLInputElement>(function FindBar(_props, searchRef) {
+  const model = useModel();
+  const [replacement, setReplacement] = useState("");
+  const hasSearch = model.tableSearch !== "";
+  const selected = [...model.selection];
+  const pending = model.hasUnsavedEdits;
+  const busy = model.replacing || pending;
+  return (
+    <div className="find-bar" onKeyDown={(e) => e.key === "Escape" && model.closeFind()}>
+      <div className="search-field">
+        <Icon name="search" size={12} />
+        <input
+          ref={searchRef}
+          type="search"
+          autoFocus
+          value={model.tableSearch}
+          placeholder={t("Search rows")}
+          title={withKeys(t("Rows with this text in any column, across every page"), "searchRows")}
+          spellCheck={false}
+          onChange={(e) => model.searchTable(e.target.value)}
+        />
+      </div>
+      <div className="find-actions">
+        {model.replaceNote && <span className="status">{model.replaceNote}</span>}
+        <button className="button" onClick={() => model.closeFind()} title={t("Close and show every row again (Escape)")}>
+          {t("Done")}
+        </button>
+      </div>
+      {model.canReplace && (
+        <>
+          <div className="search-field">
+            <input type="text" value={replacement} placeholder={t("Replace with")} spellCheck={false} onChange={(e) => setReplacement(e.target.value)} />
+          </div>
+          <div className="find-actions">
+            {model.replacing && <span className="spinner small" />}
+            <button
+              className="button"
+              disabled={!hasSearch || selected.length === 0 || busy}
+              onClick={() => void model.replaceInRows(selected, replacement)}
+              title={pending ? t("Save or revert your edits first") : t("Replace in the selected rows, right away")}
+            >
+              {t("Replace")}
+            </button>
+            <button
+              className="button"
+              disabled={!hasSearch || busy}
+              onClick={() => void model.planReplaceAll(replacement)}
+              title={pending ? t("Save or revert your edits first") : t("Replace in every matching row, across every page. Text columns only; never the key.")}
+            >
+              {t("Replace All…")}
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 });

@@ -126,6 +126,11 @@ final class AppModel {
     }
     /// Text the table grid is filtered by, on the server, across every page.
     private(set) var tableSearch = ""
+    var showFind = false
+    var findFocusRequests = 0
+    var replacing = false
+    var replaceNote: String?
+    var replacePlan: ReplacePlan?
     /// The column the table is ordered by (on the server), from a header click.
     private(set) var tableSort: ColumnSort?
     /// The column the query result is ordered by, on screen.
@@ -662,6 +667,127 @@ final class AppModel {
         searchTask?.cancel()
         tableSearch = ""
         tableSort = nil
+    }
+
+    // MARK: Find and replace
+
+    /// One row to rewrite, by its place in the plan's keys.
+    struct ReplaceEdit {
+        let row: Int
+        let changes: [(String, String?)]
+    }
+
+    /// What Replace All will write, shown for confirmation first.
+    struct ReplacePlan {
+        let relation: Relation
+        let keys: RowKeys
+        let edits: [ReplaceEdit]
+        let find: String
+        let replacement: String
+    }
+
+    /// More rows than this are a job for SQL: each one is its own UPDATE.
+    static let replaceLimit = 10_000
+
+    /// Text rewrites need rows with keys and text cells: not Redis or MongoDB.
+    var canReplace: Bool { canEditRows && !usesCommands && !usesQueries }
+
+    /// Command-F: the find bar, with the cursor in its search field.
+    func openFind() {
+        guard shown == .table, relation != nil else { return }
+        showFind = true
+        findFocusRequests += 1
+    }
+
+    /// The bar goes, and the rows it was filtering come back.
+    func closeFind() {
+        showFind = false
+        replaceNote = nil
+        if !tableSearch.isEmpty { searchTable("") }
+    }
+
+    /// Replaces in the selected rows of this page, right away, like editing the cells.
+    func replace(inRows rows: Set<Int>, with replacement: String) async {
+        guard canReplace, let result = tableResult, let keys = result.keys, let relation = loadedRelation else { return }
+        let edits = rows.sorted().filter { $0 < result.rows.count }.compactMap { row -> ReplaceEdit? in
+            let changes = RowReplace.changes(columns: result.columns, row: result.rows[row], keyColumns: keys.columns,
+                                             find: tableSearch, with: replacement)
+            return changes.isEmpty ? nil : ReplaceEdit(row: row, changes: changes)
+        }
+        await apply(ReplacePlan(relation: relation, keys: keys, edits: edits, find: tableSearch, replacement: replacement))
+    }
+
+    /// Reads every matching row, across all pages, and asks before writing.
+    func planReplaceAll(with replacement: String) async {
+        guard canReplace, !tableSearch.isEmpty, let session, let relation = loadedRelation else { return }
+        replaceNote = nil
+        replacing = true
+        defer { replacing = false }
+        var keys: RowKeys?
+        var edits: [ReplaceEdit] = []
+        var read = 0
+        do {
+            while true {
+                let page = try await session.page(of: relation, limit: 1000, offset: read, search: tableSearch, sort: tableSort)
+                guard let pageKeys = page.keys else { break }
+                if keys == nil { keys = pageKeys; keys?.values = [] }
+                for (index, row) in page.rows.enumerated() {
+                    let changes = RowReplace.changes(columns: page.columns, row: row, keyColumns: pageKeys.columns,
+                                                     find: tableSearch, with: replacement)
+                    guard !changes.isEmpty else { continue }
+                    edits.append(ReplaceEdit(row: keys?.values.count ?? 0, changes: changes))
+                    keys?.values.append(pageKeys.values[index])
+                }
+                guard edits.count <= Self.replaceLimit else {
+                    replaceNote = String(localized: "More than \(Self.replaceLimit.formatted()) rows match. Narrow the search, or use SQL.")
+                    return
+                }
+                read += page.rows.count
+                if page.rows.count < 1000 { break }
+            }
+        } catch {
+            replaceNote = error.localizedDescription
+            addLog(sql: "", message: error.localizedDescription, isError: true)
+            return
+        }
+        guard let keys, !edits.isEmpty else {
+            replaceNote = String(localized: "No text to replace in these rows.")
+            return
+        }
+        replacePlan = ReplacePlan(relation: relation, keys: keys, edits: edits, find: tableSearch, replacement: replacement)
+    }
+
+    /// Writes the rows one by one and stops at the first error; the ones done stay done.
+    func apply(_ plan: ReplacePlan) async {
+        guard let session else { return }
+        guard !plan.edits.isEmpty else {
+            replaceNote = String(localized: "No text to replace in these rows.")
+            return
+        }
+        replacing = true
+        defer { replacing = false }
+        var done = 0
+        var failure: String?
+        for edit in plan.edits {
+            do {
+                _ = try await session.update(plan.relation, keys: plan.keys, row: edit.row, changes: edit.changes)
+                done += 1
+            } catch {
+                failure = error.localizedDescription
+                break
+            }
+        }
+        let summary = String(localized: "Replaced in \(done.formatted()) rows")
+        if let failure {
+            replaceNote = "\(summary). \(failure)"
+            addLog(sql: "", message: "\(summary). \(failure)", isError: true)
+        } else {
+            replaceNote = summary
+            addLog(sql: "", message: summary, isError: false)
+        }
+        // The rewritten rows may no longer match the search.
+        offset = 0
+        await loadTable()
     }
 
     /// Filters the table as you type, a moment after the last key.

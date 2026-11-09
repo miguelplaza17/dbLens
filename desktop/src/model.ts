@@ -8,6 +8,8 @@ import {
   errorText,
   mainResult,
   relationId,
+  rowCells,
+  rowKey,
   StreamCollector,
   type CellValue,
   type ColumnSort,
@@ -16,6 +18,7 @@ import {
   type Execution,
   type Relation,
   type ResultBlock,
+  type RowKey,
   type SavedConnection,
   type SshConfig,
   type StoreSnapshot,
@@ -25,7 +28,8 @@ import type { AgentAccess } from "./agentAccess";
 import { TableSource } from "./grid/blocks";
 import { markStart } from "./grid/perf";
 import { duration, executionSummary } from "./format";
-import { t } from "./i18n";
+import { formatNumber, t } from "./i18n";
+import { rowChanges } from "./replace";
 import { setSettings } from "./settings/store";
 import { recordRun } from "./history/store";
 
@@ -73,6 +77,10 @@ function store(key: string, value: string) {
 }
 
 /** Kinds of relation that can take a new row. */
+/** Replace All reads the matching rows this many at a time, and takes no more than the limit. */
+const REPLACE_PAGE = 1000;
+const REPLACE_LIMIT = 10_000;
+
 const insertable = new Set(["table", "partitioned", "foreign"]);
 
 export class AppModel {
@@ -105,6 +113,9 @@ export class AppModel {
   offset = 0;
   pageSize = Number(stored("pageSize", "200")) || 200;
   tableSearch = "";
+  showFind = false;
+  replacing = false;
+  replaceNote: string | null = null;
   tableSort: ColumnSort | null = null;
   /** Bumps when the grid shows new rows, so it drops its selection. */
   tableVersion = 0;
@@ -550,6 +561,137 @@ export class AppModel {
     store("pageSize", String(size));
     this.offset = 0;
     await this.loadPage();
+  }
+
+  // MARK: Find and replace
+
+  /** Text rewrites need rows with keys and text cells: not Redis or MongoDB. */
+  get canReplace(): boolean {
+    return this.canEditRows && !!this.tableSource?.editable && !this.usesCommands && !this.usesQueries;
+  }
+
+  /** Ctrl/Cmd+F: the find bar. */
+  openFind() {
+    if (this.shown !== "table" || !this.relation) return;
+    this.showFind = true;
+    this.changed();
+  }
+
+  /** The bar goes, and the rows it was filtering come back. */
+  closeFind() {
+    this.showFind = false;
+    this.replaceNote = null;
+    if (this.tableSearch !== "") this.searchTable("");
+    else this.changed();
+  }
+
+  /** Replaces in the selected rows, right away, like editing the cells. */
+  async replaceInRows(rows: number[], replacement: string) {
+    const source = this.tableSource;
+    const keys = this.tableResult?.keys;
+    if (!this.canReplace || !source || !keys) return;
+    const edits: Array<{ row: number; changes: CellValue[] }> = [];
+    for (const row of rows) {
+      const cells = source.columns.map((_, c) => {
+        const value = source.shown(row, c);
+        return value === null || value === undefined ? null : String(value);
+      });
+      const changes = rowChanges(source.columns, cells, keys.columns, this.tableSearch, replacement);
+      if (changes.length > 0) edits.push({ row, changes });
+    }
+    if (edits.length === 0) return this.noteReplace(t("No text to replace in these rows."));
+    this.replacing = true;
+    this.changed();
+    let done = 0;
+    try {
+      for (const edit of edits) {
+        await this.updateRow(edit.row, edit.changes);
+        done++;
+      }
+      this.noteReplace(t("Replaced in %@ rows", formatNumber(done)));
+    } catch (e) {
+      this.failReplace(done, e);
+    } finally {
+      this.replacing = false;
+      this.changed();
+    }
+  }
+
+  /** Reads every matching row, across all pages, and asks before writing. */
+  async planReplaceAll(replacement: string) {
+    const info = this.session;
+    const relation = this.relation;
+    if (!this.canReplace || !info || !relation || this.tableSearch === "") return;
+    const find = this.tableSearch;
+    this.replaceNote = null;
+    this.replacing = true;
+    this.changed();
+    const edits: Array<{ key: RowKey; changes: CellValue[] }> = [];
+    try {
+      for (let offset = 0; ; ) {
+        const page = await api.page(info.sessionId, relation, { limit: REPLACE_PAGE, offset, search: find, sort: this.tableSort });
+        if (!page.keys) break;
+        for (let row = 0; row < page.rowCount; row++) {
+          const changes = rowChanges(page.columns, rowCells(page, row), page.keys.columns, find, replacement);
+          if (changes.length > 0) edits.push({ key: rowKey(page.keys, row), changes });
+        }
+        if (edits.length > REPLACE_LIMIT) {
+          return this.noteReplace(t("More than %@ rows match. Narrow the search, or use SQL.", formatNumber(REPLACE_LIMIT)));
+        }
+        offset += page.rowCount;
+        if (page.rowCount < REPLACE_PAGE) break;
+      }
+    } catch (e) {
+      const message = errorText(e);
+      this.logError(message, "");
+      return this.noteReplace(message);
+    } finally {
+      this.replacing = false;
+      this.changed();
+    }
+    if (edits.length === 0) return this.noteReplace(t("No text to replace in these rows."));
+    this.open({
+      kind: "confirm",
+      title: t("Replace “%@” with “%@” in %@ rows?", find, replacement, formatNumber(edits.length)),
+      message: t("Each UPDATE is sent to the database right away and can't be undone here."),
+      action: t("Replace"),
+      destructive: true,
+      run: () => this.applyReplace(info.sessionId, relation, edits),
+    });
+  }
+
+  /** Writes the rows one by one and stops at the first error; the ones done stay done. */
+  private async applyReplace(sessionId: string, relation: Relation, edits: Array<{ key: RowKey; changes: CellValue[] }>) {
+    this.replacing = true;
+    this.changed();
+    let done = 0;
+    try {
+      for (const edit of edits) {
+        await api.updateRow(sessionId, relation, edit.key, edit.changes);
+        done++;
+      }
+      const summary = t("Replaced in %@ rows", formatNumber(done));
+      this.logOutcome("", summary);
+      this.noteReplace(summary);
+    } catch (e) {
+      this.failReplace(done, e);
+    } finally {
+      this.replacing = false;
+      // The rewritten rows may no longer match the search.
+      this.offset = 0;
+      await this.loadPage(true);
+    }
+  }
+
+  private noteReplace(note: string) {
+    this.replaceNote = note;
+    this.changed();
+  }
+
+  private failReplace(done: number, e: unknown) {
+    const message = `${t("Replaced in %@ rows", formatNumber(done))}. ${errorText(e)}`;
+    this.logError(message, "");
+    this.noteReplace(message);
   }
 
   /** Searches every page after a short pause in typing. */

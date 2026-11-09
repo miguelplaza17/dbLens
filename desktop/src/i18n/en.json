@@ -372,5 +372,17 @@
   "Background": "Background",
   "Keep dbLens in the menu bar": "Keep dbLens in the menu bar",
   "Keep dbLens in the tray": "Keep dbLens in the tray",
-  "Closing the last window leaves dbLens running; open it again from its icon. Quit from the icon's menu or the File menu.": "Closing the last window leaves dbLens running; open it again from its icon. Quit from the icon's menu or the File menu."
+  "Closing the last window leaves dbLens running; open it again from its icon. Quit from the icon's menu or the File menu.": "Closing the last window leaves dbLens running; open it again from its icon. Quit from the icon's menu or the File menu.",
+  "Replace with": "Replace with",
+  "Replace": "Replace",
+  "Replace All…": "Replace All…",
+  "Close and show every row again (Escape)": "Close and show every row again (Escape)",
+  "Replace in the selected rows, right away": "Replace in the selected rows, right away",
+  "Replace in every matching row, across every page. Text columns only; never the key.": "Replace in every matching row, across every page. Text columns only; never the key.",
+  "Each UPDATE is sent to the database right away and can't be undone here.": "Each UPDATE is sent to the database right away and can't be undone here.",
+  "No text to replace in these rows.": "No text to replace in these rows.",
+  "More than %@ rows match. Narrow the search, or use SQL.": "More than %@ rows match. Narrow the search, or use SQL.",
+  "Replaced in %@ rows": "Replaced in %@ rows",
+  "Replace “%@” with “%@” in %@ rows?": "Replace “%@” with “%@” in %@ rows?",
+  "Save or revert your edits first": "Save or revert your edits first"
 }

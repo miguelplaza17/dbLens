@@ -53,7 +53,7 @@ export default function App() {
       dispatch(action);
     };
     // Keys and native menu clicks end up here: the same code runs for both.
-    setPerformer((action) => perform(model, action, { filter: filterRef.current, search: searchRef.current }));
+    setPerformer((action) => perform(model, action, { filter: filterRef.current, search: searchRef }));
     window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("keydown", onKey);
@@ -305,7 +305,7 @@ function SheetView({ sheet }: { sheet: SheetState }) {
 }
 
 /** What each shortcut does. */
-function perform(model: AppModel, action: Action, fields: { filter: HTMLInputElement | null; search: HTMLInputElement | null }) {
+function perform(model: AppModel, action: Action, fields: { filter: HTMLInputElement | null; search: React.RefObject<HTMLInputElement | null> }) {
   // The grid on screen takes copy, paging and the perf HUD first.
   if (gridAction(action)) return;
   if (performNative(model, action)) return;
@@ -327,7 +327,11 @@ function perform(model: AppModel, action: Action, fields: { filter: HTMLInputEle
       if (!model.showSidebar) model.toggleSidebar();
       return requestAnimationFrame(() => fields.filter?.focus());
     case "searchRows":
-      return fields.search?.focus();
+      model.openFind();
+      return requestAnimationFrame(() => {
+        fields.search.current?.focus();
+        fields.search.current?.select();
+      });
     case "previousPage":
       return void model.previousPage();
     case "nextPage":

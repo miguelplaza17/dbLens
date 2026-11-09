@@ -55,6 +55,10 @@ struct ResultPane: View {
                        onSort: { sort in Task { await model.sort(by: sort) } })
             Divider()
             footer(result)
+            if model.showFind && model.shown == .table {
+                Divider()
+                FindBar(selection: selection)
+            }
         }
         .onChange(of: version) { selection.rows = [] }
     }
@@ -94,12 +98,6 @@ struct ResultPane: View {
             }
             if model.tableLoading && model.shown == .table { ProgressView().controlSize(.small) }
             Spacer()
-            if model.shown == .table {
-                TextField("Search rows", text: Binding(get: { model.tableSearch }, set: { model.searchTable($0) }))
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 200)
-                    .help("Rows with this text in any column, across every page")
-            }
             if model.shown == .table, model.tableResult != nil, !model.canEditRows {
                 Text("Read Only")
                     .foregroundStyle(.tertiary)
@@ -148,6 +146,68 @@ struct ResultPane: View {
             ?? (searching ? nil : model.relation.map { "~\(Int(max($0.estimate, 0)).formatted())" }) ?? "?"
         let rows = String(localized: "Rows \(first.formatted())–\(last.formatted()) of \(total)")
         return result.note.map { "\(rows) · \($0)" } ?? rows
+    }
+}
+
+/// Search and replace under the grid, above the SQL panel. Command-F opens it,
+/// Escape or Done closes it and shows every row again.
+private struct FindBar: View {
+    @Environment(AppModel.self) private var model
+    let selection: GridSelection
+    @State private var replacement = ""
+    @FocusState private var searching: Bool
+
+    var body: some View {
+        let hasSearch = !model.tableSearch.isEmpty
+        Grid(alignment: .leading, horizontalSpacing: Space.sm, verticalSpacing: Space.sm) {
+            GridRow {
+                TextField("Search rows", text: Binding(get: { model.tableSearch }, set: { model.searchTable($0) }))
+                    .focused($searching)
+                    .help("Rows with this text in any column, across every page")
+                HStack(spacing: Space.sm) {
+                    if let note = model.replaceNote {
+                        Text(verbatim: note).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Button("Done") { model.closeFind() }
+                        .help("Close and show every row again (Escape)")
+                }
+                .gridColumnAlignment(.trailing)
+            }
+            if model.canReplace {
+                GridRow {
+                    TextField("Replace with", text: $replacement)
+                    HStack(spacing: Space.sm) {
+                        if model.replacing { ProgressView().controlSize(.small) }
+                        Button("Replace") { Task { await model.replace(inRows: selection.rows, with: replacement) } }
+                            .disabled(!hasSearch || selection.rows.isEmpty || model.replacing)
+                            .help("Replace in the selected rows, right away")
+                        Button("Replace All…") { Task { await model.planReplaceAll(with: replacement) } }
+                            .disabled(!hasSearch || model.replacing)
+                            .help("Replace in every matching row, across every page. Text columns only; never the key.")
+                    }
+                }
+            }
+        }
+        .textFieldStyle(.roundedBorder)
+        .controlSize(.small)
+        .padding(.horizontal, Space.md)
+        .padding(.vertical, Space.sm)
+        .onExitCommand { model.closeFind() }
+        .onAppear { searching = true }
+        .onChange(of: model.findFocusRequests) { searching = true }
+        .confirmationDialog(confirmTitle, isPresented: Binding(get: { model.replacePlan != nil },
+                                                               set: { if !$0 { model.replacePlan = nil } })) {
+            Button("Replace", role: .destructive) {
+                if let plan = model.replacePlan { Task { await model.apply(plan) } }
+            }
+        } message: {
+            Text("Each UPDATE is sent to the database right away and can't be undone here.")
+        }
+    }
+
+    private var confirmTitle: String {
+        guard let plan = model.replacePlan else { return "" }
+        return String(localized: "Replace “\(plan.find)” with “\(plan.replacement)” in \(plan.edits.count.formatted()) rows?")
     }
 }
 

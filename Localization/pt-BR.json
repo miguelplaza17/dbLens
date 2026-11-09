@@ -475,5 +475,17 @@
   "Reads and writes": "Lê e escreve",
   "Its subfolders and connections move up one level; none is deleted.": "As subpastas e conexões dela sobem um nível; nada é apagado.",
   "Top Level": "Nível Superior",
-  "New Folder (Option-Command-N)": "Nova Pasta (Option-Command-N)"
+  "New Folder (Option-Command-N)": "Nova Pasta (Option-Command-N)",
+  "Close and show every row again (Escape)": "Fecha e mostra todas as linhas de novo (Esc)",
+  "Each UPDATE is sent to the database right away and can't be undone here.": "Cada UPDATE vai para o banco na hora e não pode ser desfeito aqui.",
+  "Find in Rows…": "Buscar nas Linhas…",
+  "More than %@ rows match. Narrow the search, or use SQL.": "Mais de %@ linhas encontradas. Refine a busca ou use SQL.",
+  "No text to replace in these rows.": "Não há texto para substituir nessas linhas.",
+  "Replace": "Substituir",
+  "Replace All…": "Substituir Tudo…",
+  "Replace in every matching row, across every page. Text columns only; never the key.": "Substitui em todas as linhas encontradas, em todas as páginas. Só em colunas de texto, nunca na chave.",
+  "Replace in the selected rows, right away": "Substitui nas linhas selecionadas, na hora",
+  "Replace with": "Substituir por",
+  "Replaced in %@ rows": "Substituído em %@ linhas",
+  "Replace “%@” with “%@” in %@ rows?": "Substituir “%1$@” por “%2$@” em %3$@ linhas?"
 }

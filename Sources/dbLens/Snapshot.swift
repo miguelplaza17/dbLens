@@ -52,6 +52,14 @@ enum Snapshot {
                 model.rowEdit = nil
                 try? await Task.sleep(for: .seconds(0.5))
             }
+            if only == nil || only?.contains("find") == true {
+                model.shown = .table
+                model.openFind()
+                try? await Task.sleep(for: .seconds(0.8))
+                capture(to: "\(dir)/find-\(mode).png")
+                model.closeFind()
+                try? await Task.sleep(for: .seconds(0.5))
+            }
             if only == nil || only?.contains("update") == true {
                 model.shown = .table
                 updater.showForSnapshot(.ready("1.0.2"))

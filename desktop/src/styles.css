@@ -620,6 +620,33 @@ select option {
   font-size: var(--font-size-small);
 }
 
+.find-bar {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto;
+  gap: var(--space-sm);
+  flex: none;
+  padding: var(--space-sm) var(--space-md);
+  border-top: 1px solid var(--separator);
+  background: var(--window);
+  font-size: var(--font-size-small);
+}
+.find-bar .search-field {
+  width: auto;
+}
+.find-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+.find-actions .status {
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* MARK: SQL panel */
 
 .sql-panel {

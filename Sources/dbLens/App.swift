@@ -50,6 +50,12 @@ struct DBLensApp: App {
                 Button("New Folder") { model.newFolderRequests += 1 }
                     .keyboardShortcut("n", modifiers: [.command, .option])
             }
+            CommandGroup(after: .textEditing) {
+                Divider()
+                Button("Find in Rows…") { model.openFind() }
+                    .keyboardShortcut("f")
+                    .disabled(model.shown != .table || model.relation == nil)
+            }
             CommandGroup(after: .sidebar) {
                 Divider()
                 Button("Back") { Task { await model.goBack() } }

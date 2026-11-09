@@ -207,6 +207,18 @@ enum SelfTest {
                 check("deleting a row removes it", model.tableResult?.rows.map { $0[1] } == ["editado", "novo"])
                 let copied = ResultGrid.tsv(model.tableResult!, header: true)
                 check("Copy All copies every row with the header", copied == "id\tnome\tn\n1\teditado\t\n3\tnovo\t5", copied)
+                model.openFind()
+                model.searchTable("EDIT")
+                try? await Task.sleep(for: .milliseconds(600))
+                check("the search keeps only the matching rows", model.tableResult?.rows.count == 1)
+                await model.planReplaceAll(with: "trocado-")
+                check("Replace All asks first, with the rows it will change", model.replacePlan?.edits.count == 1, model.replaceNote ?? "")
+                if let plan = model.replacePlan { await model.apply(plan) }
+                model.replacePlan = nil
+                model.closeFind()
+                try? await Task.sleep(for: .milliseconds(600))
+                check("Replace All rewrites the text, and closing shows every row", model.tableResult?.rows.map { $0[1] } == ["trocado-ado", "novo"],
+                      "\(model.tableResult?.rows.map { $0[1] } ?? [])")
             }
             model.sql = "drop table dblens_selftest"
             await model.run()
