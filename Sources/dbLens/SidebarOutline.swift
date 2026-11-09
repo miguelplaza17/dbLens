@@ -316,7 +316,6 @@ struct ConnectionsOutline: NSViewRepresentable {
             let folderID = target?.id.uuidString ?? ""
             let siblings = kids(of: target)
             let model = parent.model
-            let from = location(of: moving)
             switch moving.kind {
             case .connection:
                 guard let saved = connection(moving.id) else { return false }
@@ -330,35 +329,28 @@ struct ConnectionsOutline: NSViewRepresentable {
                 let before = slot >= 0 && slot < own.count ? own[slot].id : nil
                 if before != moving.id { guard model.moveFolder(moving.id, into: target?.id, before: before) else { return false } }
             }
-            applyMove(moving, from: from)
+            info.animatesToDestination = true
+            applyMove()
             return true
         }
 
-        private func location(of item: SidebarNode) -> (parent: SidebarNode?, index: Int)? {
-            for (key, list) in tree {
-                if let index = list.firstIndex(of: item) { return (UUID(uuidString: key).map { node(.folder, $0) }, index) }
-            }
-            return nil
-        }
-
-        /// Moves the row in the outline with the system's animation, so it
-        /// settles into place; falls back to a reload if anything doesn't add up.
-        private func applyMove(_ item: SidebarNode, from old: (parent: SidebarNode?, index: Int)?) {
+        /// The row is already where it was dropped (the dragged image settles there
+        /// by itself, `animatesToDestination`), so the outline only takes the new
+        /// order, without animating the row from its old place a second time.
+        private func applyMove() {
             guard let outline else { return }
             buildTree()
             signature = currentSignature()
-            guard let old, let new = location(of: item) else {
-                syncing = true
-                outline.reloadData()
-                syncing = false
-                return
-            }
             syncing = true
-            outline.beginUpdates()
-            outline.moveItem(at: old.index, inParent: old.parent, to: new.index, inParent: new.parent)
-            outline.endUpdates()
+            NSAnimationContext.beginGrouping()
+            NSAnimationContext.current.duration = 0
+            outline.reloadData()
+            syncExpansion()
+            NSAnimationContext.endGrouping()
             syncing = false
-            reload(force: false)
+            refreshCells()
+            syncSelection()
+            reportHeight()
         }
 
         // MARK: Menu
