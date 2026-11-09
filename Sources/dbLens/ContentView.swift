@@ -253,6 +253,8 @@ struct Sidebar: View {
             ForEach(AppModel.ordered(connections, in: folder.id.uuidString)) { connection in
                 connectionRow(connection)
             }
+            // Where a connection dropped on the folder lands: last among its connections.
+            if dropTarget == .folder(folder.id) { dropSlot }
             folderTree(in: folder.id)
         } label: {
             folderLabel(folder)
@@ -293,7 +295,12 @@ struct Sidebar: View {
         .contentShape(Rectangle())
         // Dragged onto another folder's top edge, a folder goes in front of it
         // (the same level); onto the rest of it, it becomes a subfolder there.
-        .overlay(alignment: .top) { if before { dropLine } }
+        .padding(.top, before ? Space.xxl + Space.xs : 0)
+        .overlay(alignment: .top) {
+            if before {
+                dropSlot.transition(.opacity)
+            }
+        }
         // The same drag as a connection's (no tap gesture on the row: it took
         // the mouse before the List could start a drag). The card appears as
         // the drag starts, which is when a folder's top edge means "in front".
@@ -377,8 +384,9 @@ struct Sidebar: View {
 
         /// The top edge (and the slot it opens above the folder) means "in front of".
         private func zone(_ info: DropInfo) -> DropTarget {
-            // A thin band: the folder's top 8 pt. It never moves, so the pointer can't flip between zones.
-            reorders && info.location.y < Space.sm ? .beforeFolder(folder) : .folder(folder)
+            // A thin band: the open slot above the folder, or its top 8 pt.
+            let edge = current() == .beforeFolder(folder) ? Space.xxl + Space.xs + Space.sm : Space.sm
+            return reorders && info.location.y < edge ? .beforeFolder(folder) : .folder(folder)
         }
 
         func dropEntered(info: DropInfo) { hover(zone(info)) }
@@ -405,26 +413,30 @@ struct Sidebar: View {
 
     }
 
-    /// The line where a dragged row will land: on the top edge of the row under
-    /// the pointer, a dot and a rule, as in Finder. It takes no space and no hits.
-    private var dropLine: some View {
-        HStack(spacing: 0) {
-            Circle().fill(Palette.accent).frame(width: Space.sm, height: Space.sm)  // grid: ok drop line
-            Rectangle().fill(Palette.accent).frame(height: 2)  // grid: ok drop line
-        }
-        .offset(y: -1)
-        .allowsHitTesting(false)
-        .transition(.opacity)
+    /// The outlined space where a dragged connection will land.
+    private var dropSlot: some View {
+        RoundedRectangle(cornerRadius: 6, style: .continuous)  // grid: ok drop slot
+            .strokeBorder(Palette.accent, style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))  // grid: ok dashed outline
+            .background(Palette.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop slot
+            .frame(height: Space.xxl)
+            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
     }
 
-    /// While a connection is dragged over this row, a line on its top edge shows
-    /// where the connection will land. The line is drawn over the row: moving the
-    /// rows apart changed the list's layout under the pointer, which made the
-    /// targets flicker and the table animate its row heights.
+    /// While a connection is dragged over this row, the row steps down and leaves
+    /// an outlined slot above it: where the connection will land.
     private func connectionRow(_ connection: SavedConnection) -> some View {
         let open = dropTarget == .row(connection.uuid)
         return ConnectionRow(connection: connection)
-            .overlay(alignment: .top) { if open { dropLine } }
+            .padding(.top, open ? Space.xxl + Space.xs : 0)
+            .overlay(alignment: .top) {
+                if open {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)  // grid: ok drop slot
+                        .strokeBorder(Palette.accent, style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))  // grid: ok dashed outline
+                        .background(Palette.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop slot
+                        .frame(height: Space.xxl)
+                        .transition(.opacity)
+                }
+            }
             .tag(Row.connection(connection.uuid))
             .onHover { if $0 { hoveredPayload = connection.uuid.uuidString } }
             .draggable(dragPayload(connection.uuid.uuidString)) { dragCard(connection.uuid.uuidString) }
