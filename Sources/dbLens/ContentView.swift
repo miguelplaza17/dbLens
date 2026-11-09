@@ -254,7 +254,7 @@ struct Sidebar: View {
                 connectionRow(connection)
             }
             // Where a connection dropped on the folder lands: last among its connections.
-            if dropTarget == .folder(folder.id) { dropSlot }
+            if dropTarget == .folder(folder.id) { dropSlot.allowsHitTesting(false) }
             folderTree(in: folder.id)
         } label: {
             folderLabel(folder)
@@ -298,7 +298,7 @@ struct Sidebar: View {
         .padding(.top, before ? Space.xxl + Space.xs : 0)
         .overlay(alignment: .top) {
             if before {
-                dropSlot.transition(.opacity)
+                dropSlot.allowsHitTesting(false).transition(.opacity)
             }
         }
         // The same drag as a connection's (no tap gesture on the row: it took
@@ -434,6 +434,7 @@ struct Sidebar: View {
                         .strokeBorder(Palette.accent, style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))  // grid: ok dashed outline
                         .background(Palette.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop slot
                         .frame(height: Space.xxl)
+                        .allowsHitTesting(false)
                         .transition(.opacity)
                 }
             }
