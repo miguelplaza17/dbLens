@@ -435,7 +435,7 @@ struct Sidebar: View {
                         .background(Palette.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop slot
                         .frame(height: Space.xxl)
                         .allowsHitTesting(false)
-                        .transition(.opacity)
+                        .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
                 }
             }
             .tag(Row.connection(connection.uuid))
