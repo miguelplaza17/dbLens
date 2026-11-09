@@ -1,6 +1,6 @@
 [package]
 name = "dblens"
-version = "1.2.0"
+version = "1.3.0"
 description = "dbLens: a fast, minimal database client"
 authors = ["dbLens contributors"]
 license = "MIT"
