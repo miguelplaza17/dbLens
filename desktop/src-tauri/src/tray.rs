@@ -171,13 +171,11 @@ mod tests {
     use super::*;
 
     #[test]
+    // Not through `TrayState`: it holds menu items, and a test binary that touches them
+    // needs the Windows common controls manifest it doesn't have (it won't start).
     fn the_app_stays_only_in_the_tray_and_not_while_quitting() {
         assert!(should_stay(true, false));
         assert!(!should_stay(false, false), "the setting is off");
         assert!(!should_stay(true, true), "Quit was asked for");
-        let state = TrayState::default();
-        assert!(!state.quitting.load(Ordering::SeqCst));
-        state.begin_quit();
-        assert!(state.quitting.load(Ordering::SeqCst));
     }
 }
