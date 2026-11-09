@@ -120,7 +120,15 @@ struct Sidebar: View {
             VStack(spacing: 0) {
                 connectionsHeader
                 ConnectionsOutline(model: model, connections: connections, editingFolder: editingFolder,
-                                   content: rowContent, newFolder: { newFolder() }, contentHeight: $outlineHeight)
+                                   startNaming: startNaming, newFolder: { newFolder(in: $0) },
+                                   rename: { id, name in
+                                       if let name { model.renameFolder(id, to: name) }
+                                       editingFolder = nil
+                                   },
+                                   askDelete: { connection in
+                                       if confirmDelete { deleting = connection } else { model.delete(connection) }
+                                   },
+                                   contentHeight: $outlineHeight)
                     .frame(height: max(min(wanted, room), ConnectionsOutline.rowHeight))
                 if model.session != nil {
                     List(selection: selection) {
@@ -189,41 +197,15 @@ struct Sidebar: View {
         .padding(.vertical, Space.xs)
     }
 
-    /// What one row of the connections outline shows, with its context menu.
-    private func rowContent(_ node: SidebarNode) -> AnyView {
-        switch node.kind {
-        case .connection:
-            guard let connection = connections.first(where: { $0.uuid == node.id }) else { return AnyView(EmptyView()) }
-            return AnyView(OutlineConnectionRow(connection: connection)
-                .contextMenu { menu(for: connection) }
-                .environment(model)
-                .themed())
-        case .folder:
-            guard let folder = model.folders.first(where: { $0.id == node.id }) else { return AnyView(EmptyView()) }
-            return AnyView(OutlineFolderRow(
-                name: folder.name,
-                editing: editingFolder == folder.id,
-                commit: { name in
-                    model.renameFolder(folder.id, to: name)
-                    editingFolder = nil
-                },
-                cancel: { editingFolder = nil }
-            )
-            .contextMenu { folderMenu(folder) }
-            .environment(model)
-            .themed())
-        }
-    }
-
     /// Puts the folder's name in an editable field, right in the list.
-    private func startNaming(_ folder: ConnectionFolder) {
-        model.setFolderExpanded(folder.id, true)
-        editingFolder = folder.id
+    private func startNaming(_ id: UUID) {
+        model.setFolderExpanded(id, true)
+        editingFolder = id
     }
 
     private func newFolder(in parent: UUID? = nil) {
         let folder = model.addFolder(named: String(localized: "New Folder"), in: parent)
-        startNaming(folder)
+        startNaming(folder.id)
     }
 
     @ViewBuilder
@@ -237,158 +219,6 @@ struct Sidebar: View {
             Button(model.usesQueries ? LocalizedStringKey("Query in Panel") : LocalizedStringKey("Query in SQL"), systemImage: "terminal") { model.queryTable(relation) }
             Button("Copy Name", systemImage: "doc.on.doc") { copy(model.session?.qualified(relation) ?? relation.qualified) }
         }
-    }
-
-    @ViewBuilder
-    private func folderMenu(_ folder: ConnectionFolder) -> some View {
-        Button("Rename…", systemImage: "pencil") {
-            startNaming(folder)
-        }
-        Button("New Subfolder", systemImage: "folder.badge.plus") { newFolder(in: folder.id) }
-        Button("New Folder", systemImage: "folder.badge.plus") { newFolder() }
-        Menu("Move to", systemImage: "folder") {
-            ForEach(model.folders.filter { !model.folder($0.id, isIn: folder.id) }) { other in
-                Button(model.path(of: other.id)) { withAnimation(Motion.land) { _ = model.moveFolder(folder.id, into: other.id) } }
-                    .disabled(folder.parentID == other.id)
-            }
-            if model.folders.count > 1 { Divider() }
-            Button("Top Level") { withAnimation(Motion.land) { _ = model.moveFolder(folder.id, into: nil) } }
-                .disabled(folder.parentID == nil)
-        }
-        Divider()
-        Button("Delete Folder", systemImage: "trash", role: .destructive) { model.deleteFolder(folder.id) }
-            .help("Its subfolders and connections move up one level; none is deleted.")
-    }
-
-    @ViewBuilder
-    private func menu(for connection: SavedConnection) -> some View {
-        Button("Connect", systemImage: "bolt.horizontal") { Task { await model.connect(connection) } }
-        Button("Edit…", systemImage: "pencil") { model.editing = connection }
-        Button("Open in Terminal", systemImage: "apple.terminal") { model.openInTerminal(connection) }
-        Button("Copy URL Without Password", systemImage: "doc.on.doc") {
-            copy(connection.url.map(ConnectionURL.redact) ?? "")
-        }
-        Button("Copy URL with Password") { copySecret(connection.url ?? "") }
-            .help("Cleared from the clipboard after a minute")
-        if connection.uuid == model.activeID {
-            Button("Disconnect", systemImage: "bolt.horizontal.slash") { model.disconnect() }
-        }
-        Menu("Move to", systemImage: "folder") {
-            ForEach(model.folders) { folder in
-                Button(model.path(of: folder.id)) { model.move(connection, before: nil, into: folder.id.uuidString, all: connections) }
-                    .disabled(connection.folderID == folder.id.uuidString)
-            }
-            if !model.folders.isEmpty { Divider() }
-            Button("No Folder") { model.move(connection, before: nil, into: "", all: connections) }
-                .disabled(connection.folderID.isEmpty)
-            Button("New Folder", systemImage: "folder.badge.plus") {
-                let folder = model.addFolder(named: String(localized: "New Folder"))
-                model.move(connection, before: nil, into: folder.id.uuidString, all: connections)
-                startNaming(folder)
-            }
-        }
-        Divider()
-        // dbLens's MCP server: whether agents see this connection, which tools they may use, and writing (opt-in).
-        Menu("Agent Tools", systemImage: "sparkles") {
-            AgentAccessItems(connection: connection) { try? model.context.save() }
-        }
-        Divider()
-        Button("Delete…", systemImage: "trash", role: .destructive) {
-            if confirmDelete { deleting = connection } else { model.delete(connection) }
-        }
-    }
-}
-
-/// A saved connection's row in the outline: its icon (a lock when it goes
-/// through SSH), its name, and a green dot while it is open.
-private struct OutlineConnectionRow: View {
-    @Environment(AppModel.self) private var model
-    let connection: SavedConnection
-
-    private var isActive: Bool { connection.uuid == model.activeID && model.session != nil }
-
-    var body: some View {
-        HStack(spacing: Space.sm) {
-            icon.frame(width: Space.lg)
-            Text(verbatim: connection.name)
-                .fontWeight(isActive ? .semibold : .regular)
-                .lineLimit(1)
-            Spacer(minLength: 0)
-            if isActive {
-                Image(systemName: "circle.fill").foregroundStyle(.green).font(.system(size: 7))  // grid: ok status dot
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        .help(connection.ssh.map { String(localized: "Via SSH \($0.label)") } ?? "")
-    }
-
-    @ViewBuilder
-    private var icon: some View {
-        if model.connectingID == connection.uuid {
-            ProgressView().controlSize(.small)
-        } else {
-            // The kind of database, in its color; a lock when it goes through SSH.
-            let engine = Engine(rawValue: connection.engine) ?? .postgres
-            if connection.sshHost.isEmpty {
-                EngineIcon(engine)
-            } else {
-                Image(systemName: "lock.shield").foregroundStyle(engine.color)
-            }
-        }
-    }
-}
-
-/// A folder's row: its name, or a field for typing it.
-private struct OutlineFolderRow: View {
-    let name: String
-    let editing: Bool
-    let commit: (String) -> Void
-    let cancel: () -> Void
-
-    var body: some View {
-        HStack(spacing: Space.sm) {
-            Image(systemName: "folder").foregroundStyle(.tint).frame(width: Space.lg)
-            if editing {
-                FolderNameField(initial: name, commit: commit, cancel: cancel)
-            } else {
-                Text(verbatim: name).lineLimit(1)
-            }
-            Spacer(minLength: 0)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-    }
-}
-
-/// The name of a folder being typed: Return or a click elsewhere keeps it, Escape leaves it.
-private struct FolderNameField: View {
-    @State private var text: String
-    @State private var done = false
-    @FocusState private var focused: Bool
-    let commit: (String) -> Void
-    let cancel: () -> Void
-
-    init(initial: String, commit: @escaping (String) -> Void, cancel: @escaping () -> Void) {
-        _text = State(initialValue: initial)
-        self.commit = commit
-        self.cancel = cancel
-    }
-
-    private func finish(_ save: Bool) {
-        guard !done else { return }
-        done = true
-        if save { commit(text) } else { cancel() }
-    }
-
-    var body: some View {
-        TextField("Folder Name", text: $text)
-            .textFieldStyle(.plain)
-            .focused($focused)
-            .onSubmit { finish(true) }
-            .onExitCommand { finish(false) }
-            .onChange(of: focused) { _, now in if !now { finish(true) } }
-            .onAppear { focused = true }
     }
 }
 

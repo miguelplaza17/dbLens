@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import DBLensKit
 
 /// One row of the connections outline: a saved connection or a folder.
 /// Instances are kept by id (`ConnectionsOutline.Coordinator.node`), so the
@@ -26,14 +27,19 @@ nonisolated final class SidebarNode: NSObject {
 /// (an `NSOutlineView` in the source list style), so dragging works the way it
 /// does in Reminders: rows part to show where a row will land, a folder lights
 /// up when a row will go into it, and a closed folder opens under a drag.
-/// The rows are SwiftUI views (`content`), with their own context menus.
+/// The rows are the system's own table cells and context menus (not SwiftUI views
+/// in hosting views, which drew a moment after the row animation had started).
 struct ConnectionsOutline: NSViewRepresentable {
     let model: AppModel
     let connections: [SavedConnection]
     /// What the user is naming right now, so the row shows its field.
     let editingFolder: UUID?
-    let content: (SidebarNode) -> AnyView
-    let newFolder: () -> Void
+    /// The sidebar's side of the folder and connection menus.
+    let startNaming: (UUID) -> Void
+    let newFolder: (UUID?) -> Void
+    /// A folder's name was typed (nil: Escape).
+    let rename: (UUID, String?) -> Void
+    let askDelete: (SavedConnection) -> Void
     /// The height all the rows need, reported back so the sidebar can size the outline.
     @Binding var contentHeight: CGFloat
 
@@ -45,7 +51,7 @@ struct ConnectionsOutline: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let outline = NSOutlineView()
+        let outline = SidebarOutlineView()
         let column = NSTableColumn(identifier: .init("connections"))
         column.resizingMask = .autoresizingMask
         outline.addTableColumn(column)
@@ -53,6 +59,7 @@ struct ConnectionsOutline: NSViewRepresentable {
         outline.headerView = nil
         outline.style = .sourceList
         outline.rowSizeStyle = .default
+        outline.intercellSpacing = NSSize(width: 0, height: 2)
         outline.rowHeight = Self.rowHeight
         outline.usesAutomaticRowHeights = false
         outline.backgroundColor = .clear
@@ -68,6 +75,7 @@ struct ConnectionsOutline: NSViewRepresentable {
         outline.dataSource = context.coordinator
         outline.delegate = context.coordinator
         outline.menu = context.coordinator.emptyMenu()
+        outline.menuFor = { [weak coordinator = context.coordinator] row in coordinator?.menu(forRow: row) }
 
         let scroll = NSScrollView()
         scroll.documentView = outline
@@ -91,7 +99,7 @@ struct ConnectionsOutline: NSViewRepresentable {
     // MARK: Coordinator
 
     @MainActor
-    final class Coordinator: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
+    final class Coordinator: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate, NSTextFieldDelegate {
         static let pasteboardType = NSPasteboard.PasteboardType("io.github.miguelplaza17.dblens.sidebar-node")
 
         var parent: ConnectionsOutline
@@ -149,7 +157,9 @@ struct ConnectionsOutline: NSViewRepresentable {
                     switch node.kind {
                     case .connection:
                         let c = connection(node.id)
-                        return "c\(node.id)\(c?.name ?? "")\(c?.engine ?? "")\(c?.sshHost ?? "")"
+                        let engine = Engine(rawValue: c?.engine ?? "") ?? .postgres
+                        let look = EngineIconStore.shared.style(engine).rawValue + String(describing: NSColor(engine.color).hashValue)
+                        return "c\(node.id)\(c?.name ?? "")\(c?.engine ?? "")\(c?.sshHost ?? "")\(look)"
                     case .folder:
                         return "f\(node.id)\(folder(node.id)?.name ?? "")"
                     }
@@ -254,9 +264,68 @@ struct ConnectionsOutline: NSViewRepresentable {
             guard let outline else { return }
             for row in 0..<outline.numberOfRows {
                 guard let item = outline.item(atRow: row) as? SidebarNode,
-                      let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: false) as? HostCell else { continue }
-                cell.host.rootView = parent.content(item)
+                      let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: false) as? SidebarCell else { continue }
+                configure(cell, for: item)
             }
+            syncEditing()
+        }
+
+        /// What a row shows: the kind of database's icon and color, the name, the open dot.
+        private func configure(_ cell: SidebarCell, for item: SidebarNode) {
+            let model = parent.model
+            switch item.kind {
+            case .connection:
+                guard let saved = connection(item.id) else { return }
+                let engine = Engine(rawValue: saved.engine) ?? .postgres
+                let active = saved.uuid == model.activeID && model.session != nil
+                let image: NSImage?
+                let tint = NSColor(engine.color)
+                if !saved.sshHost.isEmpty {
+                    image = NSImage(systemSymbolName: "lock.shield", accessibilityDescription: nil)
+                } else if EngineIconStore.shared.style(engine) == .logo, let logo = EngineLogos.image(engine) {
+                    image = logo.copy() as? NSImage
+                    image?.isTemplate = true
+                } else {
+                    image = NSImage(systemSymbolName: engine.symbol, accessibilityDescription: nil)
+                }
+                cell.show(name: saved.name, bold: active, image: image, tint: tint, spinning: model.connectingID == saved.uuid,
+                          dot: active, tooltip: saved.ssh.map { String(localized: "Via SSH \($0.label)") } ?? "")
+            case .folder:
+                guard let folder = folder(item.id) else { return }
+                let image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
+                cell.show(name: folder.name, bold: false, image: image, tint: NSColor(Palette.accent), spinning: false, dot: false, tooltip: "")
+            }
+        }
+
+        // MARK: Naming a folder in place
+
+        private var editingNode: UUID?
+        private var editCancelled = false
+
+        /// The folder being named gets its text field, selected, right in the row.
+        private func syncEditing() {
+            guard let outline else { return }
+            guard let id = parent.editingFolder else { editingNode = nil; return }
+            guard editingNode != id else { return }
+            let row = outline.row(forItem: node(.folder, id))
+            guard row >= 0, let cell = outline.view(atColumn: 0, row: row, makeIfNecessary: true) as? SidebarCell else { return }
+            editingNode = id
+            editCancelled = false
+            DispatchQueue.main.async { cell.beginEditing(delegate: self) }
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            guard commandSelector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+            editCancelled = true
+            control.window?.makeFirstResponder(outline)
+            return true
+        }
+
+        func controlTextDidEndEditing(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField, let id = editingNode else { return }
+            editingNode = nil
+            field.isEditable = false
+            parent.rename(id, editCancelled ? nil : field.stringValue)
         }
 
         /// The open connection is the selected row.
@@ -286,8 +355,8 @@ struct ConnectionsOutline: NSViewRepresentable {
         func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
             guard let item = item as? SidebarNode else { return nil }
             let id = NSUserInterfaceItemIdentifier("cell")
-            let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? HostCell ?? HostCell(identifier: id)
-            cell.host.rootView = parent.content(item)
+            let cell = outlineView.makeView(withIdentifier: id, owner: nil) as? SidebarCell ?? SidebarCell(identifier: id)
+            configure(cell, for: item)
             return cell
         }
 
@@ -450,27 +519,229 @@ struct ConnectionsOutline: NSViewRepresentable {
             menu.addItem(item)
         }
 
-        @objc private func makeFolder() { parent.newFolder() }
+        @objc private func makeFolder() { parent.newFolder(nil) }
     }
 }
 
-/// A row's cell: a SwiftUI view in the outline's own row.
-final class HostCell: NSTableCellView {
-    let host = NSHostingView(rootView: AnyView(EmptyView()))
+/// A row of the outline: icon, name, and the dot of the open connection. The
+/// system's own table cell, so it draws with the row and animates with it.
+final class SidebarCell: NSTableCellView {
+    private let icon = NSImageView()
+    private let label = NSTextField(labelWithString: "")
+    private let dot = NSImageView()
+    private let spinner = NSProgressIndicator()
 
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
         self.identifier = identifier
-        host.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(host)
+        imageView = icon
+        textField = label
+        icon.imageScaling = .scaleProportionallyDown
+        label.lineBreakMode = .byTruncatingTail
+        label.cell?.truncatesLastVisibleLine = true
+        label.font = .systemFont(ofSize: NSFont.systemFontSize)
+        label.focusRingType = .none
+        dot.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 7, weight: .regular))
+        dot.contentTintColor = .systemGreen
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
+        for view in [icon, label, dot, spinner] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
         NSLayoutConstraint.activate([
-            host.leadingAnchor.constraint(equalTo: leadingAnchor),
-            host.trailingAnchor.constraint(equalTo: trailingAnchor),
-            host.topAnchor.constraint(equalTo: topAnchor),
-            host.bottomAnchor.constraint(equalTo: bottomAnchor),
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: Space.lg),
+            icon.heightAnchor.constraint(equalToConstant: Space.lg),
+            spinner.centerXAnchor.constraint(equalTo: icon.centerXAnchor),
+            spinner.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
+            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: Space.sm),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: dot.leadingAnchor, constant: -Space.xs),
+            dot.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Space.xs),
+            dot.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
+
+    func show(name: String, bold: Bool, image: NSImage?, tint: NSColor, spinning: Bool, dot showsDot: Bool, tooltip: String) {
+        label.stringValue = name
+        label.font = .systemFont(ofSize: NSFont.systemFontSize, weight: bold ? .semibold : .regular)
+        label.isEditable = false
+        icon.image = spinning ? nil : image
+        icon.contentTintColor = tint
+        if spinning { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+        dot.isHidden = !showsDot
+        toolTip = tooltip.isEmpty ? nil : tooltip
+    }
+
+    /// The name becomes a field, all selected; Return keeps it, Escape leaves it.
+    func beginEditing(delegate: NSTextFieldDelegate) {
+        label.isEditable = true
+        label.isSelectable = true
+        label.placeholderString = String(localized: "Folder Name")
+        label.delegate = delegate
+        window?.makeFirstResponder(label)
+        label.selectText(nil)
+    }
+}
+
+/// The outline, with a context menu per row (built by `ConnectionsOutline.Coordinator`).
+final class SidebarOutlineView: NSOutlineView {
+    var menuFor: ((Int) -> NSMenu?)?
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let row = row(at: convert(event.locationInWindow, from: nil))
+        if row >= 0, let menu = menuFor?(row) { return menu }
+        return super.menu(for: event)
+    }
+}
+
+/// A menu item that runs a closure.
+private final class MenuAction: NSObject {
+    let run: () -> Void
+    init(_ run: @escaping () -> Void) { self.run = run }
+    @objc func fire() { run() }
+}
+
+private extension NSMenu {
+    @discardableResult
+    func add(_ title: String, symbol: String? = nil, checked: Bool = false, enabled: Bool = true, help: String? = nil,
+             action: @escaping () -> Void) -> NSMenuItem {
+        let target = MenuAction(action)
+        let item = NSMenuItem(title: title, action: #selector(MenuAction.fire), keyEquivalent: "")
+        item.target = target
+        item.representedObject = target  // the menu item holds its target weakly
+        item.state = checked ? .on : .off
+        item.isEnabled = enabled
+        item.toolTip = help
+        if let symbol { item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil) }
+        addItem(item)
+        return item
+    }
+
+    func addSection(_ title: String) { addItem(NSMenuItem.sectionHeader(title: title)) }
+}
+
+// MARK: Menus
+
+extension ConnectionsOutline.Coordinator {
+    /// The context menu of the row at `row`.
+    func menu(forRow row: Int) -> NSMenu? {
+        guard let outline, let item = outline.item(atRow: row) as? SidebarNode else { return nil }
+        switch item.kind {
+        case .connection:
+            guard let saved = parent.connections.first(where: { $0.uuid == item.id }) else { return nil }
+            return connectionMenu(saved)
+        case .folder:
+            guard let folder = parent.model.folders.first(where: { $0.id == item.id }) else { return nil }
+            return folderMenu(folder)
+        }
+    }
+
+    private func connectionMenu(_ saved: SavedConnection) -> NSMenu {
+        let model = parent.model
+        let menu = NSMenu()
+        menu.add(String(localized: "Connect"), symbol: "bolt.horizontal") { Task { await model.connect(saved) } }
+        menu.add(String(localized: "Edit…"), symbol: "pencil") { model.editing = saved }
+        menu.add(String(localized: "Open in Terminal"), symbol: "apple.terminal") { model.openInTerminal(saved) }
+        menu.add(String(localized: "Copy URL Without Password"), symbol: "doc.on.doc") {
+            dbLens.copy(saved.url.map(ConnectionURL.redact) ?? "")
+        }
+        menu.add(String(localized: "Copy URL with Password"), help: String(localized: "Cleared from the clipboard after a minute")) {
+            dbLens.copySecret(saved.url ?? "")
+        }
+        if saved.uuid == model.activeID {
+            menu.add(String(localized: "Disconnect"), symbol: "bolt.horizontal.slash") { model.disconnect() }
+        }
+        // Move to
+        let move = NSMenu()
+        for folder in model.folders {
+            move.add(model.path(of: folder.id), enabled: saved.folderID != folder.id.uuidString) {
+                model.move(saved, before: nil, into: folder.id.uuidString, all: self.parent.connections)
+            }
+        }
+        if !model.folders.isEmpty { move.addItem(.separator()) }
+        move.add(String(localized: "No Folder"), enabled: !saved.folderID.isEmpty) {
+            model.move(saved, before: nil, into: "", all: self.parent.connections)
+        }
+        move.add(String(localized: "New Folder"), symbol: "folder.badge.plus") {
+            let folder = model.addFolder(named: String(localized: "New Folder"))
+            model.move(saved, before: nil, into: folder.id.uuidString, all: self.parent.connections)
+            self.parent.startNaming(folder.id)
+        }
+        let moveItem = menu.add(String(localized: "Move to"), symbol: "folder") {}
+        moveItem.submenu = move
+        menu.addItem(.separator())
+        let tools = agentToolsMenu(saved)
+        let toolsItem = menu.add(String(localized: "Agent Tools"), symbol: "sparkles") {}
+        toolsItem.submenu = tools
+        menu.addItem(.separator())
+        menu.add(String(localized: "Delete…"), symbol: "trash") { self.parent.askDelete(saved) }
+        return menu
+    }
+
+    /// What agents may do on a connection: seen or hidden, each MCP tool, and writing
+    /// (the same switches as Settings > Agents).
+    private func agentToolsMenu(_ saved: SavedConnection) -> NSMenu {
+        let model = parent.model
+        let save = { try? model.context.save() }
+        let menu = NSMenu()
+        menu.add(String(localized: "Visible to Agents"), checked: !saved.agentsHidden) {
+            saved.agentsHidden.toggle()
+            save()
+        }
+        menu.addItem(.separator())
+        menu.addSection(String(localized: "Reading"))
+        for name in MCPServer.connectionTools where !MCPServer.writingTools.contains(name) {
+            menu.add(name, checked: saved.agentsMayUse(name), enabled: !saved.agentsHidden) {
+                saved.setAgents(name, allowed: !saved.agentsMayUse(name))
+                save()
+            }
+        }
+        menu.addSection(String(localized: "Writing"))
+        menu.add(String(localized: "Let Agents Write"), checked: saved.agentsCanWrite) {
+            saved.agentsCanWrite.toggle()
+            save()
+        }
+        for name in MCPServer.connectionTools where MCPServer.writingTools.contains(name) {
+            menu.add(name, checked: saved.agentsMayUse(name), enabled: !saved.agentsHidden && saved.agentsCanWrite) {
+                saved.setAgents(name, allowed: !saved.agentsMayUse(name))
+                save()
+            }
+        }
+        menu.addItem(.separator())
+        menu.add(String(localized: "Allow All Tools"), enabled: !saved.agentsBlockedTools.isEmpty) {
+            for name in MCPServer.connectionTools { saved.setAgents(name, allowed: true) }
+            save()
+        }
+        return menu
+    }
+
+    private func folderMenu(_ folder: ConnectionFolder) -> NSMenu {
+        let model = parent.model
+        let menu = NSMenu()
+        menu.add(String(localized: "Rename…"), symbol: "pencil") { self.parent.startNaming(folder.id) }
+        menu.add(String(localized: "New Subfolder"), symbol: "folder.badge.plus") { self.parent.newFolder(folder.id) }
+        menu.add(String(localized: "New Folder"), symbol: "folder.badge.plus") { self.parent.newFolder(nil) }
+        let move = NSMenu()
+        for other in model.folders where !model.folder(other.id, isIn: folder.id) {
+            move.add(model.path(of: other.id), enabled: folder.parentID != other.id) {
+                _ = model.moveFolder(folder.id, into: other.id)
+            }
+        }
+        if model.folders.count > 1 { move.addItem(.separator()) }
+        move.add(String(localized: "Top Level"), enabled: folder.parentID != nil) { _ = model.moveFolder(folder.id, into: nil) }
+        let moveItem = menu.add(String(localized: "Move to"), symbol: "folder") {}
+        moveItem.submenu = move
+        menu.addItem(.separator())
+        menu.add(String(localized: "Delete Folder"), symbol: "trash", help: String(localized: "Its subfolders and connections move up one level; none is deleted.")) { model.deleteFolder(folder.id) }
+        return menu
+    }
 }
