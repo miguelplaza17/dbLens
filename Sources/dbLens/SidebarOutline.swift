@@ -178,15 +178,58 @@ struct ConnectionsOutline: NSViewRepresentable {
             reportHeight()
         }
 
+        /// While a folder opens or closes, the outline's frame must not change: the
+        /// rows are animating, and resizing the scroll view under them breaks the
+        /// animation (the rows below jump, and float over the ones opening).
+        private var animatingUntil = Date.distantPast
+        private var settleTask: DispatchWorkItem?
+        private static let animationTime: TimeInterval = 0.45
+
         /// What the rows need, for the sidebar to size the outline by.
         private func reportHeight() {
             guard let outline else { return }
+            let remaining = animatingUntil.timeIntervalSinceNow
+            if remaining > 0 {
+                // After the rows have settled.
+                settleTask?.cancel()
+                let work = DispatchWorkItem { [weak self] in self?.reportHeight() }
+                settleTask = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + remaining + 0.02, execute: work)
+                return
+            }
             let rows = outline.numberOfRows
             let height = rows > 0 ? outline.rect(ofRow: rows - 1).maxY : 0
+            setHeight(height)
+        }
+
+        private func setHeight(_ height: CGFloat) {
             let binding = parent.$contentHeight
             if abs(binding.wrappedValue - height) > 0.5 {
                 DispatchQueue.main.async { binding.wrappedValue = height }
             }
+        }
+
+        /// The rows an open folder adds: its children, and the open folders among them.
+        private func visibleRows(inside item: SidebarNode) -> Int {
+            (tree[item.id.uuidString] ?? []).reduce(0) { sum, child in
+                sum + 1 + (child.kind == .folder && (folder(child.id)?.expanded ?? false) ? visibleRows(inside: child) : 0)
+            }
+        }
+
+        func outlineViewItemWillExpand(_ notification: Notification) {
+            guard !syncing, let outline, let item = notification.userInfo?["NSObject"] as? SidebarNode else { return }
+            animatingUntil = Date().addingTimeInterval(Self.animationTime)
+            // Room first, then the rows open into it.
+            let rows = outline.numberOfRows
+            let pitch = outline.rowHeight + outline.intercellSpacing.height
+            let current = rows > 0 ? outline.rect(ofRow: rows - 1).maxY : 0
+            setHeight(current + CGFloat(visibleRows(inside: item)) * pitch)
+        }
+
+        func outlineViewItemWillCollapse(_ notification: Notification) {
+            guard !syncing else { return }
+            // The frame shrinks after the rows have closed.
+            animatingUntil = Date().addingTimeInterval(Self.animationTime)
         }
 
         /// Open and close folders as the model says (a new subfolder, a drop that opened one).
