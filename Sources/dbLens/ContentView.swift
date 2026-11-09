@@ -412,6 +412,7 @@ struct Sidebar: View {
             Circle().fill(Palette.accent).frame(width: Space.sm, height: Space.sm)  // grid: ok drop line
             Rectangle().fill(Palette.accent).frame(height: 2)  // grid: ok drop line
         }
+        .offset(y: -1)
         .allowsHitTesting(false)
         .transition(.opacity)
     }
