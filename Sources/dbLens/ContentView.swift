@@ -66,57 +66,18 @@ struct Sidebar: View {
     @State private var folded: Set<String> = []
     @State private var deleting: SavedConnection?
     @State private var deletingKey: Relation?
-    /// The folder whose name is being typed (new or renamed).
     /// The folder whose name is being typed in place (new or renamed).
     @State private var editingFolder: UUID?
-    @State private var folderName = ""
-    @FocusState private var folderFieldFocused: Bool
-    /// Where a dragged connection would land right now: a row, a folder, or the title.
-    @State private var dropTarget: DropTarget?
+    /// What the connection rows need, as the outline reports it.
+    @State private var outlineHeight: CGFloat = 0
 
-    /// The folder being dragged, if a folder is: only then does a folder's top edge
-    /// take it in front of that folder instead of into it.
-    @State private var draggingFolder: UUID?
-
-    private enum DropTarget: Hashable { case row(UUID), folder(UUID), beforeFolder(UUID), top }
-
-    private func targeting(_ target: DropTarget) -> (Bool) -> Void {
-        { inside in inside ? hover(target) : leave(target) }
-    }
-
-    /// The pending "nothing is targeted any more", cancelled when the pointer
-    /// reaches the next target in time.
-    @State private var leaveTask: Task<Void, Never>?
-
-    /// Lights `target` up, smoothly.
-    private func hover(_ target: DropTarget) {
-        leaveTask?.cancel()
-        guard dropTarget != target else { return }
-        withAnimation(Motion.hover) { dropTarget = target }
-    }
-
-    /// Lets `target` go after a short grace, unless another one is lit by then.
-    private func leave(_ target: DropTarget) {
-        leaveTask?.cancel()
-        leaveTask = Task {
-            try? await Task.sleep(for: Motion.leaveGrace)
-            guard !Task.isCancelled, dropTarget == target else { return }
-            withAnimation(Motion.hover) { dropTarget = nil }
-        }
-    }
-
-    private enum Row: Hashable { case connection(UUID), relation(String) }
+    private enum Row: Hashable { case relation(String) }
 
     private var selection: Binding<Row?> {
         Binding {
             model.shown == .table ? model.selectedRelation.map(Row.relation) : nil
         } set: { row in
-            switch row {
-            case .connection(let id):
-                if let connection = connections.first(where: { $0.uuid == id }) { Task { await model.connect(connection) } }
-            case .relation(let id): Task { await model.showTable(id) }
-            case nil: break
-            }
+            if case .relation(let id)? = row { Task { await model.showTable(id) } }
         }
     }
 
@@ -147,63 +108,46 @@ struct Sidebar: View {
         return order.map { ($0, groups[$0] ?? []) }
     }
 
+    /// The share of the sidebar the connections may take, while a database is
+    /// open and its tables need the rest; past it they scroll.
+    private static let connectionsShare: CGFloat = 0.5
+
     var body: some View {
-        List(selection: selection) {
-            Section {
-                // The connections outside any folder, then the folders: a connection
-                // after an open folder looked like it was inside it.
-                ForEach(AppModel.ordered(connections, in: "")) { connection in
-                    connectionRow(connection)
-                }
-                folderTree(in: nil)
-            } header: {
-                // Drop here to take a connection out of its folder.
-                HStack(spacing: Space.sm) {
-                    Text(dropTarget == .top ? String(localized: "Connections · drop to take it out of the folder") : String(localized: "Connections"))
-                        .foregroundStyle(dropTarget == .top ? Palette.accentText : .secondary)
-                    Spacer(minLength: 0)
-                    Button("New Folder", systemImage: "folder.badge.plus") { newFolder() }
-                        .help("New Folder (Option-Command-N)")
-                    Button("New Connection…", systemImage: "plus") { model.showingNewConnection = true }
-                        .help("New Connection (Command-N)")
-                }
-                .labelStyle(.iconOnly)
-                .buttonStyle(.borderless)
-                // Clear of the list's scroll bar.
-                .padding(.trailing, Space.sm)
-                .contentShape(Rectangle())
-                // The header is always there, so it carries the thin scroll bars for the list.
-                .background(ThinScrollBars().frame(width: 0, height: 0))
-                .dropDestination(for: String.self, action: { items, _ in drop(items, before: nil, into: "") },
-                                 isTargeted: targeting(.top))
-                    .contextMenu { Button("New Folder", systemImage: "folder.badge.plus") { newFolder() } }
-            }
-            if model.session != nil {
-                ForEach(schemas, id: \.0) { schema, relations in
-                    // Redis keys group by prefix; keys without one go under "keys".
-                    // Each group folds with its disclosure arrow; a filter shows every match.
-                    Section(isExpanded: expanded(schema)) {
-                        ForEach(relations) { relation in
-                            Label(relation.name, systemImage: relation.symbol)
-                                .tag(Row.relation(relation.id))
-                                .contextMenu { relationMenu(relation) }
+        GeometryReader { geometry in
+            let wanted = outlineHeight + ConnectionsOutline.inset * 2
+            let room = model.session == nil ? geometry.size.height : geometry.size.height * Self.connectionsShare
+            VStack(spacing: 0) {
+                connectionsHeader
+                ConnectionsOutline(model: model, connections: connections, editingFolder: editingFolder,
+                                   content: rowContent, newFolder: { newFolder() }, contentHeight: $outlineHeight)
+                    .frame(height: max(min(wanted, room), ConnectionsOutline.rowHeight))
+                if model.session != nil {
+                    List(selection: selection) {
+                        ForEach(schemas, id: \.0) { schema, relations in
+                            // Redis keys group by prefix; keys without one go under "keys".
+                            // Each group folds with its disclosure arrow; a filter shows every match.
+                            Section(isExpanded: expanded(schema)) {
+                                ForEach(relations) { relation in
+                                    Label(relation.name, systemImage: relation.symbol)
+                                        .tag(Row.relation(relation.id))
+                                        .contextMenu { relationMenu(relation) }
+                                }
+                            } header: {
+                                Text(schema.isEmpty ? String(localized: "keys") : schema)
+                            }
                         }
-                    } header: {
-                        Text(schema.isEmpty ? String(localized: "keys") : schema)
+                        if model.usesCommands, model.relations.count >= 5_000 {
+                            Text("Showing the first 5,000 keys. Use the filter, or SCAN in the command panel.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
-                }
-                if model.usesCommands, model.relations.count >= 5_000 {
-                    Text("Showing the first 5,000 keys. Use the filter, or SCAN in the command panel.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                } else {
+                    Spacer(minLength: 0)
                 }
             }
         }
         .searchable(text: $filter, placement: .sidebar, prompt: model.usesCommands ? Text("Filter Keys") : model.usesQueries ? Text("Filter Collections") : Text("Filter Tables"))
-        .contextMenu { Button("New Folder", systemImage: "folder.badge.plus") { newFolder() } }
-        .onChange(of: folderFieldFocused) { _, focused in
-            if !focused, editingFolder != nil { commitFolderName() }
-        }
         .onAppear(perform: loadFolded)
         // File > New Folder.
         .onChange(of: model.newFolderRequests) { newFolder() }
@@ -226,6 +170,61 @@ struct Sidebar: View {
         }
     }
 
+    /// "Connections" with its buttons, above the outline.
+    private var connectionsHeader: some View {
+        HStack(spacing: Space.sm) {
+            Text("Connections")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            Button("New Folder", systemImage: "folder.badge.plus") { newFolder() }
+                .help("New Folder (Option-Command-N)")
+            Button("New Connection…", systemImage: "plus") { model.showingNewConnection = true }
+                .help("New Connection (Command-N)")
+        }
+        .labelStyle(.iconOnly)
+        .buttonStyle(.borderless)
+        .padding(.horizontal, Space.md)
+        .padding(.vertical, Space.xs)
+    }
+
+    /// What one row of the connections outline shows, with its context menu.
+    private func rowContent(_ node: SidebarNode) -> AnyView {
+        switch node.kind {
+        case .connection:
+            guard let connection = connections.first(where: { $0.uuid == node.id }) else { return AnyView(EmptyView()) }
+            return AnyView(OutlineConnectionRow(connection: connection)
+                .contextMenu { menu(for: connection) }
+                .environment(model)
+                .themed())
+        case .folder:
+            guard let folder = model.folders.first(where: { $0.id == node.id }) else { return AnyView(EmptyView()) }
+            return AnyView(OutlineFolderRow(
+                name: folder.name,
+                editing: editingFolder == folder.id,
+                commit: { name in
+                    model.renameFolder(folder.id, to: name)
+                    editingFolder = nil
+                },
+                cancel: { editingFolder = nil }
+            )
+            .contextMenu { folderMenu(folder) }
+            .environment(model)
+            .themed())
+        }
+    }
+
+    /// Puts the folder's name in an editable field, right in the list.
+    private func startNaming(_ folder: ConnectionFolder) {
+        model.setFolderExpanded(folder.id, true)
+        editingFolder = folder.id
+    }
+
+    private func newFolder(in parent: UUID? = nil) {
+        let folder = model.addFolder(named: String(localized: "New Folder"), in: parent)
+        startNaming(folder)
+    }
+
     @ViewBuilder
     private func relationMenu(_ relation: Relation) -> some View {
         if relation.kind == .key {
@@ -237,257 +236,6 @@ struct Sidebar: View {
             Button(model.usesQueries ? LocalizedStringKey("Query in Panel") : LocalizedStringKey("Query in SQL"), systemImage: "terminal") { model.queryTable(relation) }
             Button("Copy Name", systemImage: "doc.on.doc") { copy(model.session?.qualified(relation) ?? relation.qualified) }
         }
-    }
-
-    /// The folders inside `parent` (nil is the top level). Type-erased, since it nests itself.
-    private func folderTree(in parent: UUID?) -> AnyView {
-        AnyView(ForEach(model.subfolders(of: parent)) { folder in
-            folderGroup(folder)
-        })
-    }
-
-    /// A folder and, when open, its connections and then its subfolders.
-    private func folderGroup(_ folder: ConnectionFolder) -> some View {
-        DisclosureGroup(isExpanded: Binding(get: { folder.expanded },
-                                            set: { open in withAnimation(Motion.disclose) { model.setFolderExpanded(folder.id, open) } })) {
-            ForEach(AppModel.ordered(connections, in: folder.id.uuidString)) { connection in
-                connectionRow(connection)
-            }
-            // Where a connection dropped on the folder lands: last among its connections.
-            if dropTarget == .folder(folder.id) { dropSlot.allowsHitTesting(false) }
-            folderTree(in: folder.id)
-        } label: {
-            folderLabel(folder)
-        }
-    }
-
-    private func folderLabel(_ folder: ConnectionFolder) -> some View {
-        let lit = dropTarget == .folder(folder.id)
-        let before = dropTarget == .beforeFolder(folder.id)
-        // The system's Label, like every other row: same icon tint, spacing and height.
-        return Label {
-            HStack(spacing: Space.sm) {
-                if editingFolder == folder.id {
-                    // The name, typed in place: Return or a click elsewhere keeps it, Escape leaves it.
-                    TextField("Folder Name", text: $folderName)
-                        .textFieldStyle(.plain)
-                        .focused($folderFieldFocused)
-                        .onSubmit(commitFolderName)
-                        .onExitCommand { editingFolder = nil }
-                        .onAppear { folderFieldFocused = true }
-                } else {
-                    Text(verbatim: folder.name).lineLimit(1)
-                }
-                Spacer(minLength: 0)
-                if lit {
-                    Text("drop to move").font(.caption)
-                }
-            }
-            // Unset unless lit, so it dims with the other rows in an inactive window.
-            .foregroundColor(lit ? Palette.onAccent : nil)
-        } icon: {
-            Image(systemName: lit ? "folder.fill" : "folder")
-                .foregroundStyle(lit ? AnyShapeStyle(Palette.onAccent) : AnyShapeStyle(.tint))
-        }
-        .padding(.horizontal, lit ? Space.sm : 0)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Palette.accent.opacity(lit ? 1 : 0), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop highlight
-        .contentShape(Rectangle())
-        // Dragged onto another folder's top edge, a folder goes in front of it
-        // (the same level); onto the rest of it, it becomes a subfolder there.
-        .padding(.top, before ? Space.xxl + Space.xs : 0)
-        .overlay(alignment: .top) {
-            if before {
-                dropSlot.allowsHitTesting(false).transition(.opacity)
-            }
-        }
-        // The same drag as a connection's (no tap gesture on the row: it took
-        // the mouse before the List could start a drag). The card appears as
-        // the drag starts, which is when a folder's top edge means "in front".
-        .onHover { if $0 { hoveredPayload = Self.folderPrefix + folder.id.uuidString } }
-        .draggable(dragPayload(Self.folderPrefix + folder.id.uuidString)) { dragCard(Self.folderPrefix + folder.id.uuidString) }
-        .onDrop(of: [.utf8PlainText, .plainText], delegate: FolderDropDelegate(
-            folder: folder.id,
-            reorders: draggingFolder != nil && draggingFolder != folder.id,
-            current: { dropTarget },
-            hover: hover,
-            leave: leave
-        ) { item, inFront in
-            if inFront {
-                drop([item], beforeFolder: folder)
-            } else {
-                drop([item], before: nil, into: folder.id.uuidString)
-            }
-        })
-        .contextMenu { folderMenu(folder) }
-        // Spring-loaded, like Finder: a closed folder opens after a moment under a drag.
-        .task(id: lit) {
-            guard lit, !folder.expanded else { return }
-            try? await Task.sleep(for: Motion.springLoad)
-            if !Task.isCancelled, dropTarget == .folder(folder.id) {
-                withAnimation(Motion.disclose) { model.setFolderExpanded(folder.id, true) }
-            }
-        }
-    }
-
-    /// What a dragged folder carries, so drops tell it from a connection.
-    private static let folderPrefix = "folder:"
-
-    /// The row under the pointer (its drag payload). The List hands a drag the
-    /// payload some other row registered once rows have moved, so a drag
-    /// always carries the row the pointer is on, which hover tracks exactly.
-    @State private var hoveredPayload: String?
-
-    private func dragPayload(_ own: String) -> String {
-        hoveredPayload ?? own
-    }
-
-    /// The card that follows the pointer: the row being dragged, as `dragPayload` says.
-    @ViewBuilder
-    private func dragCard(_ own: String) -> some View {
-        let payload = dragPayload(own)
-        if payload.hasPrefix(Self.folderPrefix) {
-            let id = UUID(uuidString: String(payload.dropFirst(Self.folderPrefix.count)))
-            FolderDragCard(name: model.folders.first { $0.id == id }?.name ?? "")
-                .onAppear { draggingFolder = id }
-        } else if let connection = connections.first(where: { $0.uuid.uuidString == payload }) {
-            ConnectionDragCard(connection: connection)
-                .onAppear { draggingFolder = nil }
-        }
-    }
-
-    /// A dragged folder lands in front of `target`, in its parent. Anything else goes into `target`.
-    @discardableResult
-    private func drop(_ items: [String], beforeFolder target: ConnectionFolder) -> Bool {
-        guard let item = items.first, item.hasPrefix(Self.folderPrefix),
-              let id = UUID(uuidString: String(item.dropFirst(Self.folderPrefix.count))) else {
-            return drop(items, before: nil, into: target.id.uuidString)
-        }
-        leaveTask?.cancel()
-        draggingFolder = nil
-        var moved = false
-        withAnimation(Motion.land) {
-            dropTarget = nil
-            moved = model.moveFolder(id, into: target.parentID, before: target.id)
-        }
-        return moved
-    }
-
-    /// Drops on a folder: where the pointer is says in front of it or into it.
-    private struct FolderDropDelegate: DropDelegate {
-        let folder: UUID
-        let reorders: Bool
-        let current: () -> DropTarget?
-        let hover: (DropTarget) -> Void
-        let leave: (DropTarget) -> Void
-        let perform: (String, Bool) -> Bool
-
-        /// The top edge (and the slot it opens above the folder) means "in front of".
-        private func zone(_ info: DropInfo) -> DropTarget {
-            // A thin band: the open slot above the folder, or its top 8 pt.
-            let edge = current() == .beforeFolder(folder) ? Space.xxl + Space.xs + Space.sm : Space.sm
-            return reorders && info.location.y < edge ? .beforeFolder(folder) : .folder(folder)
-        }
-
-        func dropEntered(info: DropInfo) { hover(zone(info)) }
-
-        func dropUpdated(info: DropInfo) -> DropProposal? {
-            let next = zone(info)
-            if next != current() { hover(next) }
-            return DropProposal(operation: .move)
-        }
-
-        func dropExited(info: DropInfo) {
-            if let lit = current(), lit == .folder(folder) || lit == .beforeFolder(folder) { leave(lit) }
-        }
-
-        func performDrop(info: DropInfo) -> Bool {
-            let inFront = zone(info) == .beforeFolder(folder)
-            guard let provider = info.itemProviders(for: [.utf8PlainText, .plainText]).first else { return false }
-            _ = provider.loadObject(ofClass: NSString.self) { object, _ in
-                guard let item = object as? String else { return }
-                DispatchQueue.main.async { _ = perform(item, inFront) }
-            }
-            return true
-        }
-
-    }
-
-    /// The outlined space where a dragged connection will land.
-    private var dropSlot: some View {
-        RoundedRectangle(cornerRadius: 6, style: .continuous)  // grid: ok drop slot
-            .strokeBorder(Palette.accent, style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))  // grid: ok dashed outline
-            .background(Palette.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop slot
-            .frame(height: Space.xxl)
-            .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
-    }
-
-    /// While a connection is dragged over this row, the row steps down and leaves
-    /// an outlined slot above it: where the connection will land.
-    private func connectionRow(_ connection: SavedConnection) -> some View {
-        let open = dropTarget == .row(connection.uuid)
-        return ConnectionRow(connection: connection)
-            .padding(.top, open ? Space.xxl + Space.xs : 0)
-            .overlay(alignment: .top) {
-                if open {
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)  // grid: ok drop slot
-                        .strokeBorder(Palette.accent, style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))  // grid: ok dashed outline
-                        .background(Palette.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 6, style: .continuous))  // grid: ok drop slot
-                        .frame(height: Space.xxl)
-                        .allowsHitTesting(false)
-                        .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .top)))
-                }
-            }
-            .tag(Row.connection(connection.uuid))
-            .onHover { if $0 { hoveredPayload = connection.uuid.uuidString } }
-            .draggable(dragPayload(connection.uuid.uuidString)) { dragCard(connection.uuid.uuidString) }
-            .dropDestination(for: String.self, action: { items, _ in drop(items, before: connection, into: connection.folderID) },
-                             isTargeted: targeting(.row(connection.uuid)))
-            .contextMenu { menu(for: connection) }
-    }
-
-    /// A dragged connection id lands before `target`, or last in the folder.
-    /// A dragged folder goes into that folder (never into itself or its own subfolders).
-    @discardableResult
-    private func drop(_ items: [String], before target: SavedConnection?, into folderID: String) -> Bool {
-        leaveTask?.cancel()
-        draggingFolder = nil
-        if let item = items.first, item.hasPrefix(Self.folderPrefix) {
-            guard let id = UUID(uuidString: String(item.dropFirst(Self.folderPrefix.count))) else { return false }
-            var moved = false
-            withAnimation(Motion.land) {
-                dropTarget = nil
-                moved = model.moveFolder(id, into: UUID(uuidString: folderID))
-            }
-            return moved
-        }
-        guard let id = items.first.flatMap(UUID.init(uuidString:)),
-              let dragged = connections.first(where: { $0.uuid == id }) else {
-            withAnimation(Motion.hover) { dropTarget = nil }
-            return false
-        }
-        withAnimation(Motion.land) {
-            dropTarget = nil
-            model.move(dragged, before: target, into: folderID, all: connections)
-        }
-        return true
-    }
-
-    /// Puts the folder's name in an editable field, selected, right in the list.
-    private func startNaming(_ folder: ConnectionFolder) {
-        folderName = folder.name
-        model.setFolderExpanded(folder.id, true)
-        editingFolder = folder.id
-    }
-
-    private func commitFolderName() {
-        if let id = editingFolder { model.renameFolder(id, to: folderName) }
-        editingFolder = nil
-    }
-
-    private func newFolder(in parent: UUID? = nil) {
-        let folder = model.addFolder(named: String(localized: "New Folder"), in: parent)
-        startNaming(folder)
     }
 
     @ViewBuilder
@@ -550,78 +298,96 @@ struct Sidebar: View {
     }
 }
 
-/// What follows the pointer while a folder is dragged: a small card with its name.
-private struct FolderDragCard: View {
-    let name: String
-
-    var body: some View {
-        Label {
-            Text(verbatim: name).lineLimit(1)
-        } icon: {
-            Image(systemName: "folder")
-        }
-        .font(.callout)
-        .padding(.horizontal, Space.sm)
-        .padding(.vertical, Space.xs)
-        .frame(maxWidth: 160, alignment: .leading)
-        .fixedSize()
-        .background(.regularMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(Palette.accent.opacity(0.6)))
-        .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
-        .opacity(0.85)
-    }
-}
-
-/// What follows the pointer while a connection is dragged: a small card of the row.
-private struct ConnectionDragCard: View {
-    let connection: SavedConnection
-
-    var body: some View {
-        let engine = Engine(rawValue: connection.engine) ?? .postgres
-        Label {
-            Text(verbatim: connection.name).lineLimit(1)
-        } icon: {
-            EngineIcon(engine)
-        }
-        .font(.callout)
-        .padding(.horizontal, Space.sm)
-        .padding(.vertical, Space.xs)
-        .frame(maxWidth: 160, alignment: .leading)
-        .fixedSize()
-        .background(.regularMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(Palette.accent.opacity(0.6)))
-        .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
-        // Small and see-through, so the folder or slot under the pointer stays visible.
-        .opacity(0.85)
-    }
-}
-
-struct ConnectionRow: View {
+/// A saved connection's row in the outline: its icon (a lock when it goes
+/// through SSH), its name, and a green dot while it is open.
+private struct OutlineConnectionRow: View {
     @Environment(AppModel.self) private var model
     let connection: SavedConnection
 
     private var isActive: Bool { connection.uuid == model.activeID && model.session != nil }
 
     var body: some View {
-        Label {
-            Text(connection.name)
+        HStack(spacing: Space.sm) {
+            icon.frame(width: Space.lg)
+            Text(verbatim: connection.name)
                 .fontWeight(isActive ? .semibold : .regular)
                 .lineLimit(1)
-        } icon: {
-            if model.connectingID == connection.uuid {
-                ProgressView().controlSize(.small)
-            } else {
-                // The kind of database, in its color; a lock when it goes through SSH.
-                let engine = Engine(rawValue: connection.engine) ?? .postgres
-                if connection.sshHost.isEmpty {
-                    EngineIcon(engine)
-                } else {
-                    Image(systemName: "lock.shield").foregroundStyle(engine.color)
-                }
+            Spacer(minLength: 0)
+            if isActive {
+                Image(systemName: "circle.fill").foregroundStyle(.green).font(.system(size: 7))  // grid: ok status dot
             }
         }
-        .badge(isActive ? Text(Image(systemName: "circle.fill")).foregroundStyle(.green).font(.system(size: 7)) : nil)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
         .help(connection.ssh.map { String(localized: "Via SSH \($0.label)") } ?? "")
+    }
+
+    @ViewBuilder
+    private var icon: some View {
+        if model.connectingID == connection.uuid {
+            ProgressView().controlSize(.small)
+        } else {
+            // The kind of database, in its color; a lock when it goes through SSH.
+            let engine = Engine(rawValue: connection.engine) ?? .postgres
+            if connection.sshHost.isEmpty {
+                EngineIcon(engine)
+            } else {
+                Image(systemName: "lock.shield").foregroundStyle(engine.color)
+            }
+        }
+    }
+}
+
+/// A folder's row: its name, or a field for typing it.
+private struct OutlineFolderRow: View {
+    let name: String
+    let editing: Bool
+    let commit: (String) -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: Space.sm) {
+            Image(systemName: "folder").foregroundStyle(.tint).frame(width: Space.lg)
+            if editing {
+                FolderNameField(initial: name, commit: commit, cancel: cancel)
+            } else {
+                Text(verbatim: name).lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+}
+
+/// The name of a folder being typed: Return or a click elsewhere keeps it, Escape leaves it.
+private struct FolderNameField: View {
+    @State private var text: String
+    @State private var done = false
+    @FocusState private var focused: Bool
+    let commit: (String) -> Void
+    let cancel: () -> Void
+
+    init(initial: String, commit: @escaping (String) -> Void, cancel: @escaping () -> Void) {
+        _text = State(initialValue: initial)
+        self.commit = commit
+        self.cancel = cancel
+    }
+
+    private func finish(_ save: Bool) {
+        guard !done else { return }
+        done = true
+        if save { commit(text) } else { cancel() }
+    }
+
+    var body: some View {
+        TextField("Folder Name", text: $text)
+            .textFieldStyle(.plain)
+            .focused($focused)
+            .onSubmit { finish(true) }
+            .onExitCommand { finish(false) }
+            .onChange(of: focused) { _, now in if !now { finish(true) } }
+            .onAppear { focused = true }
     }
 }
 
