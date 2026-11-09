@@ -114,8 +114,6 @@ struct Sidebar: View {
 
     var body: some View {
         GeometryReader { geometry in
-            // A little empty room under the rows, so a row can be dropped after the last one (or out of a folder, to the end).
-            let wanted = outlineHeight + ConnectionsOutline.inset * 2 + Space.xxl
             let room = model.session == nil ? geometry.size.height : geometry.size.height * Self.connectionsShare
             VStack(spacing: 0) {
                 connectionsHeader
@@ -128,8 +126,8 @@ struct Sidebar: View {
                                    askDelete: { connection in
                                        if confirmDelete { deleting = connection } else { model.delete(connection) }
                                    },
-                                   contentHeight: $outlineHeight)
-                    .frame(height: max(min(wanted, room), ConnectionsOutline.rowHeight))
+                                   maxHeight: room, contentHeight: $outlineHeight)
+                    .frame(height: ConnectionsOutline.frameHeight(rows: outlineHeight, maxHeight: room))
                 if model.session != nil {
                     List(selection: selection) {
                         ForEach(schemas, id: \.0) { schema, relations in

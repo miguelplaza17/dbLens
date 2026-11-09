@@ -40,6 +40,8 @@ struct ConnectionsOutline: NSViewRepresentable {
     /// A folder's name was typed (nil: Escape).
     let rename: (UUID, String?) -> Void
     let askDelete: (SavedConnection) -> Void
+    /// The most height the sidebar gives the outline; past it the rows scroll.
+    let maxHeight: CGFloat
     /// The height all the rows need, reported back so the sidebar can size the outline.
     @Binding var contentHeight: CGFloat
 
@@ -47,6 +49,12 @@ struct ConnectionsOutline: NSViewRepresentable {
     static let rowHeight: CGFloat = 28
     /// Room above and below the rows.
     static let inset: CGFloat = Space.xs
+
+    /// The frame for rows of this height: a little room under them, to drop after
+    /// the last one (or out of a folder, to the end).
+    static func frameHeight(rows: CGFloat, maxHeight: CGFloat) -> CGFloat {
+        max(min(rows + inset * 2 + Space.xxl, maxHeight), rowHeight)
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -76,6 +84,9 @@ struct ConnectionsOutline: NSViewRepresentable {
         outline.delegate = context.coordinator
         outline.menu = context.coordinator.emptyMenu()
         outline.menuFor = { [weak coordinator = context.coordinator] row in coordinator?.menu(forRow: row) }
+        outline.frameNeeded = { [weak coordinator = context.coordinator] item in
+            (item as? SidebarNode).flatMap { coordinator?.frameNeeded(opening: $0) } ?? 0
+        }
 
         let scroll = NSScrollView()
         scroll.documentView = outline
@@ -188,25 +199,9 @@ struct ConnectionsOutline: NSViewRepresentable {
             reportHeight()
         }
 
-        /// While a folder opens or closes, the outline's frame must not change: the
-        /// rows are animating, and resizing the scroll view under them breaks the
-        /// animation (the rows below jump, and float over the ones opening).
-        private var animatingUntil = Date.distantPast
-        private var settleTask: DispatchWorkItem?
-        private static let animationTime: TimeInterval = 0.45
-
         /// What the rows need, for the sidebar to size the outline by.
         private func reportHeight() {
             guard let outline else { return }
-            let remaining = animatingUntil.timeIntervalSinceNow
-            if remaining > 0 {
-                // After the rows have settled.
-                settleTask?.cancel()
-                let work = DispatchWorkItem { [weak self] in self?.reportHeight() }
-                settleTask = work
-                DispatchQueue.main.asyncAfter(deadline: .now() + remaining + 0.02, execute: work)
-                return
-            }
             let rows = outline.numberOfRows
             let height = rows > 0 ? outline.rect(ofRow: rows - 1).maxY : 0
             setHeight(height)
@@ -226,25 +221,24 @@ struct ConnectionsOutline: NSViewRepresentable {
             }
         }
 
-        func outlineViewItemWillExpand(_ notification: Notification) {
-            guard !syncing, let outline, let item = notification.userInfo?["NSObject"] as? SidebarNode else { return }
-            animatingUntil = Date().addingTimeInterval(Self.animationTime)
-            // Room first, then the rows open into it.
+        /// The frame a folder needs to open into, asked for before it opens: the
+        /// outline only makes the rows its frame shows.
+        func frameNeeded(opening item: SidebarNode) -> CGFloat {
+            guard let outline else { return 0 }
             let rows = outline.numberOfRows
-            let pitch = outline.rowHeight + outline.intercellSpacing.height
+            let pitch = rows > 1 ? outline.rect(ofRow: 1).minY - outline.rect(ofRow: 0).minY : outline.rowHeight + outline.intercellSpacing.height
             let current = rows > 0 ? outline.rect(ofRow: rows - 1).maxY : 0
-            setHeight(current + CGFloat(visibleRows(inside: item)) * pitch)
-        }
-
-        func outlineViewItemWillCollapse(_ notification: Notification) {
-            guard !syncing else { return }
-            // The frame shrinks after the rows have closed.
-            animatingUntil = Date().addingTimeInterval(Self.animationTime)
+            let target = current + CGFloat(visibleRows(inside: item)) * pitch
+            setHeight(target)
+            return ConnectionsOutline.frameHeight(rows: target, maxHeight: parent.maxHeight)
         }
 
         /// Open and close folders as the model says (a new subfolder, a drop that opened one).
         private func syncExpansion() {
             guard let outline else { return }
+            let sidebar = outline as? SidebarOutlineView
+            sidebar?.animatesDisclosure = false
+            defer { sidebar?.animatesDisclosure = !dragging }
             NSAnimationContext.beginGrouping()
             NSAnimationContext.current.duration = 0
             func visit(_ list: [SidebarNode]) {
@@ -377,6 +371,19 @@ struct ConnectionsOutline: NSViewRepresentable {
         }
 
         // MARK: Delegate: dragging
+
+        /// During a drag the outline's own gap is animating: folders open plainly.
+        private var dragging = false
+
+        func outlineView(_ outlineView: NSOutlineView, draggingSession session: NSDraggingSession, willBeginAt screenPoint: NSPoint, forItems draggedItems: [Any]) {
+            dragging = true
+            (outlineView as? SidebarOutlineView)?.animatesDisclosure = false
+        }
+
+        func outlineView(_ outlineView: NSOutlineView, draggingSession session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+            dragging = false
+            (outlineView as? SidebarOutlineView)?.animatesDisclosure = true
+        }
 
         func outlineView(_ outlineView: NSOutlineView, pasteboardWriterForItem item: Any) -> NSPasteboardWriting? {
             guard let item = item as? SidebarNode else { return nil }
@@ -592,14 +599,126 @@ final class SidebarCell: NSTableCellView {
     }
 }
 
-/// The outline, with a context menu per row (built by `ConnectionsOutline.Coordinator`).
+/// The outline, with a context menu per row (built by `ConnectionsOutline.Coordinator`)
+/// and its own folder animation. The system's places the new rows at once, fully
+/// drawn, and slides the rows below over them, which shows on a sidebar's
+/// transparent rows. Here the folder opens and closes without animation, and
+/// everything under it moves as one block, the new rows coming out from behind the folder.
 final class SidebarOutlineView: NSOutlineView {
     var menuFor: ((Int) -> NSMenu?)?
+    /// How tall the frame must be for a folder to open (the sidebar is told to grow it).
+    var frameNeeded: ((Any) -> CGFloat)?
+    /// Off for changes that don't come from the user, and during a drag.
+    var animatesDisclosure = true
+    private var sliding = false
+
+    private static let slideDuration: CFTimeInterval = 0.25
+    private static let slideKey = "disclosure"
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let row = row(at: convert(event.locationInWindow, from: nil))
         if row >= 0, let menu = menuFor?(row) { return menu }
         return super.menu(for: event)
+    }
+
+    private var slides: Bool {
+        animatesDisclosure && window != nil && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    private func withoutAnimation(_ body: () -> Void) {
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.current.duration = 0
+        NSAnimationContext.current.allowsImplicitAnimation = false
+        body()
+        NSAnimationContext.endGrouping()
+    }
+
+    override func expandItem(_ item: Any?, expandChildren: Bool) {
+        guard slides, let item, !isItemExpanded(item) else { return super.expandItem(item, expandChildren: expandChildren) }
+        guard !sliding else { return }
+        sliding = true
+        // The frame first: rows past the old frame wouldn't exist yet.
+        afterFrame(reaches: frameNeeded?(item) ?? 0, tries: 15) { [self] in
+            plainExpand(item, expandChildren)
+            layoutSubtreeIfNeeded()
+            slideContents(of: row(forItem: item), opening: true) { [self] in sliding = false }
+        }
+    }
+
+    override func collapseItem(_ item: Any?, collapseChildren: Bool) {
+        guard slides, let item, isItemExpanded(item) else { return super.collapseItem(item, collapseChildren: collapseChildren) }
+        guard !sliding else { return }
+        sliding = true
+        // The rows leave first; only then is the folder really closed.
+        slideContents(of: row(forItem: item), opening: false) { [self] in
+            plainCollapse(item, collapseChildren)
+            sliding = false
+        }
+    }
+
+    private func plainExpand(_ item: Any, _ children: Bool) {
+        withoutAnimation { super.expandItem(item, expandChildren: children) }
+    }
+
+    private func plainCollapse(_ item: Any, _ children: Bool) {
+        withoutAnimation { super.collapseItem(item, collapseChildren: children) }
+    }
+
+    private func afterFrame(reaches height: CGFloat, tries: Int, then body: @escaping () -> Void) {
+        if tries == 0 || (enclosingScrollView?.frame.height ?? height) >= height { return body() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.004) { [self] in afterFrame(reaches: height, tries: tries - 1, then: body) }
+    }
+
+    /// Moves a folder's rows and all the rows below it as one block, between
+    /// "folded behind the folder" and their places. Each of the folder's rows is
+    /// masked at the folder's bottom edge, so it shows only as it comes out.
+    private func slideContents(of parentRow: Int, opening: Bool, done: @escaping () -> Void) {
+        guard parentRow >= 0 else { return done() }
+        var last = parentRow
+        while last + 1 < numberOfRows, level(forRow: last + 1) > level(forRow: parentRow) { last += 1 }
+        guard last > parentRow else { return done() }
+        let edge = rect(ofRow: parentRow).maxY
+        let travel = rect(ofRow: last).maxY - edge
+        let reach = visibleRect.maxY + travel
+
+        func animation(_ from: CGFloat, _ to: CGFloat) -> CABasicAnimation {
+            let move = CABasicAnimation(keyPath: "transform.translation.y")
+            move.fromValue = from
+            move.toValue = to
+            move.duration = Self.slideDuration
+            move.timingFunction = CAMediaTimingFunction(controlPoints: 0.25, 0.1, 0.25, 1)
+            move.fillMode = .both
+            move.isRemovedOnCompletion = false
+            return move
+        }
+
+        var moved: [CALayer] = []
+        for row in (parentRow + 1)..<numberOfRows where rect(ofRow: row).minY < reach {
+            guard let layer = rowView(atRow: row, makeIfNecessary: true)?.layer else { continue }
+            layer.add(animation(opening ? -travel : 0, opening ? 0 : -travel), forKey: Self.slideKey)
+            moved.append(layer)
+            guard row <= last else { continue }
+            let frame = rect(ofRow: row)
+            let hidden = edge - frame.minY  // the folder's edge, in the row's own coordinates
+            let flipped = layer.contentsAreFlipped()
+            let mask = CALayer()
+            mask.backgroundColor = NSColor.black.cgColor
+            mask.frame = CGRect(x: -frame.width, y: flipped ? hidden : 0, width: frame.width * 3, height: frame.height - hidden)
+            // The row moves up by `travel`, so its mask moves down by as much: the edge stays put.
+            let shift = flipped ? travel : -travel
+            mask.add(animation(opening ? shift : 0, opening ? 0 : shift), forKey: Self.slideKey)
+            layer.mask = mask
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.slideDuration) {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            done()
+            for layer in moved {
+                layer.mask = nil
+                layer.removeAnimation(forKey: Self.slideKey)
+            }
+            CATransaction.commit()
+        }
     }
 }
 
