@@ -52,7 +52,7 @@ struct DBLensApp: App {
             }
             CommandGroup(after: .textEditing) {
                 Divider()
-                Button("Find in Rows…") { model.openFind() }
+                Button("Find in Rows…") { model.toggleFind() }
                     .keyboardShortcut("f")
                     .disabled(model.shown != .table || model.relation == nil)
             }

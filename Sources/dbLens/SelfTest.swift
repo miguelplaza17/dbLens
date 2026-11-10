@@ -207,7 +207,8 @@ enum SelfTest {
                 check("deleting a row removes it", model.tableResult?.rows.map { $0[1] } == ["editado", "novo"])
                 let copied = ResultGrid.tsv(model.tableResult!, header: true)
                 check("Copy All copies every row with the header", copied == "id\tnome\tn\n1\teditado\t\n3\tnovo\t5", copied)
-                model.openFind()
+                model.toggleFind()
+                check("Command-F opens the find bar", model.showFind)
                 model.searchTable("EDIT")
                 try? await Task.sleep(for: .milliseconds(600))
                 check("the search keeps only the matching rows", model.tableResult?.rows.count == 1)
@@ -215,8 +216,9 @@ enum SelfTest {
                 check("Replace All asks first, with the rows it will change", model.replacePlan?.edits.count == 1, model.replaceNote ?? "")
                 if let plan = model.replacePlan { await model.apply(plan) }
                 model.replacePlan = nil
-                model.closeFind()
-                try? await Task.sleep(for: .milliseconds(600))
+                model.toggleFind()
+                check("Command-F again closes the find bar", !model.showFind)
+                try? await Task.sleep(for: .milliseconds(3000))
                 check("Replace All rewrites the text, and closing shows every row", model.tableResult?.rows.map { $0[1] } == ["trocado-ado", "novo"],
                       "\(model.tableResult?.rows.map { $0[1] } ?? [])")
             }

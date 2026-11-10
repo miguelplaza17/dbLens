@@ -699,6 +699,11 @@ final class AppModel {
         findFocusRequests += 1
     }
 
+    /// Command-F again closes the bar it opened.
+    func toggleFind() {
+        if showFind { closeFind() } else { openFind() }
+    }
+
     /// The bar goes, and the rows it was filtering come back.
     func closeFind() {
         showFind = false

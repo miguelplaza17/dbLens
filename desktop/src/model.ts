@@ -577,6 +577,12 @@ export class AppModel {
     this.changed();
   }
 
+  /** Ctrl/Cmd+F again closes the bar it opened. */
+  toggleFind() {
+    if (this.showFind && this.shown === "table") this.closeFind();
+    else this.openFind();
+  }
+
   /** The bar goes, and the rows it was filtering come back. */
   closeFind() {
     this.showFind = false;

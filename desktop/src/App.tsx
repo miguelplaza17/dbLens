@@ -327,7 +327,7 @@ function perform(model: AppModel, action: Action, fields: { filter: HTMLInputEle
       if (!model.showSidebar) model.toggleSidebar();
       return requestAnimationFrame(() => fields.filter?.focus());
     case "searchRows":
-      model.openFind();
+      model.toggleFind();
       return requestAnimationFrame(() => {
         fields.search.current?.focus();
         fields.search.current?.select();
