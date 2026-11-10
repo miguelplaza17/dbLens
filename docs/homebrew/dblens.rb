@@ -2,8 +2,8 @@
 # After each release: set version and sha256 (tools/release.sh prints it).
 #   brew install --cask miguelplaza17/tap/dblens
 cask "dblens" do
-  version "1.3.0"
-  sha256 "7e44d9b64d23a0ac3aa709153356c674ffc1a690dbee2f1b493ddfb89815064e"
+  version "1.4.0"
+  sha256 "b55d5b4a131e95b7e5fbbaddfb91f1a3dcc7d1d8a7d6aed5c65eeadd8ca115d2"
 
   url "https://github.com/miguelplaza17/dbLens/releases/download/v#{version}/dbLens-#{version}.dmg"
   name "dbLens"
