@@ -1,8 +1,10 @@
 # Migration: discontinuing the Swift app
 
-> **Superseded (2026-11-02):** the Swift app stays the dbLens for the Mac, and this
-> Tauri app is released for Windows and Linux only. The lists below still show what
-> the Tauri app lacks compared with the Swift app.
+> **2026-11-12: decided.** The Tauri app is dbLens on the Mac too, from the release after 1.4.
+> On macOS it takes the Swift app's bundle id (`src-tauri/tauri.macos.conf.json`), so it
+> installs over it (Sparkle offers it to Swift installs through the last appcast, Homebrew
+> through the cask), and its first launch imports the Swift app's data by itself.
+> Releasing: `desktop/README.md`, "Updates".
 
 Checklist for replacing the macOS Swift app (`Sources/`, `build.sh`, `tools/release.sh`)
 with the Tauri app in `desktop/`, which becomes the only dbLens on Windows, Linux and macOS.
@@ -275,14 +277,17 @@ sheet, agent runs in the SQL history tagged "via agent", Redis and mongosh highl
 and the help popover. Controls now match the Swift screens: History, Terminal and Log are icon buttons in the
 SQL panel bar, Export has its label and menu, table and view icons are gray, grouped form fields have no frame.
 
+Also closed on 2026-11-12: the updater is live (real public key; private key off git), the
+release workflow (`.github/workflows/release.yml`) signs Windows and Linux updates and writes
+`latest.json`, `tools/release.sh` builds, notarizes and staples the universal Mac app and adds
+it to `latest.json`, the import runs by itself on first launch and also brings the SQL history,
+the agent settings and the app settings, and menus have submenus (Color ▸, Move to ▸).
+
 Still open:
 
-1. Updater: wired but not live (placeholder key, no `latest.json` in the release workflow). Release signing
-   for Windows and Linux; macOS signing and notarization have never run.
-2. Importing the Swift app's SQL history, "Let Agents Write" flags and settings.
-3. Schema board: the Color menu is flat (the shared menu has no submenus).
-4. By design: the grid scrolls instead of pages; edits stay pending until you leave the row (Swift asks per cell);
-   Swift's Database menu is split into Edit, View and Query.
+1. Code signing for Windows (Authenticode) and Linux packages.
+2. By design: the grid scrolls instead of pages; edits stay pending until you leave the row
+   (Swift asks per cell); Swift's Database menu is split into Edit, View and Query.
 
 Documentation note: `desktop/README.md` now describes the menu bar (`menu.rs`: File, Edit, View, Query, Help; on
 macOS also the app menu and Window). It was checked under Xvfb on Linux only.

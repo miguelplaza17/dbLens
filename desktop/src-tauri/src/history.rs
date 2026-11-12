@@ -96,6 +96,34 @@ impl HistoryState {
         self.change(|table| push(table.entry(connection.to_string()).or_default(), entry))
     }
 
+    /// Adds entries brought from another app (newest first) to a connection's
+    /// list: one with the same text and date as a saved entry is skipped, so
+    /// running it twice adds nothing; the list stays newest first and within
+    /// [`LIMIT`]. Returns how many were new.
+    pub fn merge(&self, connection: &str, entries: Vec<Entry>) -> DbResult<usize> {
+        if entries.is_empty() {
+            return Ok(0);
+        }
+        let mut added = 0;
+        self.change(|table| {
+            let list = table.entry(connection.to_string()).or_default();
+            let mut seen: std::collections::HashSet<(String, String)> = list
+                .iter()
+                .map(|e| (e.sql.clone(), e.date.clone()))
+                .collect();
+            for entry in entries {
+                if seen.insert((entry.sql.clone(), entry.date.clone())) {
+                    list.push(entry);
+                    added += 1;
+                }
+            }
+            // RFC 3339 UTC strings of one shape sort as dates; the sort is stable.
+            list.sort_by(|a, b| b.date.cmp(&a.date));
+            list.truncate(LIMIT);
+        })?;
+        Ok(added)
+    }
+
     /// One connection's history, or every connection's without an id.
     pub fn clear(&self, connection: Option<&str>) -> DbResult<()> {
         self.change(|table| match connection {

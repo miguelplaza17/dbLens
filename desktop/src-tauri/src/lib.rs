@@ -161,6 +161,7 @@ pub fn run() {
             commands::delete_folder,
             commands::set_folder_expanded,
             import_swift::import_swift_connections,
+            import_swift::auto_import_swift,
             settings::get_settings,
             settings::set_settings,
             settings::settings_info,

@@ -990,7 +990,7 @@ select option {
   text-align: left;
   font-size: var(--font-size-small);
 }
-.menu-item:hover:not(:disabled) {
+.menu-item.active:not(:disabled) {
   background: var(--accent);
   color: var(--on-accent);
 }
@@ -1000,7 +1000,7 @@ select option {
 .menu-item.destructive {
   color: var(--danger);
 }
-.menu-item.destructive:hover {
+.menu-item.destructive.active {
   background: var(--danger);
   color: var(--on-accent);
 }
@@ -1013,6 +1013,14 @@ select option {
 }
 .menu-detail {
   color: var(--text-tertiary);
+}
+.menu-chevron {
+  display: inline-flex;
+  color: var(--text-tertiary);
+}
+.menu-item.active .menu-detail,
+.menu-item.active .menu-chevron {
+  color: inherit;
 }
 .menu-separator {
   height: 1px;

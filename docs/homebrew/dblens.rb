@@ -1,5 +1,6 @@
 # Homebrew cask for a tap repository (github.com/miguelplaza17/homebrew-tap, Casks/dblens.rb).
-# After each release: set version and sha256 (tools/release.sh prints it).
+# After each release: set version and sha256 (tools/release.sh prints it). The app is
+# the Tauri build (universal), which updates itself.
 #   brew install --cask miguelplaza17/tap/dblens
 cask "dblens" do
   version "1.4.0"
@@ -10,13 +11,17 @@ cask "dblens" do
   desc "Fast, minimal database client for Postgres, MySQL, SQLite, Redis and MongoDB"
   homepage "https://github.com/miguelplaza17/dbLens"
 
-  depends_on macos: ">= :tahoe"
-  depends_on arch: :arm64
+  depends_on macos: ">= :ventura"
+
+  auto_updates true
 
   app "dbLens.app"
 
   zap trash: [
+    "~/Library/Application Support/app.dblens.dbLens",
     "~/Library/Application Support/dbLens",
+    "~/Library/Caches/io.github.miguelplaza17.dblens",
+    "~/Library/WebKit/io.github.miguelplaza17.dblens",
     "~/Library/Preferences/io.github.miguelplaza17.dblens.plist",
   ]
 end

@@ -16,7 +16,7 @@
 Most database tools are slow, heavy, and full of things you never use. dbLens stands on
 three things:
 
-- **Light.** A native app of about 12 MB that opens in a blink and stays fast on big tables.
+- **Light.** A small app that opens in a blink and stays fast on tables of millions of rows.
 - **Simple.** It does the few things you do every day, with no trees, wizards, or menus
   to dig through.
 - **AI-ready.** Built-in MCP server: Claude Code, Claude Desktop, Cursor, and other agents
@@ -34,8 +34,8 @@ URL, and dbLens tells which database it is.
   `jdbc:postgresql://`, SQLAlchemy (`postgresql+psycopg2://`), a whole `.env` line
   (`DATABASE_URL="…"`), Prisma's `?schema=`, several hosts, Unix sockets, or libpq's
   `host=… dbname=…` form. Or fill in host, port, user, and password.
-- **Click a table, see its rows.** No tree to expand, no "View Data" menu. Pages of
-  50 to 1,000 rows, sorted by the primary key or by any column you click, with column
+- **Click a table, see its rows.** No tree to expand, no "View Data" menu. Scroll through
+  the whole table (rows are read in blocks as you go), sorted by the primary key or by any column you click, with column
   types in the header. Search finds text in any column across every page, on the server.
   Export the whole table, or a query result, as CSV or JSON.
 - **Edit in place.** Double-click a cell, type, press Return. Edits use the primary key
@@ -63,8 +63,8 @@ URL, and dbLens tells which database it is.
 - **SSH tunnels built in.** Uses your Mac's own `ssh`, keys, agent, and `~/.ssh/config`,
   and reconnects by itself when the tunnel drops.
 - **Passwords stay private.** Saved connection URLs are encrypted with AES-GCM under a key
-  bound to your Mac's Secure Enclave, and saved passwords never show on screen.
-- **Native and light.** SwiftUI and AppKit, about 12 MB, opens in a blink. Dark only.
+  kept in your system's keychain, and saved passwords never show on screen.
+- **Light and dark.** Follows the system, or pick one, with twelve accent colors.
 
 - **For agents, too.** `dbLens --mcp` is an MCP server: Claude Code, Claude Desktop, or
   Cursor read your databases through the connections saved here, without ever seeing a
@@ -78,55 +78,33 @@ URL, and dbLens tells which database it is.
 
 ## Install
 
-Download the latest `dbLens-x.y.z.dmg` from [Releases](../../releases), open it, and drag
-**dbLens** to Applications. It is signed and notarized by Apple.
-
-Requirements: macOS 26 or later on Apple silicon.
-
-## Windows and Linux
-
-dbLens for Windows and Linux is its own app, built with [Tauri 2](https://tauri.app)
-(Rust + React) in [`desktop/`](desktop/): the same idea, the same five databases, the
-grid, the SQL panel with Rehearse and All or Nothing, the schema board, SSH tunnels and
-the MCP server (`dblens --mcp`). Download it from the
-[Releases](../../releases) tagged `desktop-v…`:
+From [Releases](../../releases):
 
 | System | File |
 | --- | --- |
+| macOS 13 or later (Apple silicon and Intel) | `dbLens-x.y.z.dmg`: open it and drag **dbLens** to Applications. Signed and notarized by Apple. |
 | Windows 10 and 11 | `dbLens_x.y.z_x64-setup.exe` or `dbLens_x.y.z_x64_en-US.msi` |
 | Linux (x86_64) | `.deb` (Debian, Ubuntu), `.rpm` (Fedora), or `.AppImage` (any) |
 
-Build it with Rust and Node.js: `cd desktop && npm install && npm run tauri build`.
-Requirements, tests and status are in [desktop/README.md](desktop/README.md); what it
-still lacks compared with the Mac app is in [desktop/docs/MIGRATION.md](desktop/docs/MIGRATION.md).
+Or on the Mac: `brew install --cask miguelplaza17/tap/dblens`. dbLens updates itself.
+
+**Coming from the old Mac app (1.4 and earlier)?** It updates itself to this one. On the
+first launch dbLens brings your connections, folders, SQL history and settings over by
+itself. Keep `~/Library/Application Support/dbLens/` until you see them; after that it can go.
 
 ## Build from source
 
+dbLens is built with [Tauri 2](https://tauri.app) (Rust + React) in [`desktop/`](desktop/):
+
 ```bash
-brew install postgresql@16 mariadb-connector-c mongo-c-driver   # client libraries, bundled into the app
 git clone https://github.com/miguelplaza17/dbLens.git
-cd dbLens
-./build.sh --open                # builds, installs ~/Applications/dbLens Dev.app, opens it
+cd dbLens/desktop
+npm install && npm run tauri build
 ```
 
-The project is a Swift package (no Xcode project). `build.sh` builds with SwiftPM, copies
-libpq and its libraries into the app (`tools/bundle_libs.sh`), adds the translations, and
-signs it with your certificate or ad hoc.
-
-Tests:
-
-```bash
-swift test --scratch-path ~/Library/Developer/dbLens/test-build
-# The in-app self-test needs a throwaway database (it creates and drops a table):
-DBLENS_TEST_URL=postgres://user@localhost/scratch tools/selftest.sh
-# Optional, for throwaway servers: DBLENS_TEST_MYSQL_URL=mysql://… DBLENS_TEST_MARIADB_URL=mysql://…
-#   DBLENS_TEST_REDIS_URL=redis://… DBLENS_TEST_VALKEY_URL=redis://… DBLENS_TEST_MONGO_URL=mongodb://…
-```
-
-Releases: `tools/release.sh` signs with a Developer ID certificate, notarizes, staples,
-makes the DMG, and writes the Sparkle appcast; upload both to the GitHub release. The app
-checks that appcast once a day (and from **dbLens > Check for Updates…**) and installs an
-update only when its signature matches the key in `Info.plist.in`. The steps it needs once are at the top of the script.
+Requirements, tests, releasing and status are in [desktop/README.md](desktop/README.md).
+The SwiftUI app that was dbLens for the Mac until 1.4 is still in the repository root
+(`./build.sh`, `tools/release-swift.sh`), no longer released.
 
 ## MCP server (for agents)
 
@@ -169,16 +147,12 @@ Copy it to `~/.claude/skills/` to use it in every project.
 
 | What | Where |
 | --- | --- |
-| Connection names and SSH settings | `~/Library/Application Support/dbLens/dbLens.store` |
-| Connection URLs, encrypted | `~/Library/Application Support/dbLens/connections.enc` |
-| The Secure Enclave key reference | `~/Library/Application Support/dbLens/connections.key` |
-
-Both files are readable only by your user. The key only works on the Mac that made it: if
-you move to a new Mac or reinstall macOS, paste your connection URLs again.
+| Saved connections (URLs encrypted) and SQL history | macOS: `~/Library/Application Support/app.dblens.dbLens/`; Windows: `%APPDATA%\dblens\dbLens\data\`; Linux: `~/.local/share/dblens/` |
+| The key for the URLs | the system keychain (Keychain on macOS, Credential Manager on Windows, Secret Service on Linux), or a file readable only by you where there is none |
 
 ## Languages
 
-English and Brazilian Portuguese. Translations live in `Localization/<language>.json`;
+English and Brazilian Portuguese. Translations live in `desktop/src/i18n/<language>.json`;
 adding one is a single file.
 
 ## Contributing

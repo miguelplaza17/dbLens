@@ -1,11 +1,14 @@
-# dbLens for Windows and Linux
+# dbLens (Mac, Windows and Linux)
 
 A fast, minimal database client: paste a connection
 string, click a table, see and edit the rows, run SQL. PostgreSQL, MySQL/MariaDB,
-SQLite, Redis/Valkey and MongoDB. Built with Tauri 2 (Rust + React). On the Mac,
-dbLens is the native SwiftUI app in the repository root; this app also builds
-on macOS (for development and checks) but is released for Windows and Linux.
-[docs/MIGRATION.md](docs/MIGRATION.md) compares the two.
+SQLite, Redis/Valkey and MongoDB. Built with Tauri 2 (Rust + React). This is the
+dbLens released on every platform. The SwiftUI app in the repository root was the
+Mac app until 1.4; on the Mac this app keeps its bundle id
+(`io.github.miguelplaza17.dblens`, `src-tauri/tauri.macos.conf.json`), so it
+installs over it, and on first launch it brings the Swift app's connections,
+folders, SQL history and settings by itself (`import_swift.rs`).
+[docs/MIGRATION.md](docs/MIGRATION.md) has the comparison.
 
 Every engine works against real servers; the app is built and run on Linux. See
 "Status" below, and [CONTRACT.md](CONTRACT.md) for the architecture.
@@ -55,28 +58,22 @@ in the corner offers "Install and Restart". The code is in
 `@tauri-apps/plugin-updater` in `package.json`; the two must match exactly).
 
 The feed is `https://github.com/miguelplaza17/dbLens/releases/latest/download/latest.json`,
-set in `plugins.updater` in `src-tauri/tauri.conf.json`, with the public key
-there too. The committed key is a placeholder: until it is replaced, updates are
-off, and a check says "Updates are not configured in this build". Nothing is
-fetched or installed.
+set in `plugins.updater` in `src-tauri/tauri.conf.json` with the public key.
+The private key is kept off git, in
+`~/Library/Developer/dbLens/tauri-updater-key/dblens.key` (no password) on the
+release Mac, and in the CI secret `TAURI_SIGNING_PRIVATE_KEY`. Back it up:
+without it, installed apps can't take updates.
 
-To turn updates on (once, on a trusted machine; never commit the private key):
+Releasing, with the same version in `VERSION`, `tauri.conf.json`, `Cargo.toml`,
+`Cargo.lock` and `package.json`:
 
-1. `cd desktop && npx tauri signer generate -w ~/.tauri/dblens.key` (asks for a
-   password). It prints the public key.
-2. Put that public key (the whole line, base64) in `plugins.updater.pubkey` in
-   `src-tauri/tauri.conf.json`.
-3. In CI secrets, set `TAURI_SIGNING_PRIVATE_KEY` (the file's contents, or its
-   path on the runner) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
-4. Build with signed updater artifacts: add
-   `--config '{"bundle":{"createUpdaterArtifacts":true}}'` to `npm run tauri build`
-   (it is left off in the committed config, so builds without a key still work).
-   This writes a `.sig` next to each package (AppImage, NSIS/MSI, the macOS
-   `.app.tar.gz`).
-5. Publish a `latest.json` as a release asset named `latest.json`: the version,
-   notes, and for each platform (`linux-x86_64`, `windows-x86_64`,
-   `darwin-aarch64`, `darwin-x86_64`) the package URL and the contents of its
-   `.sig`. `tauri-apps/tauri-action` writes it when it builds the release.
+1. Push the tag `vX.Y.Z`. `.github/workflows/release.yml` builds Windows and
+   Linux with signed updates and uploads them and `latest.json` to that release.
+2. On the Mac, `PUBLISH=1 tools/release.sh`: a universal app signed with the
+   Developer ID, notarized and stapled, the DMG, the signed `dbLens.app.tar.gz`,
+   `latest.json` with the Mac entries added to CI's, and `appcast.xml`, the
+   Sparkle feed that moves people still on the Swift app to this one.
+3. Update the Homebrew cask (`docs/homebrew/dblens.rb`) with the printed sha256.
 
 Updates cover AppImage, Windows installers and the macOS app. A `.deb` or `.rpm`
 user updates by installing the new package.

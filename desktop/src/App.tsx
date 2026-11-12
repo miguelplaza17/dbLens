@@ -28,6 +28,7 @@ import { performSchema, schema } from "./schema/store";
 import { nav, performNav } from "./nav";
 import { performHistory } from "./history/actions";
 import { AgentAccessEditor } from "./agentAccess";
+import { autoImportFromMac } from "./native/importSwift";
 
 export default function App() {
   const model = useModel();
@@ -35,6 +36,7 @@ export default function App() {
   const searchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => void model.loadStore(), [model]);
+  useEffect(() => void autoImportFromMac(model), [model]);
 
   useLayoutEffect(() => {
     document.documentElement.dataset.theme = model.theme;

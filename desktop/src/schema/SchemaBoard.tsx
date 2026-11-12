@@ -380,11 +380,16 @@ function BoardCanvas({ model, board, view, showSchema, theme }: { model: AppMode
     if (table) void state.open(model, table);
   };
 
-  const colorItems = (ids: Set<string>): MenuItem[] => [
-    { title: "", separator: true },
-    { title: t("Color"), disabled: true },
-    ...BOARD_COLORS.map((c, index) => ({ title: t(c.name), action: () => board.setColor(ids, index) })),
-  ];
+  const colorItems = (ids: Set<string>, id: string): MenuItem[] => {
+    const current = isNoteKey(id) ? board.note(id)?.color : board.colors.get(id) ?? 0;
+    return [
+      { title: "", separator: true },
+      {
+        title: t("Color"),
+        items: BOARD_COLORS.map((c, index) => ({ title: t(c.name), checked: index === current, action: () => board.setColor(ids, index) })),
+      },
+    ];
+  };
 
   const onContextMenu = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const id = hit(e);
@@ -399,7 +404,7 @@ function BoardCanvas({ model, board, view, showSchema, theme }: { model: AppMode
     if (isNoteKey(id)) {
       return model.showMenu(e, [
         { title: t("Edit Note"), action: () => setEditing(id) },
-        ...colorItems(ids),
+        ...colorItems(ids, id),
         { title: "", separator: true },
         {
           title: t("Delete Note"),
@@ -420,7 +425,7 @@ function BoardCanvas({ model, board, view, showSchema, theme }: { model: AppMode
         title: board.collapsed.has(id) ? t("Show All Columns") : t("Key Columns Only"),
         action: () => state.toggleCollapsed(id),
       },
-      ...colorItems(ids),
+      ...colorItems(ids, id),
     ]);
   };
 

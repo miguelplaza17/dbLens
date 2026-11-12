@@ -755,6 +755,7 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   },
 
   list_connections: () => snapshot(),
+  auto_import_swift: () => null,
   import_swift_connections: () => {
     throw "Importing connections from dbLens for Mac works only on macOS.";
   },

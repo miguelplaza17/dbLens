@@ -12,6 +12,7 @@ import { beginConnectionDrag, beginFolderDrag } from "../native/dragConnections"
 import { copyUrl, copyUrlWithPassword, openAgentTools, openInTerminal } from "../history/connectionActions";
 import { accessSummary } from "../agentAccess";
 import { Icon, type IconName } from "./Icon";
+import type { MenuItem } from "./Sheet";
 
 const relationIcon: Record<Relation["kind"], IconName> = {
   table: "table",
@@ -60,6 +61,10 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
 
   const filterPrompt = model.usesCommands ? t("Filter Keys") : model.usesQueries ? t("Filter Collections") : t("Filter Tables");
 
+  /** The "Move to" submenu and its separator, or nothing when there is nowhere to go. */
+  const moveMenu = (items: MenuItem[]): MenuItem[] =>
+    items.length ? [{ separator: true, title: "" }, { title: t("Move to"), icon: "folder", items }, { separator: true, title: "" }] : [{ separator: true, title: "" }];
+
   const connectionMenu = (event: React.MouseEvent, c: SavedConnection) => {
     const active = model.activeSavedId === c.id;
     model.showMenu(event, [
@@ -77,11 +82,12 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
       { title: t("Agent Tools…"), detail: accessSummary(c), action: () => openAgentTools(model, c) },
       ...(active ? [{ title: t("Disconnect"), icon: "disconnect" as IconName, action: () => void model.disconnect() }] : []),
       { separator: true, title: "" },
-      ...folders
-        .filter((f) => f.id !== c.folderId)
-        .map((f) => ({ title: t("Move to %@", model.folderPath(f.id)), icon: "folder" as IconName, action: () => void model.moveConnection(c, f.id) })),
-      ...(c.folderId ? [{ title: t("No Folder"), action: () => void model.moveConnection(c, "") }] : []),
-      { separator: true, title: "" },
+      ...moveMenu([
+        ...folders
+          .filter((f) => f.id !== c.folderId)
+          .map((f) => ({ title: model.folderPath(f.id), icon: "folder" as IconName, action: () => void model.moveConnection(c, f.id) })),
+        ...(c.folderId ? [{ title: t("No Folder"), action: () => void model.moveConnection(c, "") }] : []),
+      ]),
       {
         title: t("Delete…"),
         icon: "trash",
@@ -109,11 +115,12 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
       { title: t("New Folder"), icon: "folderPlus", action: () => void newFolder() },
       { separator: true, title: "" },
       // Anywhere but inside itself.
-      ...folders
-        .filter((f) => f.id !== folder.parentId && !model.folderIsIn(f.id, id))
-        .map((f) => ({ title: t("Move to %@", model.folderPath(f.id)), icon: "folder" as IconName, action: () => void model.moveFolder(id, f.id) })),
-      ...(folder.parentId ? [{ title: t("Move to %@", t("Top Level")), action: () => void model.moveFolder(id, "") }] : []),
-      { separator: true, title: "" },
+      ...moveMenu([
+        ...folders
+          .filter((f) => f.id !== folder.parentId && !model.folderIsIn(f.id, id))
+          .map((f) => ({ title: model.folderPath(f.id), icon: "folder" as IconName, action: () => void model.moveFolder(id, f.id) })),
+        ...(folder.parentId ? [{ title: t("Top Level"), action: () => void model.moveFolder(id, "") }] : []),
+      ]),
       { title: t("Delete Folder"), icon: "trash", destructive: true, action: () => void model.deleteFolder(id) },
     ]);
   };

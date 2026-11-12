@@ -13,6 +13,12 @@ export interface ImportReport {
   imported: number;
   /** Already saved here: same URL and name. */
   skipped: number;
+  /** Folders made here. */
+  folders: number;
+  /** SQL history entries added. */
+  history: number;
+  /** App settings taken over (those still at their defaults here). */
+  settings: number;
   errors: string[];
 }
 
@@ -650,6 +656,8 @@ export const api = {
   clearSqlHistory: (connectionId?: string) => invoke<void>("clear_sql_history", { connectionId: connectionId ?? null }),
   /** macOS only: copies dbLens for Mac's saved connections into this app (src-tauri/src/import_swift.rs). */
   importSwiftConnections: () => invoke<ImportReport>("import_swift_connections"),
+  /** macOS only: the same import, once, at the first start; null when it doesn't apply (already done, nothing to import). */
+  autoImportSwift: () => invoke<ImportReport | null>("auto_import_swift"),
 
   // Updates (src-tauri/src/updater.rs). Fails with "not configured" in a build without a public key.
   checkForUpdates: () => invoke<UpdateCheck>("check_for_updates"),

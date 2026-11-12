@@ -13,7 +13,10 @@
 //!   "software" holds the AES key itself (opened here); kind "secure-enclave"
 //!   needs this Mac's Secure Enclave, through `swift/SecureEnclaveOpen.swift`.
 //! - Older versions: a plain `connections.json` instead of the sealed file.
-//! - Folders are in its preferences (`connectionFolders`, JSON in a plist).
+//! - Preferences (a plist; `DBLENS_SWIFT_DEFAULTS` names a file instead): folders
+//!   (`connectionFolders`), SQL history (`sqlHistory.<uuid>`, JSON as data) and the
+//!   settings with a counterpart here (accent, SQL panel, confirm delete, menu
+//!   bar, agents managing connections).
 //!
 //! Nothing there is written. This app's own store is a different folder
 //! (`Store::default_dir`), checked before importing.
@@ -22,7 +25,7 @@
 // command uses them on macOS.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use aes_gcm::aead::{Aead, KeyInit};
@@ -31,6 +34,7 @@ use base64::Engine as _;
 use rusqlite::types::ValueRef;
 use serde::{Deserialize, Serialize};
 
+use crate::history::Entry as HistoryEntry;
 use crate::session::{DbError, DbResult};
 use crate::ssh::SshConfig;
 use crate::store::{ConnectionDraft, Store};
@@ -45,7 +49,7 @@ const PLAIN_FILE: &str = "connections.json";
 const CORE_DATA_EPOCH: f64 = 978_307_200.0;
 
 /// A saved connection as the Swift app keeps it (without its URL).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SwiftConnection {
     /// Upper case, as Swift's `uuidString`: the key in connections.enc.
     pub uuid: String,
@@ -57,6 +61,12 @@ pub struct SwiftConnection {
     pub sort_index: i64,
     /// A `SwiftFolder::id`, or "" at the top level.
     pub folder_id: String,
+    /// "Let Agents Write", "hidden from agents", the MCP tools turned off and
+    /// the notes for agents (Models.swift `agents*`).
+    pub agents_can_write: bool,
+    pub agents_hidden: bool,
+    pub agents_blocked_tools: Vec<String>,
+    pub agents_notes: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -74,9 +84,27 @@ fn yes() -> bool {
     true
 }
 
+/// The Swift app's preferences that have a counterpart here; None when unset.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SwiftSettings {
+    /// `appearance.accent` (a theme id).
+    pub accent: Option<String>,
+    /// `keepInMenuBar`.
+    pub keep_in_menu_bar: Option<bool>,
+    /// `sqlPanel.shown`.
+    pub show_sql_panel: Option<bool>,
+    /// `confirmDelete`.
+    pub confirm_delete: Option<bool>,
+    /// `agentsManageConnections`.
+    pub agents_manage_connections: Option<bool>,
+}
+
 /// Everything read from the Swift app.
 #[derive(Debug, Default)]
 pub struct SwiftApp {
+    /// Upper-case connection uuid → its SQL history, newest first.
+    pub history: BTreeMap<String, Vec<HistoryEntry>>,
+    pub settings: SwiftSettings,
     pub connections: Vec<SwiftConnection>,
     /// Upper-case uuid → URL.
     pub urls: BTreeMap<String, String>,
@@ -90,6 +118,12 @@ pub struct ImportReport {
     pub imported: usize,
     /// Already here: same URL and name.
     pub skipped: usize,
+    /// Folders made here.
+    pub folders: usize,
+    /// SQL history entries added.
+    pub history: usize,
+    /// App settings taken over (those still at their defaults here).
+    pub settings: usize,
     pub errors: Vec<String>,
 }
 
@@ -157,6 +191,15 @@ pub fn read_connections_from(db: &rusqlite::Connection) -> DbResult<Vec<SwiftCon
             ssh,
             sort_index: int("ZSORTINDEX"),
             folder_id: text("ZFOLDERID").to_uppercase(),
+            agents_can_write: int("ZAGENTSCANWRITE") != 0,
+            agents_hidden: int("ZAGENTSHIDDEN") != 0,
+            agents_blocked_tools: text("ZAGENTSBLOCKEDTOOLS")
+                .split(',')
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(String::from)
+                .collect(),
+            agents_notes: text("ZAGENTSNOTES"),
         });
     }
     Ok(out)
@@ -184,6 +227,10 @@ fn value_date(value: ValueRef<'_>) -> Option<String> {
         ValueRef::Integer(i) => i as f64,
         _ => return None,
     };
+    core_data_seconds(seconds)
+}
+
+fn core_data_seconds(seconds: f64) -> Option<String> {
     chrono::DateTime::from_timestamp((seconds + CORE_DATA_EPOCH).floor() as i64, 0)
         .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
@@ -395,10 +442,145 @@ pub fn parse_folders(plist_bytes: &[u8]) -> Vec<SwiftFolder> {
         .collect()
 }
 
+fn preferences_dictionary(plist_bytes: &[u8]) -> Option<plist::Dictionary> {
+    plist::Value::from_reader(std::io::Cursor::new(plist_bytes))
+        .ok()?
+        .into_dictionary()
+}
+
+/// Swift's `HistoryEntry` (Models.swift), JSON in user defaults: `date` is
+/// Codable's default, seconds since 2001 (an RFC 3339 string reads too).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SwiftHistoryEntry {
+    sql: String,
+    #[serde(default)]
+    date: Option<serde_json::Value>,
+    #[serde(default)]
+    failed: bool,
+    #[serde(default)]
+    via_agent: Option<bool>,
+}
+
+/// The SQL history from the preferences: keys `sqlHistory.<uuid>`, each a JSON
+/// array as data. Entries with no text are dropped.
+pub fn parse_history(plist_bytes: &[u8]) -> BTreeMap<String, Vec<HistoryEntry>> {
+    let mut out = BTreeMap::new();
+    let Some(dict) = preferences_dictionary(plist_bytes) else {
+        return out;
+    };
+    for (key, value) in dict.iter() {
+        let Some(id) = key.strip_prefix("sqlHistory.") else {
+            continue;
+        };
+        let Some(data) = value.as_data() else {
+            continue;
+        };
+        let Ok(entries) = serde_json::from_slice::<Vec<SwiftHistoryEntry>>(data) else {
+            continue;
+        };
+        let list: Vec<HistoryEntry> = entries
+            .into_iter()
+            .filter(|e| !e.sql.trim().is_empty())
+            .map(|e| HistoryEntry {
+                date: match &e.date {
+                    Some(serde_json::Value::Number(n)) => n.as_f64().and_then(core_data_seconds),
+                    Some(serde_json::Value::String(s)) => {
+                        chrono::DateTime::parse_from_rfc3339(s).ok().map(|d| {
+                            d.with_timezone(&chrono::Utc)
+                                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                        })
+                    }
+                    _ => None,
+                }
+                .unwrap_or_else(|| core_data_seconds(0.0).unwrap_or_default()),
+                sql: e.sql,
+                failed: e.failed,
+                via_agent: e.via_agent.unwrap_or(false),
+            })
+            .collect();
+        if !list.is_empty() {
+            out.insert(id.to_uppercase(), list);
+        }
+    }
+    out
+}
+
+/// The app settings from the preferences.
+pub fn parse_settings(plist_bytes: &[u8]) -> SwiftSettings {
+    let Some(dict) = preferences_dictionary(plist_bytes) else {
+        return SwiftSettings::default();
+    };
+    let flag = |key: &str| dict.get(key).and_then(plist::Value::as_boolean);
+    SwiftSettings {
+        accent: dict
+            .get("appearance.accent")
+            .and_then(plist::Value::as_string)
+            .map(String::from),
+        keep_in_menu_bar: flag("keepInMenuBar"),
+        show_sql_panel: flag("sqlPanel.shown"),
+        confirm_delete: flag("confirmDelete"),
+        agents_manage_connections: flag("agentsManageConnections"),
+    }
+}
+
+/// The settings to change in `current` (a JSON patch for `Settings::patched`):
+/// only those still at the defaults here, so a choice made in this app is
+/// never overwritten. Accents Swift has under another name don't exist
+/// (both apps share the ids); an unknown one is ignored.
+pub fn settings_patch(
+    swift: &SwiftSettings,
+    current: &crate::settings::Settings,
+) -> serde_json::Map<String, serde_json::Value> {
+    use crate::settings::{Settings, ACCENTS};
+    let defaults = Settings::default();
+    let mut patch = serde_json::Map::new();
+    if let Some(accent) = swift.accent.as_deref() {
+        if ACCENTS.contains(&accent)
+            && current.accent == defaults.accent
+            && accent != defaults.accent
+        {
+            patch.insert("accent".into(), accent.into());
+        }
+    }
+    let flags = [
+        (
+            "keepInTray",
+            swift.keep_in_menu_bar,
+            current.keep_in_tray,
+            defaults.keep_in_tray,
+        ),
+        (
+            "showSqlPanel",
+            swift.show_sql_panel,
+            current.show_sql_panel,
+            defaults.show_sql_panel,
+        ),
+        (
+            "confirmDelete",
+            swift.confirm_delete,
+            current.confirm_delete,
+            defaults.confirm_delete,
+        ),
+    ];
+    for (key, theirs, ours, default) in flags {
+        if let Some(value) = theirs {
+            if ours == default && value != default {
+                patch.insert(key.into(), value.into());
+            }
+        }
+    }
+    patch
+}
+
 /// The preferences as cfprefsd has them now (`defaults export`, which sees
 /// changes not yet written to disk), else the file in ~/Library/Preferences.
 #[cfg(target_os = "macos")]
 fn read_preferences() -> Option<Vec<u8>> {
+    // Tests: a plist file stands in for the real preferences.
+    if let Some(file) = std::env::var_os("DBLENS_SWIFT_DEFAULTS").filter(|f| !f.is_empty()) {
+        return std::fs::read(file).ok();
+    }
     let exported = std::process::Command::new("/usr/bin/defaults")
         .args(["export", SWIFT_BUNDLE_ID, "-"])
         .stderr(std::process::Stdio::null())
@@ -430,6 +612,8 @@ pub fn read_swift_app(dir: &Path, preferences: Option<&[u8]>) -> DbResult<SwiftA
         connections: read_connections(&dir.join(STORE_FILE))?,
         urls: read_urls(dir)?,
         folders: preferences.map(parse_folders).unwrap_or_default(),
+        history: preferences.map(parse_history).unwrap_or_default(),
+        settings: preferences.map(parse_settings).unwrap_or_default(),
     })
 }
 
@@ -438,12 +622,29 @@ pub fn read_swift_app(dir: &Path, preferences: Option<&[u8]>) -> DbResult<SwiftA
 /// settings and dates. A connection with the same URL and name is skipped,
 /// so importing twice adds nothing.
 pub fn apply(store: &mut Store, app: SwiftApp) -> ImportReport {
+    apply_collect(store, &app).0
+}
+
+/// Swift connection uuid (upper case) → the id of its connection here, for
+/// those imported now and those that were already here.
+pub type LocalIds = HashMap<String, String>;
+
+/// [`apply`], also saying which connection here each Swift one became (the
+/// history is filed under it), and setting what is Swift-only per connection
+/// (agent access, notes) on the ones made now.
+pub fn apply_collect(store: &mut Store, app: &SwiftApp) -> (ImportReport, LocalIds) {
     let mut report = ImportReport::default();
+    let mut ids = LocalIds::new();
     let snapshot = store.snapshot();
-    let mut present: HashSet<(String, String)> = snapshot
+    let folders_before = snapshot.folders.len();
+    let mut present: HashMap<(String, String), String> = snapshot
         .connections
         .iter()
-        .filter_map(|c| store.url(&c.id).map(|u| (u.to_string(), c.name.clone())))
+        .filter_map(|c| {
+            store
+                .url(&c.id)
+                .map(|u| ((u.to_string(), c.name.clone()), c.id.clone()))
+        })
         .collect();
     let folder_order: HashMap<&str, usize> = app
         .folders
@@ -482,7 +683,8 @@ pub fn apply(store: &mut Store, app: SwiftApp) -> ImportReport {
                 .unwrap_or_default(),
             name => name.to_string(),
         };
-        if present.contains(&(url.clone(), name.clone())) {
+        if let Some(id) = present.get(&(url.clone(), name.clone())) {
+            ids.insert(c.uuid.clone(), id.clone());
             report.skipped += 1;
             continue;
         }
@@ -510,13 +712,42 @@ pub fn apply(store: &mut Store, app: SwiftApp) -> ImportReport {
                 {
                     report.errors.push(format!("{label}: {e}"));
                 }
-                present.insert((url, saved.name));
+                if let Err(e) = apply_agent_settings(store, &saved.id, &c) {
+                    report.errors.push(format!("{label}: {e}"));
+                }
+                ids.insert(c.uuid.clone(), saved.id.clone());
+                present.insert((url, saved.name), saved.id);
                 report.imported += 1;
             }
             Err(e) => report.errors.push(format!("{label}: {e}")),
         }
     }
-    report
+    report.folders = store
+        .snapshot()
+        .folders
+        .len()
+        .saturating_sub(folders_before);
+    if app.settings.agents_manage_connections == Some(true)
+        && !store.snapshot().agents_manage_connections
+        && store.set_agents_manage_connections(true).is_ok()
+    {
+        report.settings += 1;
+    }
+    (report, ids)
+}
+
+/// What Swift knew about agents and this connection; the defaults are left alone.
+fn apply_agent_settings(store: &mut Store, id: &str, c: &SwiftConnection) -> DbResult<()> {
+    if c.agents_can_write {
+        store.set_agents_can_write(id, true)?;
+    }
+    if c.agents_hidden || !c.agents_blocked_tools.is_empty() {
+        store.set_agents_access(id, c.agents_hidden, c.agents_blocked_tools.clone())?;
+    }
+    if !c.agents_notes.trim().is_empty() {
+        store.set_agents_notes(id, &c.agents_notes)?;
+    }
+    Ok(())
 }
 
 /// The folder of that name and place in `store` (its Swift parents made
@@ -578,19 +809,110 @@ fn check_distinct(swift_dir: &Path) -> DbResult<()> {
     Ok(())
 }
 
+/// The whole import: connections and folders, then their SQL history and the
+/// app settings (only those still at their defaults here).
 #[cfg(target_os = "macos")]
-#[tauri::command]
-pub async fn import_swift_connections(
-    state: tauri::State<'_, crate::commands::AppState>,
+async fn import_everything(
+    app: &tauri::AppHandle,
+    state: &crate::commands::AppState,
+    history: &crate::history::HistoryState,
+    settings: &crate::settings::SettingsState,
 ) -> DbResult<ImportReport> {
-    let app = tokio::task::spawn_blocking(|| {
+    use tauri::Emitter;
+    let swift = tokio::task::spawn_blocking(|| {
         let dir = swift_app_dir()?;
         check_distinct(&dir)?;
         read_swift_app(&dir, read_preferences().as_deref())
     })
     .await
     .map_err(|e| DbError::Message(e.to_string()))??;
-    state.with_store(|store| Ok(apply(store, app))).await
+    let (mut report, ids) = state
+        .with_store(|store| Ok(apply_collect(store, &swift)))
+        .await?;
+    // After the store's lock is released: the history takes the same folder lock.
+    for (uuid, entries) in swift.history {
+        let Some(id) = ids.get(&uuid) else { continue };
+        match history.merge(id, entries) {
+            Ok(added) => report.history += added,
+            Err(e) => report.errors.push(format!("SQL history: {e}")),
+        }
+    }
+    let patch = settings_patch(&swift.settings, &settings.get());
+    if !patch.is_empty() {
+        match settings.update(&serde_json::Value::Object(patch.clone())) {
+            Ok(next) => {
+                report.settings += patch.len();
+                crate::tray::apply(app, next.keep_in_tray);
+                let _ = app.emit(crate::settings::SETTINGS_EVENT, &next);
+            }
+            Err(e) => report.errors.push(e),
+        }
+    }
+    Ok(report)
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub async fn import_swift_connections(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::commands::AppState>,
+    history: tauri::State<'_, crate::history::HistoryState>,
+    settings: tauri::State<'_, crate::settings::SettingsState>,
+) -> DbResult<ImportReport> {
+    import_everything(&app, &state, &history, &settings).await
+}
+
+/// Marker in this app's data folder: the automatic import ran (or had nothing
+/// to do) and never runs again. The manual import is always available.
+const MARKER_FILE: &str = "swift-import.json";
+
+/// Whether the automatic import may run here: not with `DBLENS_STORE=memory`
+/// (tests, demos) unless `DBLENS_SWIFT_AUTO=1` asks for it.
+fn auto_import_enabled() -> bool {
+    let memory = std::env::var("DBLENS_STORE").as_deref() == Ok("memory");
+    !memory || std::env::var("DBLENS_SWIFT_AUTO").as_deref() == Ok("1")
+}
+
+/// At the first start after moving over from dbLens for Mac: imports once,
+/// without asking. None when it doesn't apply (already done, no Swift data,
+/// disabled, or another window started it). The marker is written whenever
+/// the import ran or the Swift app left nothing to import; after an error it
+/// stays unset (the next start tries again) and the error is returned once.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+pub async fn auto_import_swift(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::commands::AppState>,
+    history: tauri::State<'_, crate::history::HistoryState>,
+    settings: tauri::State<'_, crate::settings::SettingsState>,
+) -> DbResult<Option<ImportReport>> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if !auto_import_enabled() {
+        return Ok(None);
+    }
+    let marker = Store::default_dir()?.join(MARKER_FILE);
+    if marker.exists() || STARTED.swap(true, Ordering::SeqCst) {
+        return Ok(None);
+    }
+    let write_marker = |report: &ImportReport| {
+        if let Some(dir) = marker.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(
+            &marker,
+            serde_json::json!({ "imported": report.imported, "history": report.history })
+                .to_string(),
+        );
+    };
+    let present = swift_app_dir().is_ok_and(|d| d.join(STORE_FILE).is_file());
+    if !present {
+        write_marker(&ImportReport::default());
+        return Ok(None);
+    }
+    let report = import_everything(&app, &state, &history, &settings).await?;
+    write_marker(&report);
+    Ok(Some(report))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -599,6 +921,12 @@ pub async fn import_swift_connections() -> DbResult<ImportReport> {
     Err(DbError::msg(
         "Importing connections from dbLens for Mac works only on macOS.",
     ))
+}
+
+#[cfg(not(target_os = "macos"))]
+#[tauri::command]
+pub async fn auto_import_swift() -> DbResult<Option<ImportReport>> {
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -614,8 +942,9 @@ mod tests {
         CREATE TABLE Z_METADATA (Z_VERSION INTEGER PRIMARY KEY, Z_UUID VARCHAR(255), Z_PLIST BLOB);
         CREATE TABLE ZSAVEDCONNECTION (
             Z_PK INTEGER PRIMARY KEY, Z_ENT INTEGER, Z_OPT INTEGER,
-            ZAGENTSCANWRITE INTEGER, ZSORTINDEX INTEGER, ZSSHPORT INTEGER,
+            ZAGENTSCANWRITE INTEGER, ZAGENTSHIDDEN INTEGER, ZSORTINDEX INTEGER, ZSSHPORT INTEGER,
             ZCREATEDAT TIMESTAMP, ZLASTUSED TIMESTAMP,
+            ZAGENTSBLOCKEDTOOLS VARCHAR, ZAGENTSNOTES VARCHAR,
             ZENGINE VARCHAR, ZFOLDERID VARCHAR, ZNAME VARCHAR,
             ZSSHHOST VARCHAR, ZSSHKEY VARCHAR, ZSSHUSER VARCHAR, ZUUID BLOB);
     ";
@@ -694,6 +1023,13 @@ mod tests {
             ],
         )
         .unwrap();
+        db.execute(
+            "UPDATE ZSAVEDCONNECTION SET ZAGENTSCANWRITE = 1, ZAGENTSHIDDEN = 0,
+             ZAGENTSBLOCKEDTOOLS = 'execute, install_extension', ZAGENTSNOTES = 'Orders and items.'
+             WHERE Z_PK = 1",
+            [],
+        )
+        .unwrap();
         // Left open, so the rows are still in the -wal beside it.
         std::mem::forget(db);
         path
@@ -736,6 +1072,21 @@ mod tests {
             plist::Value::Data(folders.to_string().into_bytes()),
         );
         dict.insert("grid.pageSize".into(), plist::Value::Integer(200.into()));
+        // Codable dates: seconds since 2001; newest first, one run by an agent.
+        let history = serde_json::json!([
+            { "id": "X1", "sql": "select 2", "date": 725_846_400.4, "failed": true, "viaAgent": true },
+            { "id": "X2", "sql": "select 1", "date": 725_760_000.0, "failed": false },
+            { "id": "X3", "sql": "  ", "date": 725_760_000.0, "failed": false },
+        ]);
+        dict.insert(
+            format!("sqlHistory.{}", SHOP.to_lowercase()),
+            plist::Value::Data(history.to_string().into_bytes()),
+        );
+        dict.insert("appearance.accent".into(), "mint".into());
+        dict.insert("keepInMenuBar".into(), false.into());
+        dict.insert("sqlPanel.shown".into(), false.into());
+        dict.insert("confirmDelete".into(), true.into());
+        dict.insert("agentsManageConnections".into(), true.into());
         let mut out = Vec::new();
         plist::Value::Dictionary(dict)
             .to_writer_binary(&mut out)
@@ -923,9 +1274,11 @@ mod tests {
                 ssh: None,
                 sort_index: 0,
                 folder_id: inner.into(),
+                ..Default::default()
             }],
             urls: [(uuid, "sqlite:///tmp/staging.db".to_string())].into(),
             folders,
+            ..Default::default()
         };
         let mut store = Store::in_memory();
         let report = apply(&mut store, app);
@@ -1019,6 +1372,18 @@ mod tests {
         assert_eq!(shop.created_at, "2024-01-01T00:00:00Z");
         assert_eq!(shop.last_used.as_deref(), Some("2024-01-02T00:00:00Z"));
         assert_eq!(shop.ssh.as_ref().map(|s| s.port), Some(Some(2222)));
+        assert!(shop.agents_can_write);
+        assert!(!shop.agents_hidden);
+        assert_eq!(shop.agents_blocked_tools, ["execute", "install_extension"]);
+        assert_eq!(shop.agents_notes, "Orders and items.");
+        assert_eq!(report.folders, 1);
+        assert!(snapshot.agents_manage_connections);
+        let cache = snapshot
+            .connections
+            .iter()
+            .find(|c| c.name == "cache")
+            .unwrap();
+        assert!(!cache.agents_can_write && cache.agents_notes.is_empty());
         assert_eq!(
             store.url(&shop.id),
             Some("postgres://ana:secret@db.example.com:5432/shop")
@@ -1035,15 +1400,116 @@ mod tests {
     }
 
     #[test]
+    fn history_comes_over_in_order_and_merges_without_duplicates() {
+        let history = parse_history(&preferences());
+        let shop = &history[SHOP];
+        assert_eq!(shop.len(), 2, "an empty statement is dropped");
+        assert_eq!(shop[0].sql, "select 2");
+        assert!(shop[0].failed && shop[0].via_agent);
+        assert_eq!(shop[0].date, "2024-01-02T00:00:00Z");
+        assert_eq!(shop[1].sql, "select 1");
+        assert!(!shop[1].failed && !shop[1].via_agent);
+        assert_eq!(shop[1].date, "2024-01-01T00:00:00Z");
+
+        let state = crate::history::HistoryState::at(None);
+        let own = HistoryEntry {
+            sql: "select 3".into(),
+            failed: false,
+            date: "2024-06-01T00:00:00Z".into(),
+            via_agent: false,
+        };
+        state.add("local-id", own.clone()).unwrap();
+        assert_eq!(state.merge("local-id", shop.clone()).unwrap(), 2);
+        assert_eq!(state.merge("local-id", shop.clone()).unwrap(), 0, "twice");
+        let sqls: Vec<_> = state.list("local-id").into_iter().map(|e| e.sql).collect();
+        assert_eq!(sqls, ["select 3", "select 2", "select 1"], "newest first");
+    }
+
+    #[test]
+    fn history_in_a_file_merges_under_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::history::HistoryState::at(Some(dir.path().join("sql-history.json")));
+        let shop = parse_history(&preferences()).remove(SHOP).unwrap();
+        assert_eq!(state.merge("a", shop.clone()).unwrap(), 2);
+        assert_eq!(state.merge("a", shop).unwrap(), 0);
+        assert_eq!(state.list("a").len(), 2);
+    }
+
+    #[test]
+    fn app_settings_only_replace_defaults() {
+        let swift = parse_settings(&preferences());
+        assert_eq!(swift.accent.as_deref(), Some("mint"));
+        assert_eq!(swift.keep_in_menu_bar, Some(false));
+        assert_eq!(swift.show_sql_panel, Some(false));
+        assert_eq!(swift.confirm_delete, Some(true));
+        assert_eq!(swift.agents_manage_connections, Some(true));
+        let defaults = crate::settings::Settings::default();
+        let patch = settings_patch(&swift, &defaults);
+        assert_eq!(patch["accent"], "mint");
+        assert_eq!(patch["keepInTray"], false);
+        assert_eq!(patch["showSqlPanel"], false);
+        assert!(!patch.contains_key("confirmDelete"), "already the default");
+        // The patch is one the settings accept.
+        assert!(defaults
+            .patched(&serde_json::Value::Object(patch.clone()))
+            .is_ok());
+        // Choices made here win.
+        let chosen = crate::settings::Settings {
+            accent: "red".into(),
+            show_sql_panel: false,
+            ..defaults.clone()
+        };
+        let patch = settings_patch(&swift, &chosen);
+        assert!(!patch.contains_key("accent") && !patch.contains_key("showSqlPanel"));
+        // An accent this app doesn't have is ignored.
+        let unknown = SwiftSettings {
+            accent: Some("chartreuse".into()),
+            ..Default::default()
+        };
+        assert!(settings_patch(&unknown, &defaults).is_empty());
+        assert_eq!(parse_settings(b"nope"), SwiftSettings::default());
+    }
+
+    #[test]
+    fn history_and_agent_flags_survive_a_second_import() {
+        let dir = tempfile::tempdir().unwrap();
+        fixture_store(dir.path());
+        let key = [9u8; 32];
+        write_software_key(dir.path(), &key);
+        std::fs::write(
+            dir.path().join(SEALED_FILE),
+            seal(&key, urls_json().as_bytes()),
+        )
+        .unwrap();
+        let prefs = preferences();
+        let mut store = Store::in_memory();
+        let app = read_swift_app(dir.path(), Some(&prefs)).unwrap();
+        let (first, ids) = apply_collect(&mut store, &app);
+        assert_eq!((first.imported, first.folders, first.settings), (3, 1, 1));
+        let again = read_swift_app(dir.path(), Some(&prefs)).unwrap();
+        let (second, ids_again) = apply_collect(&mut store, &again);
+        assert_eq!((second.imported, second.skipped), (0, 3));
+        assert_eq!(ids, ids_again, "skipped ones map to the same connection");
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains_key(SHOP));
+    }
+
+    #[test]
     fn the_report_is_camel_case_json() {
         let report = ImportReport {
             imported: 1,
             skipped: 2,
+            folders: 3,
+            history: 4,
+            settings: 5,
             errors: vec!["x".into()],
         };
         assert_eq!(
             serde_json::to_value(report).unwrap(),
-            serde_json::json!({ "imported": 1, "skipped": 2, "errors": ["x"] })
+            serde_json::json!({
+                "imported": 1, "skipped": 2, "folders": 3, "history": 4, "settings": 5,
+                "errors": ["x"]
+            })
         );
     }
 
@@ -1051,5 +1517,81 @@ mod tests {
     fn the_swift_folder_is_never_our_own() {
         let dir = tempfile::tempdir().unwrap();
         assert!(check_distinct(dir.path()).is_ok());
+    }
+
+    /// The Secure Enclave path on this Mac, end to end: a throwaway Swift data
+    /// folder whose `connections.key` and `connections.enc` are written by the
+    /// Swift app's own SecretBox (Sources/DBLensKit/SecretBox.swift, compiled
+    /// with tests/fixtures/make_enclave/main.swift), then read back through
+    /// `read_swift_app` and the helper in swift/SecureEnclaveOpen.swift.
+    /// Skipped (with a message) on a Mac without a usable Secure Enclave.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_secure_enclave_folder_made_by_the_swift_code_imports() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let secret_box = root.join("../../Sources/DBLensKit/SecretBox.swift");
+        let main = root.join("tests/fixtures/make_enclave/main.swift");
+        let work = tempfile::tempdir().unwrap();
+        let tool = work.path().join("make-fixture");
+        let swiftc = std::process::Command::new("xcrun")
+            .args(["--sdk", "macosx", "swiftc", "-o"])
+            .arg(&tool)
+            .arg(&secret_box)
+            .arg(&main)
+            .output()
+            .expect("xcrun swiftc");
+        assert!(
+            swiftc.status.success(),
+            "{}",
+            String::from_utf8_lossy(&swiftc.stderr)
+        );
+        let data = work.path().join("swift-data");
+        std::fs::create_dir(&data).unwrap();
+        fixture_store(&data);
+        let plain = work.path().join("urls.json");
+        std::fs::write(&plain, urls_json()).unwrap();
+        let made = std::process::Command::new(&tool)
+            .arg(&data)
+            .arg(&plain)
+            .output()
+            .unwrap();
+        if made.status.code() == Some(3) {
+            eprintln!("skipped: no usable Secure Enclave on this machine");
+            return;
+        }
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        let key_text = std::fs::read_to_string(data.join(KEY_FILE)).unwrap();
+        assert!(key_text.contains("secure-enclave"), "{key_text}");
+
+        // Through the same entry point the command uses, DBLENS_SWIFT_APP_DIR
+        // included (set only here, restored after).
+        std::env::set_var("DBLENS_SWIFT_APP_DIR", &data);
+        let dir = swift_app_dir().unwrap();
+        std::env::remove_var("DBLENS_SWIFT_APP_DIR");
+        assert_eq!(dir, data);
+        let prefs = preferences();
+        let app = read_swift_app(&dir, Some(&prefs)).unwrap();
+        assert_eq!(
+            app.urls.get(SHOP).map(String::as_str),
+            Some("postgres://ana:secret@db.example.com:5432/shop"),
+            "the Secure Enclave key opened the URLs"
+        );
+        let mut store = Store::in_memory();
+        let report = apply(&mut store, app);
+        assert_eq!(report.imported, 3, "{report:?}");
+        let shop = store
+            .snapshot()
+            .connections
+            .into_iter()
+            .find(|c| c.name == "shop")
+            .unwrap();
+        assert_eq!(
+            store.url(&shop.id),
+            Some("postgres://ana:secret@db.example.com:5432/shop")
+        );
     }
 }
