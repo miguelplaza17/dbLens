@@ -16,6 +16,26 @@ export const FOOT = 4;
 export const GAP_X = 112;
 export const GAP_Y = 40;
 export const MARGIN = 40;
+/** A sticky note's size (BoardLayout.noteSize in SchemaBoard.swift). */
+export const NOTE_WIDTH = 200;
+export const NOTE_HEIGHT = 140;
+/** Colors for cards and notes (BoardPalette in SchemaBoard.swift); index 0 is "No Color". */
+export const BOARD_COLORS: Array<{ name: string; hex: string | null }> = [
+  { name: "No Color", hex: null },
+  { name: "Red", hex: "#E5534B" },
+  { name: "Orange", hex: "#F29111" },
+  { name: "Yellow", hex: "#E3B341" },
+  { name: "Green", hex: "#4DB33D" },
+  { name: "Blue", hex: "#5B9BE0" },
+  { name: "Purple", hex: "#A371F7" },
+];
+/** New notes start yellow. */
+export const DEFAULT_NOTE_COLOR = 3;
+
+/** The id notes have in the selection, apart from the tables' "schema.name". */
+export const noteKey = (note: { id: string }) => `note:${note.id}`;
+export const isNoteKey = (id: string) => id.startsWith("note:");
+
 /** Cards snap to this grid while dragged. */
 export const SNAP = 8;
 

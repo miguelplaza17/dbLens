@@ -24,6 +24,8 @@ const paths: Record<string, string> = {
   refresh: "M13 3v3.5H9.5M3 13V9.5h3.5M12.6 6.5A5 5 0 0 0 3.6 5.2M3.4 9.5a5 5 0 0 0 9 1.3",
   panelBottom: "M2.5 2.5h11v11h-11zM2.5 9.5h11",
   sidebar: "M2.5 2.5h11v11h-11zM6 2.5v11",
+  panelRight: "M2.5 2.5h11v11h-11zM9.5 2.5v11",
+  list: "M5.5 4.5h8M5.5 8h8M5.5 11.5h8M2.5 4.5h.5M2.5 8h.5M2.5 11.5h.5",
   copy: "M5.5 5.5h8v8h-8zM10.5 5.5v-3h-8v8h3",
   trash: "M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4M6.8 6.5v5M9.2 6.5v5",
   close: "M4 4l8 8M12 4l-8 8",

@@ -4,8 +4,9 @@
 // hundreds of tables stays smooth. Colors come from theme.css.
 
 import type { SchemaTable } from "../api";
-import { CARD_WIDTH, FOOT, HEADER, ROW, intersects, rows, tableId, type Point, type Rect } from "./layout";
-import type { Board, BoardView } from "./store";
+import { t } from "../i18n";
+import { BOARD_COLORS, CARD_WIDTH, FOOT, HEADER, NOTE_HEIGHT, NOTE_WIDTH, ROW, intersects, noteKey, rows, tableId, type Point, type Rect } from "./layout";
+import type { Board, BoardView, Note } from "./store";
 
 export interface Colors {
   background: string;
@@ -59,7 +60,22 @@ export interface Marks {
   selection: Set<string>;
   /** Cards in drawing order, last on top. */
   order: string[];
+  /** The selection rectangle being dragged, in screen points. */
+  marquee: Rect | null;
+  /** The note being edited (its text is the editor's, not drawn). */
+  editing: string | null;
 }
+
+/** A palette color with an opacity, as CSS. */
+function tint(hex: string, alpha: number): string {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${n >> 16}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
+}
+
+/** The note's fill: gray for "No Color", the palette color at 85% otherwise (Swift's BoardPalette.note). */
+const noteFill = (color: number) => (BOARD_COLORS[color]?.hex ? tint(BOARD_COLORS[color].hex!, 0.85) : "#3A3A40");
+
+export const noteRect = (n: Note): Rect => ({ x: n.x, y: n.y, width: NOTE_WIDTH, height: NOTE_HEIGHT });
 
 /** Below this zoom cards show bars instead of column text. */
 const DETAIL_ZOOM = 0.45;
@@ -116,13 +132,17 @@ export function cardRect(board: Board, view: BoardView, table: SchemaTable): Rec
   return { x: p.x, y: p.y, width: CARD_WIDTH, height: HEADER + n * ROW + FOOT };
 }
 
-/** The card under a board point, topmost first. */
-export function hitCard(board: Board, view: BoardView, marks: Marks, world: Point): SchemaTable | null {
+const within = (r: Rect, p: Point) => p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height;
+
+/** The note or card under a board point (its selection id): notes first, then cards, topmost first. */
+export function hitItem(board: Board, view: BoardView, marks: Marks, world: Point): string | null {
+  for (let i = board.notes.length - 1; i >= 0; i--) {
+    if (within(noteRect(board.notes[i]), world)) return noteKey(board.notes[i]);
+  }
   for (let i = marks.order.length - 1; i >= 0; i--) {
     const table = view.byId.get(marks.order[i]);
-    if (!table) continue;
-    const r = cardRect(board, view, table);
-    if (r && world.x >= r.x && world.x <= r.x + r.width && world.y >= r.y && world.y <= r.y + r.height) return table;
+    const r = table && cardRect(board, view, table);
+    if (r && within(r, world)) return marks.order[i];
   }
   return null;
 }
@@ -158,6 +178,84 @@ export function drawBoard(ctx: CanvasRenderingContext2D, dpr: number, board: Boa
       hovered: marks.hovered === id,
       showSchema,
     });
+  }
+  for (const note of board.notes) {
+    if (intersects(noteRect(note), area)) drawNote(ctx, note, c, { z, detail, selected: marks.selection.has(noteKey(note)), editing: marks.editing === noteKey(note) });
+  }
+
+  if (marks.marquee) {
+    const m = marks.marquee;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = c.accentFaint;
+    ctx.fillRect(m.x, m.y, m.width, m.height);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = c.accent;
+    ctx.strokeRect(m.x + 0.5, m.y + 0.5, m.width, m.height);
+  }
+}
+
+const NOTE_PAD = 12;
+const NOTE_FONT = 14;
+const NOTE_LINE = 18;
+
+/** The text cut into lines no wider than `width`, breaking at spaces (and inside a word that is too long). */
+function wrapLines(ctx: CanvasRenderingContext2D, text: string, width: number): string[] {
+  const lines: string[] = [];
+  for (const paragraph of text.split("\n")) {
+    let line = "";
+    for (const word of paragraph.split(/(?<=\s)/)) {
+      if (ctx.measureText(line + word).width <= width || !line) {
+        line += word;
+      } else {
+        lines.push(line.trimEnd());
+        line = word;
+      }
+      while (ctx.measureText(line).width > width && line.length > 1) {
+        let n = line.length - 1;
+        while (n > 1 && ctx.measureText(line.slice(0, n)).width > width) n--;
+        lines.push(line.slice(0, n));
+        line = line.slice(n);
+      }
+    }
+    lines.push(line.trimEnd());
+  }
+  return lines;
+}
+
+function drawNote(ctx: CanvasRenderingContext2D, note: Note, c: Colors, s: { z: number; detail: boolean; selected: boolean; editing: boolean }) {
+  const r = noteRect(note);
+  const px = 1 / s.z;
+  ctx.save();
+  ctx.beginPath();
+  roundRect(ctx, r.x, r.y, r.width, r.height, 8);
+  ctx.shadowColor = c.shadow;
+  ctx.shadowBlur = 8 * Math.min(s.z, 1);
+  ctx.shadowOffsetY = 3 * Math.min(s.z, 1);
+  ctx.fillStyle = noteFill(note.color);
+  ctx.fill();
+  ctx.restore();
+
+  if (s.detail && !s.editing) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(r.x + NOTE_PAD, r.y + NOTE_PAD, r.width - NOTE_PAD * 2, r.height - NOTE_PAD * 2);
+    ctx.clip();
+    ctx.font = `500 ${NOTE_FONT}px ${c.fontUI}`;
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    const empty = note.text === "";
+    ctx.fillStyle = empty ? c.secondary : c.text;
+    const lines = wrapLines(ctx, empty ? t("Double-click to write") : note.text, r.width - NOTE_PAD * 2);
+    for (let i = 0; i < lines.length && NOTE_PAD + i * NOTE_LINE < r.height; i++) ctx.fillText(lines[i], r.x + NOTE_PAD, r.y + NOTE_PAD + i * NOTE_LINE);
+    ctx.restore();
+  }
+
+  if (s.selected) {
+    ctx.beginPath();
+    roundRect(ctx, r.x, r.y, r.width, r.height, 8);
+    ctx.lineWidth = 2 * px;
+    ctx.strokeStyle = c.accent;
+    ctx.stroke();
   }
 }
 
@@ -270,6 +368,7 @@ function drawCard(ctx: CanvasRenderingContext2D, board: Board, view: BoardView, 
   const fks = view.foreignKeys.get(id);
   const shown = rows(table, collapsed, fks);
   const px = 1 / s.z;
+  const tone = BOARD_COLORS[board.colors.get(id) ?? 0]?.hex ?? null;
 
   // Body and shadow.
   ctx.save();
@@ -289,15 +388,22 @@ function drawCard(ctx: CanvasRenderingContext2D, board: Board, view: BoardView, 
   ctx.beginPath();
   roundRect(ctx, r.x, r.y, r.width, r.height, RADIUS);
   ctx.clip();
-  ctx.fillStyle = s.selected ? c.accentSoft : s.hovered ? c.accentFaint : c.header;
+  ctx.fillStyle = c.header;
   ctx.fillRect(r.x, r.y, r.width, HEADER);
+  if (tone) {
+    ctx.fillStyle = tint(tone, 0.22);
+    ctx.fillRect(r.x, r.y, r.width, HEADER);
+  } else if (s.selected || s.hovered) {
+    ctx.fillStyle = s.selected ? c.accentSoft : c.accentFaint;
+    ctx.fillRect(r.x, r.y, r.width, HEADER);
+  }
   ctx.fillStyle = c.border;
   ctx.fillRect(r.x, r.y + HEADER - px, r.width, px);
   ctx.restore();
 
   const pad = 12;
   if (s.detail) {
-    drawTableIcon(ctx, r.x + pad, r.y + HEADER / 2, table.isView, c.accentText, px);
+    drawTableIcon(ctx, r.x + pad, r.y + HEADER / 2, table.isView, tone ?? c.accentText, px);
     let right = r.x + r.width - pad;
     ctx.textBaseline = "middle";
     ctx.textAlign = "right";
@@ -465,6 +571,11 @@ export function drawMinimap(ctx: CanvasRenderingContext2D, dpr: number, board: B
   ctx.fill(plain);
   ctx.fillStyle = c.accent;
   ctx.fill(chosen);
+  for (const note of board.notes) {
+    const s = map(noteRect(note));
+    ctx.fillStyle = noteFill(note.color);
+    ctx.fillRect(s.x, s.y, Math.max(s.width, 2), Math.max(s.height, 2));
+  }
   const v = map(visibleRect(board));
   ctx.fillStyle = c.accentFaint;
   ctx.fillRect(v.x, v.y, v.width, v.height);

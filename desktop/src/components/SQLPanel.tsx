@@ -37,7 +37,7 @@ export function SQLPanel() {
         : t("Connect to a database to run SQL.");
 
   return (
-    <div className="sql-panel">
+    <div className={`sql-panel${model.showLog ? "" : " no-log"}`}>
       <section className="card editor-card">
         <header className="card-header">
           <button className="icon-button" onClick={() => model.toggleSQLPanel()} title={withKeys(t("Hide SQL Panel"), "toggleSQLPanel")} aria-label={t("Hide SQL Panel")}>
@@ -57,13 +57,22 @@ export function SQLPanel() {
           <span className="spacer" />
           <HistoryButton />
           <button
-            className="button"
+            className="icon-button"
             disabled={!connected}
             onClick={() => void openInTerminal(model)}
             title={withKeys(t("Open in Terminal"), "openTerminal")}
+            aria-label={t("Terminal")}
           >
             <Icon name="terminal" size={14} />
-            {t("Terminal")}
+          </button>
+          <button
+            className={`icon-button${model.showLog ? " active" : ""}`}
+            onClick={() => model.toggleLog()}
+            aria-pressed={model.showLog}
+            title={withKeys(model.showLog ? t("Hide Log") : t("Show Log"), "toggleLog")}
+            aria-label={model.showLog ? t("Hide Log") : t("Show Log")}
+          >
+            <Icon name="panelRight" size={14} />
           </button>
           {model.running ? (
             <button className="button" onClick={() => model.cancel()} title={withKeys(t("Cancel"), "cancel")}>
@@ -120,7 +129,7 @@ export function SQLPanel() {
           onRunAtomically={() => void model.run("atomic")}
         />
       </section>
-      <LogCard />
+      {model.showLog && <LogCard />}
     </div>
   );
 }
@@ -132,6 +141,7 @@ function LogCard() {
   return (
     <section className="card log-card" aria-label={t("Log")}>
       <header className="card-header">
+        <Icon name="list" size={14} />
         <span className="card-title">{t("Log")}</span>
         <span className="spacer" />
         <button className="icon-button" disabled={!entry} onClick={copy} title={t("Copy the log (message and SQL)")} aria-label={t("Copy Log")}>

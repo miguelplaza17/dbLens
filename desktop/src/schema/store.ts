@@ -10,11 +10,18 @@ import type { Action } from "../shortcuts";
 import { MINIMAP } from "./draw";
 import {
   autoLayout,
+  BOARD_COLORS,
   CARD_WIDTH,
   cardHeight,
   foreignKeyColumns,
+  DEFAULT_NOTE_COLOR,
   GAP_X,
+  isNoteKey,
+  noteKey,
+  NOTE_HEIGHT,
+  NOTE_WIDTH,
   rows,
+  snap,
   tableId,
   union,
   type Point,
@@ -25,12 +32,26 @@ export const MIN_ZOOM = 0.1;
 export const MAX_ZOOM = 2.5;
 const ZOOM_STEP = 1.25;
 
+/** A sticky note on the board (BoardNote in SchemaBoard.swift). */
+export interface Note {
+  id: string;
+  text: string;
+  x: number;
+  y: number;
+  /** An index into BOARD_COLORS. */
+  color: number;
+}
+
 interface Saved {
   positions: Record<string, [number, number]>;
   collapsed: string[];
   pan: Point;
   zoom: number;
+  notes?: Note[];
+  colors?: Record<string, number>;
 }
+
+const validColor = (c: unknown): c is number => typeof c === "number" && Number.isInteger(c) && c >= 0 && c < BOARD_COLORS.length;
 
 function readSaved(key: string): Saved | null {
   try {
@@ -57,11 +78,16 @@ export interface BoardView {
 export class Board {
   positions = new Map<string, Point>();
   collapsed = new Set<string>();
+  notes: Note[] = [];
+  /** Card colors by table id; a card without an entry has none. */
+  colors = new Map<string, number>();
   pan: Point = { x: 0, y: 0 };
   zoom = 1;
   /** Nothing saved yet: fit everything the first time the board is drawn. */
   needsFit = true;
   viewport = { width: 0, height: 0 };
+  /** Set by the canvas: adds a note in the middle of the view and starts editing it. */
+  addNoteHere: (() => void) | null = null;
   private saveTimer: ReturnType<typeof setTimeout> | undefined;
   private listeners = new Set<() => void>();
 
@@ -72,9 +98,68 @@ export class Board {
       if (Array.isArray(p) && Number.isFinite(p[0]) && Number.isFinite(p[1])) this.positions.set(id, { x: p[0], y: p[1] });
     }
     this.collapsed = new Set(Array.isArray(saved.collapsed) ? saved.collapsed : []);
+    if (Array.isArray(saved.notes)) {
+      for (const n of saved.notes) {
+        if (n && typeof n.id === "string" && Number.isFinite(n.x) && Number.isFinite(n.y)) {
+          this.notes.push({ id: n.id, text: typeof n.text === "string" ? n.text : "", x: n.x, y: n.y, color: validColor(n.color) ? n.color : DEFAULT_NOTE_COLOR });
+        }
+      }
+    }
+    if (saved.colors && typeof saved.colors === "object") {
+      for (const [id, c] of Object.entries(saved.colors)) if (validColor(c) && c > 0) this.colors.set(id, c);
+    }
     if (saved.pan && Number.isFinite(saved.pan.x) && Number.isFinite(saved.pan.y)) this.pan = { x: saved.pan.x, y: saved.pan.y };
     if (Number.isFinite(saved.zoom)) this.zoom = clamp(saved.zoom, MIN_ZOOM, MAX_ZOOM);
     this.needsFit = this.positions.size === 0;
+  }
+
+  note(id: string): Note | undefined {
+    return this.notes.find((n) => noteKey(n) === id);
+  }
+
+  /** Where a card or note (by selection id) is. */
+  pointOf(id: string): Point | undefined {
+    if (!isNoteKey(id)) return this.positions.get(id);
+    const n = this.note(id);
+    return n && { x: n.x, y: n.y };
+  }
+
+  moveTo(id: string, p: Point) {
+    if (!isNoteKey(id)) return void this.positions.set(id, p);
+    const n = this.note(id);
+    if (n) [n.x, n.y] = [p.x, p.y];
+  }
+
+  /** A new note with its top-left at `at` (on the 8 unit grid). */
+  addNote(at: Point): Note {
+    const note: Note = {
+      id: typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `${Date.now()}${Math.random().toString(16).slice(2)}`,
+      text: "",
+      x: snap(at.x),
+      y: snap(at.y),
+      color: DEFAULT_NOTE_COLOR,
+    };
+    this.notes.push(note);
+    this.changed();
+    return note;
+  }
+
+  removeNotes(ids: Iterable<string>) {
+    const gone = new Set(ids);
+    this.notes = this.notes.filter((n) => !gone.has(noteKey(n)));
+    this.changed();
+  }
+
+  /** Colors cards and notes (selection ids); "No Color" clears a card's. */
+  setColor(ids: Iterable<string>, color: number) {
+    for (const id of ids) {
+      if (isNoteKey(id)) {
+        const n = this.note(id);
+        if (n) n.color = color;
+      } else if (color === 0) this.colors.delete(id);
+      else this.colors.set(id, color);
+    }
+    this.changed();
   }
 
   /** Redraws on any change (the canvas listens). */
@@ -119,7 +204,14 @@ export class Board {
     this.saveTimer = setTimeout(() => {
       const positions: Saved["positions"] = {};
       for (const [id, p] of this.positions) positions[id] = [Math.round(p.x), Math.round(p.y)];
-      const saved: Saved = { positions, collapsed: [...this.collapsed], pan: this.pan, zoom: this.zoom };
+      const saved: Saved = {
+        positions,
+        collapsed: [...this.collapsed],
+        pan: this.pan,
+        zoom: this.zoom,
+        notes: this.notes.map((n) => ({ ...n, x: Math.round(n.x), y: Math.round(n.y) })),
+        colors: Object.fromEntries(this.colors),
+      };
       try {
         localStorage.setItem(key, JSON.stringify(saved));
       } catch {
@@ -276,6 +368,7 @@ class SchemaState {
       const p = board.positions.get(tableId(t));
       if (p) rect = union(rect, { x: p.x, y: p.y, width: CARD_WIDTH, height: this.height(t) });
     }
+    for (const n of board.notes) rect = union(rect, { x: n.x, y: n.y, width: NOTE_WIDTH, height: NOTE_HEIGHT });
     return rect;
   }
 

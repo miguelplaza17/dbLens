@@ -120,6 +120,14 @@ fn remember_check(state: &UpdaterState) {
     }
 }
 
+/// Settings > Updates > "Last checked": seconds since 1970, or None for never.
+#[tauri::command]
+pub fn last_update_check(app: AppHandle) -> Option<u64> {
+    let state = app.state::<UpdaterState>();
+    let last = state.last_check.lock().ok().and_then(|last| *last);
+    last.or_else(read_last_check)
+}
+
 /// Whether a background check is due: the setting is on, and the last check is a day old or more.
 fn background_check_due(app: &AppHandle, state: &UpdaterState) -> bool {
     if !settings::current(app).check_for_updates {

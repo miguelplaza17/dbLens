@@ -2,19 +2,26 @@
 // columns and key markers, foreign keys as curves between them, on an endless
 // canvas. Drag a card to move it, drag the background to move the board,
 // scroll or pinch to zoom at the pointer, double-click a card (or Return) to
-// open its rows. Positions, folded cards and the view are kept per connection.
+// open its rows. Shift-drag the background selects with a rectangle, Space +
+// drag moves the board, N or a double-click on the background adds a sticky
+// note. Positions, colors, notes, folded cards and the view are kept per
+// connection.
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { t } from "../i18n";
 import { useModel, type AppModel } from "../model";
 import { withKeys } from "../shortcuts";
+import type { MenuItem } from "../components/Sheet";
 import { Empty } from "../components/Empty";
 import { Icon } from "../components/Icon";
-import { snap, tableId, type Point } from "./layout";
+import { BoardHelp } from "./BoardHelp";
+import { BOARD_COLORS, intersects, isNoteKey, NOTE_HEIGHT, NOTE_WIDTH, noteKey, snap, tableId, type Point, type Rect } from "./layout";
 import {
   drawBoard,
   drawMinimap,
-  hitCard,
+  hitItem,
+  noteRect,
+  cardRect,
   MINIMAP,
   minimapMapping,
   readColors,
@@ -24,7 +31,7 @@ import {
   type Mapping,
   type Marks,
 } from "./draw";
-import { schema as state, useSchema, ZOOM_STEP, type Board, type BoardView } from "./store";
+import { schema as state, useSchema, ZOOM_STEP, type Board, type BoardView, type Note } from "./store";
 import "./schema.css";
 
 export function SchemaBoard() {
@@ -94,6 +101,9 @@ function Controls({ board, view }: { board: Board; view: BoardView }) {
       </span>
       {s.loading && <span className="spinner small" />}
       <span className="spacer" />
+      <button className="button" onClick={() => board.addNoteHere?.()} title={t("Add a sticky note (N, or double-click the board)")}>
+        {t("Add Note")}
+      </button>
       <button className="button" onClick={() => s.toggleAllCollapsed()}>
         {folded ? t("Show All Columns") : t("Key Columns Only")}
       </button>
@@ -112,12 +122,13 @@ function Controls({ board, view }: { board: Board; view: BoardView }) {
         </button>
       </div>
       <span className="schema-zoom">{Math.round(zoom * 100)}%</span>
+      <BoardHelp />
     </div>
   );
 }
 
 interface Drag {
-  kind: "cards" | "pan";
+  kind: "cards" | "pan" | "marquee";
   pointer: number;
   start: Point;
   moved: boolean;
@@ -129,13 +140,18 @@ interface Drag {
   additive: boolean;
   /** The card was selected before this press (Shift-click on it takes it out). */
   wasIn: boolean;
+  /** The selection a marquee adds to. */
+  base: Set<string>;
 }
 
 function BoardCanvas({ model, board, view, showSchema, theme }: { model: AppModel; board: Board; view: BoardView; showSchema: boolean; theme: string }) {
   const wrap = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   const mini = useRef<HTMLCanvasElement>(null);
-  const marks = useRef<Marks>({ hovered: null, selection: new Set(), order: [] });
+  const marks = useRef<Marks>({ hovered: null, selection: new Set(), order: [], marquee: null, editing: null });
+  const space = useRef(false);
+  const [editing, setEditing] = useState<string | null>(null);
+  marks.current.editing = editing;
   const drag = useRef<Drag | null>(null);
   const miniDrag = useRef<Mapping | null>(null);
   const colors = useRef<Colors | null>(null);
@@ -147,8 +163,8 @@ function BoardCanvas({ model, board, view, showSchema, theme }: { model: AppMode
     const kept = marks.current.order.filter((id) => ids.has(id));
     const keptSet = new Set(kept);
     marks.current.order = [...view.tables.map(tableId).filter((id) => !keptSet.has(id)), ...kept];
-    for (const id of [...marks.current.selection]) if (!ids.has(id)) marks.current.selection.delete(id);
-  }, [view]);
+    for (const id of [...marks.current.selection]) if (!ids.has(id) && !(isNoteKey(id) && board.note(id))) marks.current.selection.delete(id);
+  }, [view, board]);
 
   const paint = () => {
     frame.current = 0;
@@ -171,7 +187,7 @@ function BoardCanvas({ model, board, view, showSchema, theme }: { model: AppMode
 
   useEffect(() => board.onChange(request), [board]);
   // A new view or schema label: draw again.
-  useEffect(request, [view, showSchema]);
+  useEffect(request, [view, showSchema, editing]);
   useEffect(() => () => cancelAnimationFrame(frame.current), []);
 
   // A new theme or accent (Settings sets a class on <html>): read the colors again.
@@ -235,22 +251,36 @@ function BoardCanvas({ model, board, view, showSchema, theme }: { model: AppMode
     const r = canvas.current!.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   };
-  const hit = (e: { clientX: number; clientY: number }) => hitCard(board, view, marks.current, board.toWorld(local(e)));
+  const hit = (e: { clientX: number; clientY: number }) => hitItem(board, view, marks.current, board.toWorld(local(e)));
 
   const toFront = (ids: Iterable<string>) => {
     const lift = new Set(ids);
     marks.current.order = [...marks.current.order.filter((id) => !lift.has(id)), ...marks.current.order.filter((id) => lift.has(id))];
   };
 
+  /** A new note with its corner at a board point, selected and open for writing. */
+  const addNote = (at: Point) => {
+    const note = board.addNote(at);
+    marks.current.selection = new Set([noteKey(note)]);
+    setEditing(noteKey(note));
+  };
+  useEffect(() => {
+    board.addNoteHere = () => addNote(board.toWorld({ x: board.viewport.width / 2, y: board.viewport.height / 2 }));
+    return () => {
+      board.addNoteHere = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [board]);
+
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
     if (e.button !== 0) return;
     e.currentTarget.focus({ preventScroll: true });
     e.currentTarget.setPointerCapture(e.pointerId);
-    const table = hit(e);
+    const id = space.current ? null : hit(e);
     const m = marks.current;
     const additive = e.shiftKey || e.ctrlKey || e.metaKey;
-    if (table) {
-      const id = tableId(table);
+    const base = { pointer: e.pointerId, start: local(e), moved: false, origins: new Map<string, Point>(), pan: { ...board.pan }, card: null, additive, wasIn: false, base: new Set<string>() };
+    if (id) {
       const wasIn = m.selection.has(id);
       if (additive) {
         // Shift-click toggles on pointer up, so a shift-drag still moves the group.
@@ -260,13 +290,16 @@ function BoardCanvas({ model, board, view, showSchema, theme }: { model: AppMode
       }
       const origins = new Map<string, Point>();
       for (const sid of m.selection) {
-        const p = board.positions.get(sid);
+        const p = board.pointOf(sid);
         if (p) origins.set(sid, { ...p });
       }
       toFront(m.selection);
-      drag.current = { kind: "cards", pointer: e.pointerId, start: local(e), moved: false, origins, pan: board.pan, card: id, additive, wasIn };
+      drag.current = { ...base, kind: "cards", origins, card: id, wasIn };
+    } else if (e.shiftKey && !e.ctrlKey && !e.metaKey && !space.current) {
+      // Shift-drag on the background: select with a rectangle, adding to what is selected.
+      drag.current = { ...base, kind: "marquee", base: new Set(m.selection) };
     } else {
-      drag.current = { kind: "pan", pointer: e.pointerId, start: local(e), moved: false, origins: new Map(), pan: { ...board.pan }, card: null, additive, wasIn: false };
+      drag.current = { ...base, kind: "pan" };
       e.currentTarget.style.cursor = "grabbing";
     }
     request();
@@ -276,11 +309,11 @@ function BoardCanvas({ model, board, view, showSchema, theme }: { model: AppMode
     const d = drag.current;
     const p = local(e);
     if (!d || d.pointer !== e.pointerId) {
-      const table = hit(e);
-      const id = table ? tableId(table) : null;
+      const id = space.current ? null : hit(e);
       e.currentTarget.style.cursor = id ? "default" : "grab";
-      if (id !== marks.current.hovered) {
-        marks.current.hovered = id;
+      const table = id && !isNoteKey(id) ? id : null;
+      if (table !== marks.current.hovered) {
+        marks.current.hovered = table;
         request();
       }
       return;
@@ -294,11 +327,26 @@ function BoardCanvas({ model, board, view, showSchema, theme }: { model: AppMode
       board.changed(false);
       return;
     }
+    if (d.kind === "marquee") {
+      const screen: Rect = { x: Math.min(d.start.x, p.x), y: Math.min(d.start.y, p.y), width: Math.abs(dx), height: Math.abs(dy) };
+      const corner = board.toWorld({ x: screen.x, y: screen.y });
+      const world: Rect = { x: corner.x, y: corner.y, width: screen.width / board.zoom, height: screen.height / board.zoom };
+      const chosen = new Set(d.base);
+      for (const table of view.tables) {
+        const r = cardRect(board, view, table);
+        if (r && intersects(r, world)) chosen.add(tableId(table));
+      }
+      for (const note of board.notes) if (intersects(noteRect(note), world)) chosen.add(noteKey(note));
+      marks.current.marquee = screen;
+      marks.current.selection = chosen;
+      request();
+      return;
+    }
     // Snap to the 8-unit grid; Alt moves freely.
     for (const [id, origin] of d.origins) {
       const x = origin.x + dx / board.zoom;
       const y = origin.y + dy / board.zoom;
-      board.positions.set(id, e.altKey ? { x, y } : { x: snap(x), y: snap(y) });
+      board.moveTo(id, e.altKey ? { x, y } : { x: snap(x), y: snap(y) });
     }
     board.changed(false);
   };
@@ -307,10 +355,13 @@ function BoardCanvas({ model, board, view, showSchema, theme }: { model: AppMode
     const d = drag.current;
     if (!d || d.pointer !== e.pointerId) return;
     drag.current = null;
-    e.currentTarget.style.cursor = d.kind === "pan" ? "grab" : "default";
+    e.currentTarget.style.cursor = d.kind === "cards" ? "default" : "grab";
     const m = marks.current;
+    m.marquee = null;
     if (d.moved) {
-      board.save();
+      if (d.kind !== "marquee") board.save();
+    } else if (d.kind === "marquee") {
+      // A Shift-click on empty space: nothing changes.
     } else if (d.kind === "pan") {
       if (!d.additive) m.selection = new Set();
     } else if (d.card && d.additive) {
@@ -322,27 +373,69 @@ function BoardCanvas({ model, board, view, showSchema, theme }: { model: AppMode
   };
 
   const onDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const table = hit(e);
+    const id = hit(e);
+    if (!id) return addNote(board.toWorld(local(e)));
+    if (isNoteKey(id)) return setEditing(id);
+    const table = view.byId.get(id);
     if (table) void state.open(model, table);
   };
 
+  const colorItems = (ids: Set<string>): MenuItem[] => [
+    { title: "", separator: true },
+    { title: t("Color"), disabled: true },
+    ...BOARD_COLORS.map((c, index) => ({ title: t(c.name), action: () => board.setColor(ids, index) })),
+  ];
+
   const onContextMenu = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const table = hit(e);
-    if (!table) return e.preventDefault();
-    const id = tableId(table);
-    if (!marks.current.selection.has(id)) marks.current.selection = new Set([id]);
+    const id = hit(e);
+    const m = marks.current;
+    if (!id) {
+      const at = board.toWorld(local(e));
+      return model.showMenu(e, [{ title: t("Add Note"), action: () => addNote(at) }]);
+    }
+    if (!m.selection.has(id)) m.selection = new Set([id]);
     request();
+    const ids = new Set(m.selection);
+    if (isNoteKey(id)) {
+      return model.showMenu(e, [
+        { title: t("Edit Note"), action: () => setEditing(id) },
+        ...colorItems(ids),
+        { title: "", separator: true },
+        {
+          title: t("Delete Note"),
+          destructive: true,
+          action: () => {
+            board.removeNotes([id]);
+            m.selection.delete(id);
+            request();
+          },
+        },
+      ]);
+    }
+    const table = view.byId.get(id);
+    if (!table) return;
     model.showMenu(e, [
       { title: t("Open Rows"), icon: "table", action: () => void state.open(model, table) },
       {
         title: board.collapsed.has(id) ? t("Show All Columns") : t("Key Columns Only"),
         action: () => state.toggleCollapsed(id),
       },
+      ...colorItems(ids),
     ]);
+  };
+
+  const setSpace = (on: boolean, el: HTMLCanvasElement) => {
+    if (space.current === on) return;
+    space.current = on;
+    if (!drag.current) el.style.cursor = on ? "grab" : "default";
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLCanvasElement>) => {
     const m = marks.current;
+    if (e.key === " " && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      return setSpace(true, e.currentTarget);
+    }
     const arrows: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
     const dir = arrows[e.key];
     if (dir && !e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -353,14 +446,23 @@ function BoardCanvas({ model, board, view, showSchema, theme }: { model: AppMode
       } else {
         const step = e.shiftKey ? 40 : 8;
         for (const id of m.selection) {
-          const p = board.positions.get(id);
-          if (p) board.positions.set(id, { x: p.x + dir[0] * step, y: p.y + dir[1] * step });
+          const p = board.pointOf(id);
+          if (p) board.moveTo(id, { x: p.x + dir[0] * step, y: p.y + dir[1] * step });
         }
       }
       board.changed();
       return;
     }
-    if (e.key === "Escape" && m.selection.size > 0) {
+    if (e.key === "Delete" || e.key === "Backspace") {
+      // The board's own: Delete removes selected notes, never rows behind the board.
+      e.preventDefault();
+      e.stopPropagation();
+      const notes = [...m.selection].filter(isNoteKey);
+      if (notes.length === 0) return;
+      board.removeNotes(notes);
+      for (const id of notes) m.selection.delete(id);
+      request();
+    } else if (e.key === "Escape" && m.selection.size > 0) {
       e.preventDefault();
       m.selection = new Set();
       request();
@@ -372,8 +474,11 @@ function BoardCanvas({ model, board, view, showSchema, theme }: { model: AppMode
       }
     } else if (e.key.toLowerCase() === "a" && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
       e.preventDefault();
-      m.selection = new Set(view.tables.map(tableId));
+      m.selection = new Set([...view.tables.map(tableId), ...board.notes.map(noteKey)]);
       request();
+    } else if (e.key.toLowerCase() === "n" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      board.addNoteHere?.();
     }
   };
 
@@ -411,6 +516,8 @@ function BoardCanvas({ model, board, view, showSchema, theme }: { model: AppMode
         onDoubleClick={onDoubleClick}
         onContextMenu={onContextMenu}
         onKeyDown={onKeyDown}
+        onKeyUp={(e) => e.key === " " && setSpace(false, e.currentTarget)}
+        onBlur={(e) => setSpace(false, e.currentTarget)}
       />
       <canvas
         ref={mini}
@@ -421,6 +528,71 @@ function BoardCanvas({ model, board, view, showSchema, theme }: { model: AppMode
         onPointerUp={endMini}
         onPointerCancel={endMini}
       />
+      {editing && board.note(editing) && (
+        <NoteEditor
+          key={editing}
+          board={board}
+          note={board.note(editing)!}
+          onDone={() => {
+            setEditing(null);
+            canvas.current?.focus({ preventScroll: true });
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+/** A note's text field, laid over the canvas at the note's place and size. */
+function NoteEditor({ board, note, onDone }: { board: Board; note: Note; onDone: () => void }) {
+  const [, redraw] = useState(0);
+  const [draft, setDraft] = useState(note.text);
+  const field = useRef<HTMLTextAreaElement>(null);
+  const done = useRef(false);
+  // The board moves under it (pan, zoom, a nudge) without React.
+  useEffect(() => board.onChange(() => redraw((n) => n + 1)), [board]);
+  useEffect(() => {
+    const el = field.current;
+    el?.focus({ preventScroll: true });
+    el?.setSelectionRange(el.value.length, el.value.length);
+  }, []);
+
+  const commit = () => {
+    if (done.current) return;
+    done.current = true;
+    note.text = draft;
+    board.changed();
+    onDone();
+  };
+  const z = board.zoom;
+  const fill = BOARD_COLORS[note.color]?.hex;
+  return (
+    <textarea
+      ref={field}
+      className="schema-note-editor"
+      value={draft}
+      spellCheck={false}
+      aria-label={t("Edit Note")}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Escape") {
+          e.preventDefault();
+          commit();
+        }
+      }}
+      style={{
+        left: board.pan.x + note.x * z,
+        top: board.pan.y + note.y * z,
+        width: NOTE_WIDTH * z,
+        height: NOTE_HEIGHT * z,
+        padding: 12 * z,
+        borderRadius: 8 * z,
+        fontSize: 14 * z,
+        lineHeight: `${18 * z}px`,
+        background: fill ? `color-mix(in srgb, ${fill} 85%, transparent)` : "#3A3A40",
+      }}
+    />
   );
 }

@@ -71,6 +71,10 @@ pub struct Settings {
     /// Keep dbLens running in the tray after the last window closes (tray.rs).
     /// Off by default on Linux, where not every desktop shows a tray.
     pub keep_in_tray: bool,
+    /// Settings > General > "Show the SQL panel" (also View > Show or Hide the SQL Panel).
+    pub show_sql_panel: bool,
+    /// Settings > General > "Ask before deleting a connection".
+    pub confirm_delete: bool,
     /// Settings > Appearance > Database Icons, by kind of database.
     pub engine_icons: std::collections::BTreeMap<String, EngineIconPref>,
 }
@@ -83,6 +87,8 @@ impl Default for Settings {
             check_for_updates: true,
             update_automatically: false,
             keep_in_tray: cfg!(not(target_os = "linux")),
+            show_sql_panel: true,
+            confirm_delete: true,
             engine_icons: Default::default(),
         }
     }

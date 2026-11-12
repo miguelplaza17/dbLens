@@ -556,7 +556,7 @@ async fn binary_serves_stdio_from_the_store_folder() {
         .unwrap()
         .execute_batch("create table t(a); insert into t values ('x')")
         .unwrap();
-    {
+    let saved_id = {
         let mut store = Store::open(
             &store_dir,
             KeySource::File(store_dir.join("connections.key")),
@@ -570,8 +570,9 @@ async fn binary_serves_stdio_from_the_store_folder() {
                 ssh: None,
                 folder_id: None,
             })
-            .unwrap();
-    }
+            .unwrap()
+            .id
+    };
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_dblens"))
         .arg("--mcp")
         .env("DBLENS_STORE_DIR", &store_dir)
@@ -597,8 +598,31 @@ async fn binary_serves_stdio_from_the_store_folder() {
     assert_eq!(reply["result"]["isError"], false, "{text}");
     let out: Value = serde_json::from_str(text).unwrap();
     assert_eq!(out["rows"], json!([["x"]]));
+    let bad = json!({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+        "params": {"name": "query", "arguments": {"connection": "bin", "query": "select nope from t"}}});
+    stdin
+        .write_all(format!("{bad}\n").as_bytes())
+        .await
+        .unwrap();
+    line.clear();
+    stdout.read_line(&mut line).await.unwrap();
     drop(stdin);
     assert!(child.wait().await.unwrap().success());
+
+    // What the agent ran is in the app's SQL history, tagged and with its outcome.
+    let history = dblens_lib::history::HistoryState::at(Some(store_dir.join("sql-history.json")));
+    let list = history.list(&saved_id);
+    let seen: Vec<_> = list
+        .iter()
+        .map(|e| (e.sql.as_str(), e.failed, e.via_agent))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("select nope from t", true, true),
+            ("select a from t", false, true)
+        ]
+    );
 }
 
 /// The same name on two engines: told apart by `engine` or by the ref, one name

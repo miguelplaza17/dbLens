@@ -212,6 +212,9 @@ kbd {
 .icon-button:disabled {
   opacity: 0.4;
 }
+.icon-button.active {
+  color: var(--accent-text);
+}
 
 .button {
   display: inline-flex;
@@ -326,6 +329,13 @@ select:focus,
 textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
+}
+/* Inside a grouped form (row editor, connection sheet) fields sit flush with the
+   card like the Mac app's Form: no frame until they take focus. */
+.form-card input:not([type="checkbox"]):not(:focus),
+.form-card textarea:not(:focus) {
+  border-color: transparent;
+  background: transparent;
 }
 input::placeholder,
 textarea::placeholder {
@@ -480,6 +490,10 @@ select option {
 }
 .sidebar-row .icon {
   color: var(--accent-text);
+}
+/* Tables, views and keys: gray icons, as in the Mac app; connections keep their colour. */
+.sidebar-group .sidebar-row .icon {
+  color: var(--text-secondary);
 }
 /* Each folder level steps in; --depth is set on the row. */
 .sidebar-row.nested {
@@ -653,6 +667,9 @@ select option {
   display: grid;
   grid-template-columns: minmax(0, 1fr) var(--log-width);
   height: 100%;
+}
+.sql-panel.no-log {
+  grid-template-columns: minmax(0, 1fr);
 }
 .card {
   display: flex;

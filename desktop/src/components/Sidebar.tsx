@@ -1,7 +1,7 @@
 // The sidebar: a filter, the saved connections (in folders), and the tables of
 // the open connection grouped by schema (ContentView.swift).
 
-import { Fragment, forwardRef, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { Fragment, forwardRef, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { EngineIcon } from "../engineIcons";
 import { api, engineNames, relationId, type ConnectionFolder, type Relation, type SavedConnection } from "../api";
 import { t } from "../i18n";
@@ -22,10 +22,19 @@ const relationIcon: Record<Relation["kind"], IconName> = {
   key: "key",
 };
 
+/** Sent by the New Folder action; the sidebar adds the folder and starts its rename. */
+export const NEW_FOLDER_EVENT = "dblens:new-folder";
+
 export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, filterRef) {
   const model = useModel();
   const [filter, setFilter] = useState("");
   const [renaming, setRenaming] = useState<string | null>(null);
+  // File > New Folder (Mod+Alt+N).
+  useEffect(() => {
+    const add = () => void newFolder();
+    window.addEventListener(NEW_FOLDER_EVENT, add);
+    return () => window.removeEventListener(NEW_FOLDER_EVENT, add);
+  });
 
   const needle = filter.trim().toLowerCase();
   const connections = model.store.connections;
@@ -78,7 +87,9 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
         icon: "trash",
         destructive: true,
         action: () =>
-          model.open({
+          !model.confirmDelete
+            ? void model.deleteConnection(c)
+            : model.open({
             kind: "confirm",
             title: t("Delete “%@”?", c.name),
             message: t("The saved URL is erased. The database is not changed."),
@@ -115,6 +126,25 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
         action: () => void model.queryTable(r),
       },
       { title: model.usesCommands ? t("Copy Key") : t("Copy Name"), icon: "copy", action: () => void copyName(r) },
+      ...(r.kind === "key"
+        ? [
+            { separator: true, title: "" },
+            {
+              title: t("Delete Key…"),
+              icon: "trash" as IconName,
+              destructive: true,
+              action: () =>
+                model.open({
+                  kind: "confirm",
+                  title: t("Delete the key “%@”?", r.name),
+                  message: t("DEL runs on the server at once. It can't be undone here."),
+                  action: t("Delete Key"),
+                  destructive: true,
+                  run: () => model.deleteKey(r),
+                }),
+            },
+          ]
+        : []),
     ]);
   };
 
@@ -268,6 +298,9 @@ export const Sidebar = forwardRef<HTMLInputElement>(function Sidebar(_props, fil
               </div>
             );
           })}
+        {model.session && model.usesCommands && model.relations.length >= 5000 && (
+          <div className="sidebar-note">{t("Showing the first 5,000 keys. Use the filter, or SCAN in the command panel.")}</div>
+        )}
         {model.session && model.relationsLoading && model.relations.length === 0 && (
           <div className="sidebar-note">
             <span className="spinner small" />

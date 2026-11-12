@@ -604,6 +604,7 @@ export const api = {
   schemaGraph: (sessionId: string) => invoke<SchemaGraph>("schema_graph", { sessionId }),
   qualifiedName: (sessionId: string, relation: Relation) =>
     invoke<string>("qualified_name", { sessionId, relation }),
+  saveTextFile: (path: string, text: string) => invoke<void>("save_text_file", { path, text }),
   exportResult: (result: ResultBlock, format: "csv" | "json", rows?: number[]) =>
     invoke<string>("export_result", { result: toQueryResult(result, rows), format }),
 
@@ -652,6 +653,7 @@ export const api = {
 
   // Updates (src-tauri/src/updater.rs). Fails with "not configured" in a build without a public key.
   checkForUpdates: () => invoke<UpdateCheck>("check_for_updates"),
+  lastUpdateCheck: () => invoke<number | null>("last_update_check"),
   /** Installs the update the last check found, then closes and relaunches the app. */
   installUpdate: () => invoke<void>("install_update"),
 };

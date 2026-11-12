@@ -9,7 +9,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, engineNames, inTauri, type AgentClientId, type AgentStatus, type AgentTool, type Engine, type SavedConnection, type StoreSnapshot } from "../api";
 import { EngineIcon, engineDefaultColors, type EngineIconPref } from "../engineIcons";
 import { copyText } from "../format";
-import { t } from "../i18n";
+import { language, t } from "../i18n";
 import { AgentAccessEditor, accessOf, accessSummary, type AgentAccess } from "../agentAccess";
 import { Empty } from "../components/Empty";
 import { Icon, type IconName } from "../components/Icon";
@@ -26,9 +26,10 @@ import {
   type SettingsInfo,
 } from "./store";
 
-export type SettingsTab = "appearance" | "connections" | "agents" | "updates" | "data";
+export type SettingsTab = "general" | "appearance" | "connections" | "agents" | "updates" | "data";
 
 const TABS: { id: SettingsTab; title: string; icon: IconName }[] = [
+  { id: "general", title: "General", icon: "more" },
   { id: "appearance", title: "Appearance", icon: "sun" },
   { id: "connections", title: "Connections", icon: "database" },
   { id: "agents", title: "Agents", icon: "terminal" },
@@ -47,7 +48,7 @@ function firstTab(): SettingsTab {
     // No storage: start at the first tab.
   }
   const id = asked ?? saved;
-  return TABS.some((tab) => tab.id === id) ? (id as SettingsTab) : "appearance";
+  return TABS.some((tab) => tab.id === id) ? (id as SettingsTab) : "general";
 }
 
 export default function SettingsApp() {
@@ -144,7 +145,8 @@ export default function SettingsApp() {
       <main className="settings-pane" role="tabpanel" aria-label={t(current.title)}>
         <div ref={contentRef} className="settings-content">
           <h1 className="settings-title">{t(current.title)}</h1>
-          {settings && tab === "appearance" && <AppearanceTab settings={settings} change={change} info={info} />}
+          {settings && tab === "general" && <GeneralTab settings={settings} change={change} info={info} />}
+          {settings && tab === "appearance" && <AppearanceTab settings={settings} change={change} />}
           {tab === "connections" && <ConnectionsTab say={say} />}
           {tab === "agents" && <AgentsTab info={info} copy={copy} say={say} />}
           {settings && tab === "updates" && <UpdatesTab settings={settings} change={change} info={info} say={say} />}
@@ -214,7 +216,30 @@ const engineKinds: Engine[] = ["postgres", "mysql", "sqlite", "redis", "mongodb"
 
 // MARK: - Appearance (AppearanceSettings.swift, Theme.swift)
 
-function AppearanceTab({ settings, change, info }: { settings: Settings; change: Change; info: SettingsInfo | null }) {
+function GeneralTab({ settings, change, info }: { settings: Settings; change: Change; info: SettingsInfo | null }) {
+  return (
+    <>
+      <Group
+        footer={t("Closing the last window leaves dbLens running; open it again from its icon. Quit from the icon's menu or the File menu.")}
+      >
+        <Toggle
+          id="keep-in-tray"
+          label={info?.os === "macos" ? t("Keep dbLens in the menu bar") : t("Keep dbLens in the tray")}
+          checked={settings.keepInTray}
+          onChange={(on) => change({ keepInTray: on })}
+        />
+      </Group>
+      <Group title={t("SQL Panel")}>
+        <Toggle id="show-sql-panel" label={t("Show the SQL panel")} checked={settings.showSQLPanel} onChange={(on) => change({ showSQLPanel: on })} />
+      </Group>
+      <Group title={t("Connections")}>
+        <Toggle id="confirm-delete" label={t("Ask before deleting a connection")} checked={settings.confirmDelete} onChange={(on) => change({ confirmDelete: on })} />
+      </Group>
+    </>
+  );
+}
+
+function AppearanceTab({ settings, change }: { settings: Settings; change: Change }) {
   const modes: { id: Appearance; title: string }[] = [
     { id: "system", title: "System" },
     { id: "light", title: "Light" },
@@ -259,17 +284,6 @@ function AppearanceTab({ settings, change, info }: { settings: Settings; change:
             <span className="settings-row-detail">{t(accent.name)}</span>
           </div>
         </Row>
-      </Group>
-      <Group
-        title={t("Background")}
-        footer={t("Closing the last window leaves dbLens running; open it again from its icon. Quit from the icon's menu or the File menu.")}
-      >
-        <Toggle
-          id="keep-in-tray"
-          label={info?.os === "macos" ? t("Keep dbLens in the menu bar") : t("Keep dbLens in the tray")}
-          checked={settings.keepInTray}
-          onChange={(on) => change({ keepInTray: on })}
-        />
       </Group>
       <Group title={t("Database Icons")} footer={t("The logos belong to their owners.")}>
         {engineKinds.map((e) => {
@@ -581,6 +595,10 @@ function AgentsTab({ info, copy, say }: { info: SettingsInfo | null; copy: (text
 
 function UpdatesTab({ settings, change, info, say }: { settings: Settings; change: Change; info: SettingsInfo | null; say: (text: string) => void }) {
   const [checking, setChecking] = useState(false);
+  const [lastCheck, setLastCheck] = useState<number | null>(null);
+  useEffect(() => {
+    if (!checking) void api.lastUpdateCheck().then(setLastCheck, () => setLastCheck(null));
+  }, [checking]);
   const check = () => {
     setChecking(true);
     // A found update also reaches the main window, whose notice offers to install it.
@@ -611,13 +629,26 @@ function UpdatesTab({ settings, change, info, say }: { settings: Settings; chang
         disabled={!settings.checkForUpdates}
         onChange={(on) => change({ updateAutomatically: on })}
       />
-      <Row label={t("Check for Updates")}>
+      <Row label={t("Last checked")} detail={lastCheck ? relativeTime(lastCheck * 1000) : t("Never")}>
         <button type="button" className="button" disabled={checking} onClick={check}>
           {t("Check Now")}
         </button>
       </Row>
     </Group>
   );
+}
+
+/** "5 minutes ago", "yesterday", in the UI language. */
+function relativeTime(at: number): string {
+  const seconds = Math.round((at - Date.now()) / 1000);
+  const format = new Intl.RelativeTimeFormat(language, { numeric: "auto" });
+  const steps: [Intl.RelativeTimeFormatUnit, number][] = [["second", 60], ["minute", 60], ["hour", 24], ["day", 30], ["month", 12]];
+  let value = seconds;
+  for (const [unit, size] of steps) {
+    if (Math.abs(value) < size) return format.format(value, unit);
+    value = Math.round(value / size);
+  }
+  return format.format(value, "year");
 }
 
 // MARK: - Data & Privacy (DataSettings in SettingsView.swift)

@@ -25,6 +25,9 @@ pub struct TrayState {
     /// Quit was asked for: the app ends when its last window is gone.
     quitting: AtomicBool,
     items: Mutex<HashMap<&'static str, MenuItem<Wry>>>,
+    menu: Mutex<Option<Menu<Wry>>>,
+    /// "Connected to <name>" and its separator, at the top while a database is open.
+    status: Mutex<Option<(MenuItem<Wry>, PredefinedMenuItem<Wry>)>>,
 }
 
 impl TrayState {
@@ -86,7 +89,34 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     }
     let tray = builder.build(app)?;
     tray.set_visible(crate::settings::current(app).keep_in_tray)?;
+    *state.menu.lock().unwrap_or_else(|e| e.into_inner()) = Some(menu);
     Ok(())
+}
+
+/// The tray menu's first row: "Connected to <name>" (already in the UI language)
+/// while a database is open, nothing otherwise. Mirrors MenuBar.swift.
+#[tauri::command]
+pub fn set_tray_connection(app: AppHandle, text: Option<String>) {
+    let state = app.state::<TrayState>();
+    let menu = state.menu.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(menu) = menu.as_ref() else { return };
+    let mut status = state.status.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((item, separator)) = status.take() {
+        let _ = menu.remove(&item);
+        let _ = menu.remove(&separator);
+    }
+    let Some(text) = text.filter(|t| !t.is_empty()) else {
+        return;
+    };
+    let Ok(item) = MenuItem::with_id(&app, "tray-status", text, false, None::<&str>) else {
+        return;
+    };
+    let Ok(separator) = PredefinedMenuItem::separator(&app) else {
+        return;
+    };
+    if menu.insert(&item, 0).is_ok() && menu.insert(&separator, 1).is_ok() {
+        *status = Some((item, separator));
+    }
 }
 
 /// The setting changed: show or hide the icon.

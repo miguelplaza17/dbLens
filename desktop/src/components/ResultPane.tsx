@@ -1,6 +1,7 @@
 // The center: the picked table a page at a time, or the last query's result,
 // with the status line, paging, search, and row actions below (ResultPane.swift).
 
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { forwardRef, useCallback, useMemo, useState } from "react";
 import { api, cellText, errorText, permuted, type ColumnSort, type ResultBlock } from "../api";
 import { copyText, tsv } from "../format";
@@ -209,6 +210,25 @@ const Grid = forwardRef<HTMLInputElement, { result: ResultBlock }>(function Grid
     }
   };
 
+  /** Export CSV… / JSON…: every row (with the search and order) or the query result, to a file. */
+  const exportToFile = async (format: "csv" | "json") => {
+    const base = isTable ? (model.relation?.name ?? "table") : "result";
+    const path = await saveDialog({
+      defaultPath: `${base}.${format}`,
+      filters: [{ name: format.toUpperCase(), extensions: [format] }],
+    }).catch(() => null);
+    if (!path) return;
+    try {
+      const { block } = await data.collect(null, 1_000_000);
+      const text = await api.exportResult(block, format);
+      await api.saveTextFile(path, text);
+      const file = path.split(/[\\/]/).pop() ?? path;
+      model.noteLog(t("Exported %@ rows to %@", formatNumber(block.rowCount), file));
+    } catch (e) {
+      model.noteLog(errorText(e), true);
+    }
+  };
+
   return (
     <div className="result">
       <ResultGrid
@@ -274,17 +294,22 @@ const Grid = forwardRef<HTMLInputElement, { result: ResultBlock }>(function Grid
           </button>
         )}
         <button
-          className="button icon-only"
-          aria-label={t("Export")}
-          title={t("Export")}
+          className="button"
+          aria-haspopup="menu"
+          title={isTable ? t("Save every row of the table (with the search and order) as a file") : t("Save the query result as a file")}
           onClick={(e) =>
-            model.showMenu({ clientX: e.currentTarget.getBoundingClientRect().left, clientY: e.currentTarget.getBoundingClientRect().top - 72, preventDefault: () => undefined }, [
+            model.showMenu({ clientX: e.currentTarget.getBoundingClientRect().left, clientY: e.currentTarget.getBoundingClientRect().top - 132, preventDefault: () => undefined }, [
+              { title: t("CSV…"), action: () => void exportToFile("csv") },
+              { title: t("JSON…"), action: () => void exportToFile("json") },
+              { separator: true, title: "" },
               { title: t("Copy as CSV"), action: () => void exportAs("csv") },
               { title: t("Copy as JSON"), action: () => void exportAs("json") },
             ])
           }
         >
           <Icon name="export" size={14} />
+          {t("Export")}
+          <Icon name="chevronDown" size={10} />
         </button>
       </footer>
       {isTable && model.showFind && <FindBar ref={searchRef} />}

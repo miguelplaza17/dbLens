@@ -602,7 +602,7 @@ impl Store {
 /// The folder's advisory lock (`flock`, `LockFileEx`), held until dropped.
 /// Every process takes it around reading and writing `connections.json` and
 /// `connections.enc`. The OS also drops it when the process dies.
-struct DirLock(fs::File);
+pub(crate) struct DirLock(fs::File);
 
 impl Drop for DirLock {
     fn drop(&mut self) {
@@ -629,7 +629,7 @@ impl Drop for DirLock {
     }
 }
 
-fn lock_dir(dir: &Path) -> DbResult<DirLock> {
+pub(crate) fn lock_dir(dir: &Path) -> DbResult<DirLock> {
     let mut options = fs::OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]

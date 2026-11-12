@@ -134,7 +134,7 @@ the Tauri names (`Mod` = Cmd on macOS, Ctrl elsewhere).
 | New Row… | Cmd+Shift+N | Done | `newRow` |
 | Copy All | Cmd+Shift+C | Done | `copyRows` |
 | Open in Terminal | Cmd+Shift+T | Done | `terminal.rs`: psql, mysql/mariadb, sqlite3, redis-cli/valkey-cli, mongosh; password by environment variable (mongosh asks for it); wt.exe / cmd (PowerShell script), x-terminal-emulator, gnome-terminal, konsole…, Terminal.app via osascript. File menu, SQL panel button, sidebar menu. Untested on a real Windows and macOS. |
-| Disconnect | Cmd+Shift+D | Partial | Action exists, but the key is Mod+Shift+W in Tauri. Decide which key to keep. |
+| Disconnect | Cmd+Shift+D | Done | Mod+Shift+D. |
 | Settings | (Settings scene) | Done | Mod+, and the Settings… row open a separate window (`settings.rs`, `src/settings/`). |
 | Keyboard shortcuts sheet | (not in Swift menus) | Done | Mod+/, Tauri only. |
 | Performance HUD | (not in Swift) | Done | Mod+Shift+P, Tauri only: first rows, block fetch p50/p95, scroll fps, longest frame, JS heap, rows cached (`src/grid/PerfHud.tsx`). |
@@ -265,18 +265,24 @@ Done on macOS only (see section c).
 
 ### Summary of what is missing (Tauri, compared with Swift)
 
-1. Schema board: sticky notes, card colors, marquee selection and the help popover (the board itself is done).
-2. Updater: wired but not live (placeholder key, no `latest.json` in the release workflow). Release signing for
-   Windows and Linux. macOS signing and notarization are wired into CI from the `APPLE_*` secrets but have never run.
-3. Agents: one-click install into agent apps; agent runs in the SQL history.
-4. Export to a file (save panel); Tauri only copies to the clipboard.
-5. Read-only run in the UI. (Rows per page no longer applies: the grid scrolls.)
-6. Settings > General (show the SQL panel at start, ask before deleting a connection).
-7. Importing the Swift app's SQL history, "Let Agents Write" flags and settings.
+Re-checked against the code on 2026-11-12, and closed the same day: export CSV/JSON to a file (save
+dialog), Delete Key… for Redis and the "first 5,000 keys" note, Show/Hide Log (Mod+Alt+Y), New Folder
+(Mod+Alt+N; New Window moved to Mod+Alt+Shift+N), Disconnect on Mod+Shift+D as in Swift, Settings > General
+(menu bar/tray, Show the SQL panel, Ask before deleting a connection), "Connected to <name>" in the tray,
+Updates > Last checked, schema-group folding remembered per connection, Notes for Agents in the connection
+sheet, agent runs in the SQL history tagged "via agent", Redis and mongosh highlighting, column completion
+(`table.`, aliases, `db.`), and on the schema board: sticky notes, card colors, marquee (Shift-drag), Space-drag
+and the help popover. Controls now match the Swift screens: History, Terminal and Log are icon buttons in the
+SQL panel bar, Export has its label and menu, table and view icons are gray, grouped form fields have no frame.
 
-Done since the last status: Settings window and accents, MCP server and Let Agents Write, SQL history, Open in
-Terminal, Copy URL with and without password, Back/Forward, localized menu labels, and streaming for MongoDB
-`find`/`aggregate` and Redis replies and `SCAN` loops (CONTRACT.md).
+Still open:
+
+1. Updater: wired but not live (placeholder key, no `latest.json` in the release workflow). Release signing
+   for Windows and Linux; macOS signing and notarization have never run.
+2. Importing the Swift app's SQL history, "Let Agents Write" flags and settings.
+3. Schema board: the Color menu is flat (the shared menu has no submenus).
+4. By design: the grid scrolls instead of pages; edits stay pending until you leave the row (Swift asks per cell);
+   Swift's Database menu is split into Edit, View and Query.
 
 Documentation note: `desktop/README.md` now describes the menu bar (`menu.rs`: File, Edit, View, Query, Help; on
 macOS also the app menu and Window). It was checked under Xvfb on Linux only.

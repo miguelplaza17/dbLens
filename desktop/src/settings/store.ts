@@ -19,6 +19,10 @@ export interface Settings {
   updateAutomatically: boolean;
   /** Keep dbLens running in the tray after the last window closes. */
   keepInTray: boolean;
+  /** Settings > General: the SQL panel shows (View > Show or Hide the SQL Panel changes it too). */
+  showSQLPanel: boolean;
+  /** Settings > General: confirm before deleting a saved connection. */
+  confirmDelete: boolean;
   /** Per kind of database (postgres, mysql…): logo or symbol, and its color. */
   engineIcons: Record<string, EngineIconPref>;
 }
@@ -40,6 +44,8 @@ const defaults: Settings = {
   checkForUpdates: true,
   updateAutomatically: false,
   keepInTray: true,
+  showSQLPanel: true,
+  confirmDelete: true,
   engineIcons: {},
 };
 

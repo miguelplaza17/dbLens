@@ -584,6 +584,8 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   summarize_url: (a) => summarize(String(a.text)),
   mask_url: (a) => mask(String(a.text)),
   check_for_updates: () => ({ available: false, version: null, notes: null }),
+  last_update_check: () => null,
+  set_tray_connection: () => undefined,
   install_update: () => null,
 
   connect: async (a) => {
@@ -742,6 +744,7 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     const r = a.relation as Relation;
     return session(a).info.engine === "redis" ? r.name : `${quote(r.schema)}.${quote(r.name)}`;
   },
+  save_text_file: () => undefined,
   export_result: (a) => {
     const r = a.result as QueryResult;
     if (a.format === "json") {

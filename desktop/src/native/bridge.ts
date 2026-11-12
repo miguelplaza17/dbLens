@@ -110,6 +110,7 @@ export function installNative(model: AppModel): () => void {
   // The menu is shared by all windows, so the focused one sets its state.
   let sent = "";
   let agentsLabel = labels.toggleAgentsWrite;
+  let trayText = "";
   const push = () => {
     if (!document.hasFocus()) return;
     // "Let Agents Write" reads as what the row will do for the open connection.
@@ -118,6 +119,12 @@ export function installNative(model: AppModel): () => void {
     if (wanted !== agentsLabel) {
       agentsLabel = wanted;
       void invoke("set_menu_labels", { labels: { toggleAgentsWrite: wanted } }).catch(() => undefined);
+    }
+    // The tray's "Connected to <name>" follows the focused window.
+    const tray = model.session ? t("Connected to %@", model.session.name) : "";
+    if (tray !== trayText) {
+      trayText = tray;
+      void invoke("set_tray_connection", { text: tray || null }).catch(() => undefined);
     }
     const state = JSON.stringify(menuState(model));
     if (state === sent) return;

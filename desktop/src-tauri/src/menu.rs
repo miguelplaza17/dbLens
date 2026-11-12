@@ -150,7 +150,12 @@ pub fn layout(os: Os) -> Vec<Menus> {
             ],
         });
     }
-    let mut file: Vec<Entry> = vec![A("newConnection"), A("newWindow"), A("openFile")];
+    let mut file: Vec<Entry> = vec![
+        A("newConnection"),
+        A("newFolder"),
+        A("newWindow"),
+        A("openFile"),
+    ];
     if mac {
         file.push(A("importSwift"));
     }
@@ -210,6 +215,7 @@ pub fn layout(os: Os) -> Vec<Menus> {
         S,
         A("toggleSidebar"),
         A("toggleSQLPanel"),
+        A("toggleLog"),
         S,
         A("filterTables"),
         A("searchRows"),

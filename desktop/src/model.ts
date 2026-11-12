@@ -96,7 +96,23 @@ export class AppModel {
   relations: Relation[] = [];
   relationsLoading = false;
   /** Sidebar schemas folded away, by schema name. */
-  collapsedSchemas = new Set<string>();
+  private folded = new Set<string>();
+  private foldedFor: string | null = null;
+  /** Folded schema groups, remembered per saved connection (sidebar.folded.<id>). */
+  get collapsedSchemas(): Set<string> {
+    const id = this.session?.savedId ?? "";
+    if (id !== this.foldedFor) {
+      this.foldedFor = id;
+      let names: string[] = [];
+      try {
+        names = id ? JSON.parse(stored(`sidebar.folded.${id}`, "[]")) : [];
+      } catch {
+        names = [];
+      }
+      this.folded = new Set(Array.isArray(names) ? names : []);
+    }
+    return this.folded;
+  }
 
   // The center pane
   /** The center pane: the table, the SQL result, or the schema board (src/schema). */
@@ -131,6 +147,7 @@ export class AppModel {
 
   // Window
   showSQLPanel = stored("showSQLPanel", "1") === "1";
+  showLog = stored("showLog", "1") === "1";
   showSidebar = true;
   sqlPanelHeight = Number(stored("sqlPanelHeight", "280")) || 280;
   theme: Theme = (new URLSearchParams(location.search).get("theme") as Theme | null) ?? (stored("theme", "dark") as Theme);
@@ -234,7 +251,7 @@ export class AppModel {
   /** Connects first, then saves: only a URL that works is kept (ConnectionSheet.save).
    *  An edited saved connection is tried as typed (masked passwords filled in by
    *  the backend) and saved only once it connects. */
-  async connectNew(draft: { url: string; name: string; ssh: SshConfig | null; editing: SavedConnection | null }) {
+  async connectNew(draft: { url: string; name: string; ssh: SshConfig | null; editing: SavedConnection | null; notes?: string }) {
     const editing = draft.editing;
     await this.closeSession();
     this.connecting = editing ? editing.id : "url";
@@ -250,6 +267,8 @@ export class AppModel {
           ? { id: editing.id, url: draft.url, name: draft.name, ssh: draft.ssh, folderId: editing.folderId }
           : { url: draft.url, name: draft.name, ssh: draft.ssh },
       );
+      const notes = (draft.notes ?? "").trim();
+      if (draft.notes !== undefined && notes !== (saved.agentsNotes ?? "").trim()) await api.setAgentsNotes(saved.id, notes);
       this.session = { ...info, savedId: saved.id, name: saved.name };
       this.connecting = null;
       await this.loadStore();
@@ -436,8 +455,10 @@ export class AppModel {
   }
 
   toggleSchema(schema: string) {
-    if (this.collapsedSchemas.has(schema)) this.collapsedSchemas.delete(schema);
-    else this.collapsedSchemas.add(schema);
+    const folded = this.collapsedSchemas;
+    if (folded.has(schema)) folded.delete(schema);
+    else folded.add(schema);
+    if (this.session?.savedId) store(`sidebar.folded.${this.session.savedId}`, JSON.stringify([...folded]));
     this.changed();
   }
 
@@ -847,6 +868,34 @@ export class AppModel {
     this.changed();
   }
 
+  /** A line in the log with no SQL, like an export. */
+  noteLog(message: string, isError = false) {
+    this.log = { date: new Date(), isError, message, sql: "" };
+    this.changed();
+  }
+
+  /** Redis: DEL the key at once (the sidebar asks first). */
+  async deleteKey(relation: Relation) {
+    const info = this.session;
+    if (!info || relation.kind !== "key") return;
+    const quoted = `"${relation.name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+    try {
+      await api.execute(info.sessionId, `DEL ${quoted}`);
+      this.logOutcome("DEL ?", t("Deleted %@", relation.name));
+      if (this.relation && relationId(this.relation) === relationId(relation)) {
+        this.relation = null;
+        this.tableResult = null;
+        this.tableSource?.close();
+        this.tableSource = null;
+        this.tableCount = undefined;
+      }
+      await this.loadRelations();
+    } catch (e) {
+      this.logError(errorText(e), "DEL ?");
+    }
+    this.changed();
+  }
+
   private logOutcome(sql: string, command: string) {
     this.log = { date: new Date(), isError: false, message: command, sql };
   }
@@ -982,9 +1031,27 @@ export class AppModel {
 
   // MARK: - Window
 
+  toggleLog() {
+    this.showLog = !this.showLog;
+    store("showLog", this.showLog ? "1" : "0");
+    this.changed();
+  }
+
   toggleSQLPanel() {
     this.showSQLPanel = !this.showSQLPanel;
     store("showSQLPanel", this.showSQLPanel ? "1" : "0");
+    void setSettings({ showSQLPanel: this.showSQLPanel }).catch(() => undefined);
+    this.changed();
+  }
+
+  /** Settings > General, live from every window. */
+  confirmDelete = true;
+  applySettings(s: { showSQLPanel: boolean; confirmDelete: boolean }) {
+    this.confirmDelete = s.confirmDelete;
+    if (s.showSQLPanel !== this.showSQLPanel) {
+      this.showSQLPanel = s.showSQLPanel;
+      store("showSQLPanel", s.showSQLPanel ? "1" : "0");
+    }
     this.changed();
   }
 

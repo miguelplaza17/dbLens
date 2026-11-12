@@ -15,9 +15,10 @@
 //! `DatabaseSession::read_only`); writing needs "Let Agents Write" on the
 //! connection, and adding or removing connections needs the global "Let agents
 //! add and remove connections" (both kept in the store, store.rs).
-//! Port of `Sources/dbLens/MCPServer.swift`. The Swift app also appends what
-//! agents run to the connection's SQL history; that history lives in the
-//! webview here, so it is not written.
+//! Port of `Sources/dbLens/MCPServer.swift`. Like the Swift app, what agents
+//! run (query, test_changes, execute, install_extension) is appended to the
+//! connection's SQL history, tagged "via agent" (`history::record_agent_run`,
+//! under the store folder's lock; not with a store in memory).
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -449,6 +450,19 @@ impl Server {
         .map_err(|e| DbError::msg(e.to_string()))?
     }
 
+    /// Adds a run to the connection's SQL history, "via agent". The history
+    /// is a nicety: a failure to write it never fails the tool call.
+    async fn record(&self, connection: &str, sql: &str, failed: bool) {
+        let Stores::Dir(dir, _) = &*self.stores else {
+            return;
+        };
+        let (dir, connection, sql) = (dir.clone(), connection.to_string(), sql.to_string());
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::history::record_agent_run(&dir, &connection, &sql, failed)
+        })
+        .await;
+    }
+
     fn slot(&self, id: &str) -> Slot {
         self.sessions
             .lock()
@@ -716,22 +730,23 @@ impl Server {
                 let (saved, conn) = self.open(arguments, name, flight).await?;
                 let extension = text_of(arguments, "name")?;
                 let schema = arguments.get("schema").and_then(Value::as_str);
-                install(&saved, conn.session.as_ref(), &extension, schema).await
+                install(self, &saved, conn.session.as_ref(), &extension, schema).await
             }
             "describe_table" => {
                 let (_, conn) = self.open(arguments, name, flight).await?;
                 describe(conn.session.as_ref(), &text_of(arguments, "table")?).await
             }
             "query" => {
-                let (_, conn) = self.open(arguments, name, flight).await?;
+                let (saved, conn) = self.open(arguments, name, flight).await?;
                 let statement = text_of(arguments, "query")?;
                 let limit = arguments
                     .get("max_rows")
                     .and_then(Value::as_i64)
                     .unwrap_or(100)
                     .clamp(1, MAX_ROWS as i64) as usize;
-                let execution = conn.session.read_only(&statement).await?;
-                Ok(output(&execution, limit))
+                let execution = conn.session.read_only(&statement).await;
+                self.record(&saved.id, &statement, execution.is_err()).await;
+                Ok(output(&execution?, limit))
             }
             "test_changes" => {
                 let (saved, conn) = self.open(arguments, name, flight).await?;
@@ -740,7 +755,10 @@ impl Server {
                     &saved,
                     "Testing runs the statements (and locks what they touch) before undoing them",
                 )?;
-                match conn.session.rehearse(&script).await {
+                let rehearsed = conn.session.rehearse(&script).await;
+                self.record(&saved.id, &format!("-- test\n{script}"), rehearsed.is_err())
+                    .await;
+                match rehearsed {
                     Ok(execution) => {
                         let mut out = output(&execution, 20);
                         out["rolled_back"] =
@@ -757,7 +775,13 @@ impl Server {
                 let script = text_of(arguments, "statements")?;
                 require_write(&saved, "Writing")?;
                 let atomic = arguments.get("atomic").and_then(Value::as_bool);
-                execute(conn.session.as_ref(), &script, atomic).await
+                let result = execute(conn.session.as_ref(), &script, atomic).await;
+                // Refused up front (atomic asked for, not possible): nothing ran.
+                let ran = !matches!(&result, Err(e) if e.to_string().contains(NOTHING_RAN));
+                if ran {
+                    self.record(&saved.id, &script, result.is_err()).await;
+                }
+                result
             }
             other => Err(DbError::msg(format!("Unknown tool: {other}"))),
         }
@@ -960,6 +984,9 @@ impl Server {
         }))
     }
 }
+
+/// Part of the error `execute` returns when `atomic: true` was refused.
+const NOTHING_RAN: &str = "Nothing ran; pass atomic: false";
 
 fn require_write(saved: &SavedConnection, what: &str) -> DbResult<()> {
     if saved.agents_can_write {
@@ -1234,6 +1261,7 @@ async fn extensions(session: &dyn DatabaseSession) -> DbResult<Value> {
 /// CREATE EXTENSION, for Postgres, where agents may write. The name must be one
 /// pg_available_extensions lists.
 async fn install(
+    server: &Server,
     saved: &SavedConnection,
     session: &dyn DatabaseSession,
     name: &str,
@@ -1271,7 +1299,9 @@ async fn install(
     if let Some(schema) = schema.filter(|s| !s.is_empty()) {
         statement += &format!(" schema {}", session.quote(schema));
     }
-    session.execute(&statement).await?;
+    let created = session.execute(&statement).await;
+    server.record(&saved.id, &statement, created.is_err()).await;
+    created?;
     let literal = format!("'{}'", name.replace('\'', "''"));
     let version = session
         .read_only(&format!(

@@ -19,6 +19,7 @@ export function ConnectionSheet({ editing, initialUrl }: { editing: SavedConnect
   const [url, setUrl] = useState(initialUrl ?? "");
   const [name, setName] = useState(editing?.name ?? "");
   const [fields, setFields] = useState<UrlFields>({ engine: "postgres", host: "", port: "", database: "", user: "", password: "", sslmode: "" });
+  const [notes, setNotes] = useState(editing?.agentsNotes ?? "");
   const [useSSH, setUseSSH] = useState(!!editing?.ssh);
   const [ssh, setSsh] = useState({
     host: editing?.ssh?.host ?? "",
@@ -91,7 +92,7 @@ export function ConnectionSheet({ editing, initialUrl }: { editing: SavedConnect
     setWorking(true);
     setError(null);
     try {
-      await model.connectNew({ url: text, name: name.trim(), ssh: engine === "sqlite" ? null : sshConfig, editing });
+      await model.connectNew({ url: text, name: name.trim(), ssh: engine === "sqlite" ? null : sshConfig, editing, notes });
       model.open(null);
     } catch (e) {
       setError(errorText(e));
@@ -210,6 +211,16 @@ export function ConnectionSheet({ editing, initialUrl }: { editing: SavedConnect
             <label className="form-row">
               <span className="form-label">{t("Name")}</span>
               <input value={name} placeholder={summary?.suggestedName ?? t("Optional")} spellCheck={false} onChange={(e) => setName(e.target.value)} />
+            </label>
+            <label className="form-row">
+              <span className="form-label">{t("Notes for Agents")}</span>
+              <textarea
+                className="notes-field"
+                rows={2}
+                value={notes}
+                placeholder={t("Optional: what it holds, naming conventions, tables to avoid")}
+                onChange={(e) => setNotes(e.target.value)}
+              />
             </label>
           </div>
           <p className="form-footer">{footer}</p>

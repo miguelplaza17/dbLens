@@ -19,7 +19,7 @@ import { Icon } from "./components/Icon";
 import { ResultPane, confirmDeleteRows } from "./components/ResultPane";
 import { RowEditor } from "./components/RowEditor";
 import { ContextMenu, Sheet } from "./components/Sheet";
-import { Sidebar } from "./components/Sidebar";
+import { NEW_FOLDER_EVENT, Sidebar } from "./components/Sidebar";
 import { SQLPanel } from "./components/SQLPanel";
 import { settleSQLEditor } from "./components/SQLEditor";
 import { SchemaBoard } from "./schema/SchemaBoard";
@@ -65,7 +65,7 @@ export default function App() {
   // Back and Forward between the tables and results you opened (src/nav.ts).
   useEffect(() => nav.install(model), [model]);
   // Settings > Appearance, live from any window (src/settings/store.ts).
-  useEffect(() => followSettings((theme) => model.setTheme(theme)), [model]);
+  useEffect(() => followSettings((theme) => model.setTheme(theme), (s) => model.applySettings(s)), [model]);
 
   const title = model.session?.name ?? "dbLens";
   const subtitle = !model.session
@@ -323,6 +323,11 @@ function perform(model: AppModel, action: Action, fields: { filter: HTMLInputEle
       return model.toggleSidebar();
     case "toggleSQLPanel":
       return model.toggleSQLPanel();
+    case "newFolder":
+      if (!model.showSidebar) model.toggleSidebar();
+      return void window.dispatchEvent(new Event(NEW_FOLDER_EVENT));
+    case "toggleLog":
+      return model.toggleLog();
     case "filterTables":
       if (!model.showSidebar) model.toggleSidebar();
       return requestAnimationFrame(() => fields.filter?.focus());

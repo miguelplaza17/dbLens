@@ -31,7 +31,7 @@ export function HistoryButton() {
     <>
       <button
         ref={button}
-        className={`button${open ? " active" : ""}`}
+        className={`icon-button${open ? " active" : ""}`}
         disabled={!model.session}
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="dialog"
@@ -40,7 +40,6 @@ export function HistoryButton() {
         aria-label={t("History")}
       >
         <Icon name="history" size={14} />
-        {t("History")}
       </button>
       {open && <Popover anchor={button} onClose={() => setOpen(false)} />}
     </>
@@ -130,7 +129,7 @@ function Popover({ anchor, onClose }: { anchor: React.RefObject<HTMLButtonElemen
                 <span className="history-text">{firstLines(entry.sql)}</span>
                 <span className="history-date tertiary">
                   {when(entry.date)}
-                  {entry.viaAgent ? ` · ${t("Agent")}` : ""}
+                  {entry.viaAgent ? ` · ${t("via agent")}` : ""}
                 </span>
               </button>
               <button className="button small" onClick={() => pick(entry, false)} title={t("Put it in the editor")}>

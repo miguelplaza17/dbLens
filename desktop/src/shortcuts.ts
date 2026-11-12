@@ -17,6 +17,8 @@ export type Action =
   | "refresh"
   | "toggleSidebar"
   | "toggleSQLPanel"
+  | "toggleLog"
+  | "newFolder"
   | "filterTables"
   | "searchRows"
   | "previousPage"

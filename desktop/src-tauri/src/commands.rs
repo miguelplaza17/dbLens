@@ -585,6 +585,15 @@ pub fn export_result(result: QueryResult, format: String) -> DbResult<String> {
     }
 }
 
+/// Export to a file: writes the text a save panel's path asked for.
+#[tauri::command]
+pub async fn save_text_file(path: String, text: String) -> DbResult<()> {
+    tauri::async_runtime::spawn_blocking(move || std::fs::write(&path, text))
+        .await
+        .map_err(|e| DbError::Message(e.to_string()))?
+        .map_err(|e| DbError::Message(e.to_string()))
+}
+
 // MARK: - Saved connections
 
 #[tauri::command]

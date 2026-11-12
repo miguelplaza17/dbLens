@@ -66,3 +66,50 @@
   background: var(--accent-faint);
   color: var(--accent-text);
 }
+
+/* A note's text field, over the canvas at the note's place. */
+.schema-note-editor {
+  position: absolute;
+  box-sizing: border-box;
+  border: 0;
+  outline: 2px solid var(--accent);
+  resize: none;
+  overflow: hidden;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-weight: 500;
+  box-shadow: var(--shadow);
+}
+
+/* The keyboard button's popover: the board's mouse and key gestures. */
+.board-help {
+  position: fixed;
+  z-index: 30;
+  max-width: calc(100vw - var(--space-lg));
+  padding: var(--space-md);
+  border-radius: var(--radius-lg);
+  background: var(--raised);
+  box-shadow: var(--shadow);
+  font-size: var(--font-size-small);
+}
+
+.board-help dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-sm) var(--space-lg);
+  margin: 0;
+}
+
+.board-help-row {
+  display: contents;
+}
+
+.board-help dt {
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.board-help dd {
+  margin: 0;
+  color: var(--text-secondary);
+}

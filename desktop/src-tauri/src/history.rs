@@ -4,6 +4,12 @@
 //! `sql-history.json` in the data folder, or memory only with
 //! `DBLENS_STORE=memory`).
 //!
+//! The MCP server (`dblens --mcp`) is another process that appends what agents
+//! run (`record_agent_run`, `via_agent` true). Both processes change the file
+//! only under the store folder's lock (`connections.lock`) and read it again
+//! first, so neither loses the other's entries; the list is read from the file
+//! each time, so the popover shows what an agent ran since.
+//!
 //! A connection that was never saved (a pasted URL) has no id and no history.
 
 use std::collections::BTreeMap;
@@ -15,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::session::{DbError, DbResult};
-use crate::store::Store;
+use crate::store::{lock_dir, Store};
 
 /// How many runs one connection keeps.
 pub const LIMIT: usize = 200;
@@ -76,6 +82,10 @@ impl HistoryState {
     }
 
     pub fn list(&self, connection: &str) -> Vec<Entry> {
+        // Another process may have added entries: the file is the truth.
+        if let Some(path) = &self.path {
+            return load(path).remove(connection).unwrap_or_default();
+        }
         self.table
             .lock()
             .map(|t| t.get(connection).cloned().unwrap_or_default())
@@ -101,12 +111,39 @@ impl HistoryState {
             .table
             .lock()
             .map_err(|_| DbError::msg("internal lock"))?;
+        let Some(path) = &self.path else {
+            body(&mut table);
+            return Ok(());
+        };
+        let fail = |e: std::io::Error| DbError::Message(format!("SQL history: {e}"));
+        let dir = path.parent().unwrap_or(Path::new("."));
+        fs::create_dir_all(dir).map_err(fail)?;
+        let _lock = lock_dir(dir)?;
+        *table = load(path);
         body(&mut table);
-        match &self.path {
-            Some(path) => save(path, &table),
-            None => Ok(()),
-        }
+        save(path, &table)
     }
+}
+
+/// Appends a run by an agent to `sql-history.json` in the store folder `dir`,
+/// from the MCP server process. Safe next to the app: see the module notes.
+pub fn record_agent_run(dir: &Path, connection: &str, sql: &str, failed: bool) -> DbResult<()> {
+    if sql.trim().is_empty() {
+        return Ok(());
+    }
+    HistoryState::at(Some(dir.join(FILE))).add(
+        connection,
+        Entry {
+            sql: sql.to_string(),
+            failed,
+            date: now(),
+            via_agent: true,
+        },
+    )
+}
+
+fn now() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 fn load(path: &Path) -> Table {
@@ -165,7 +202,7 @@ pub fn add_sql_history(
         Entry {
             sql,
             failed,
-            date: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            date: now(),
             via_agent: false,
         },
     )
@@ -259,6 +296,43 @@ mod tests {
         let path = dir.path().join(FILE);
         fs::write(&path, b"not json").unwrap();
         assert!(HistoryState::at(Some(path)).list("a").is_empty());
+    }
+
+    #[test]
+    fn agent_runs_are_tagged_and_the_app_sees_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE);
+        let app = HistoryState::at(Some(path));
+        app.add("a", entry("select 1")).unwrap();
+        record_agent_run(dir.path(), "a", "select 2", true).unwrap();
+        record_agent_run(dir.path(), "a", "  ", false).unwrap();
+        // The app's next write keeps the agent's entry.
+        app.add("a", entry("select 3")).unwrap();
+        let list = app.list("a");
+        let seen: Vec<_> = list.iter().map(|e| (e.sql.as_str(), e.via_agent)).collect();
+        assert_eq!(
+            seen,
+            [("select 3", false), ("select 2", true), ("select 1", false)]
+        );
+        assert!(list[1].failed);
+    }
+
+    #[test]
+    fn two_writers_never_lose_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(FILE);
+        let app = std::sync::Arc::new(HistoryState::at(Some(path)));
+        let agent_dir = dir.path().to_path_buf();
+        let agent = std::thread::spawn(move || {
+            for i in 0..30 {
+                record_agent_run(&agent_dir, "a", &format!("agent {i}"), false).unwrap();
+            }
+        });
+        for i in 0..30 {
+            app.add("a", entry(&format!("app {i}"))).unwrap();
+        }
+        agent.join().unwrap();
+        assert_eq!(app.list("a").len(), 60);
     }
 
     #[cfg(unix)]

@@ -113,7 +113,7 @@ export function RowEditor({ row }: { row: number | null }) {
         )}
         <footer className="sheet-actions">
           {!isNew && model.canEditRows && (
-            <button type="button" className="button destructive-text" onClick={() => confirmDeleteRows(model, [row])}>
+            <button type="button" className="button" onClick={() => confirmDeleteRows(model, [row])}>
               {t("Delete Row…")}
             </button>
           )}
