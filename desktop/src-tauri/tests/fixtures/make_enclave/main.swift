@@ -1,6 +1,6 @@
 // Test helper for src/import_swift.rs: writes connections.key and connections.enc
 // into a folder exactly as the dbLens for Mac does, by compiling the Swift app's
-// own Sources/DBLensKit/SecretBox.swift with this file. Throwaway folders only.
+// own SecretBox.swift (copied here from the retired Swift app) with this file. Throwaway folders only.
 //
 //   swiftc SecretBox.swift main.swift -o make-fixture
 //   make-fixture <folder> <plain-json-file>

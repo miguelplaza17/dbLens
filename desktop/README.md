@@ -3,7 +3,7 @@
 A fast, minimal database client: paste a connection
 string, click a table, see and edit the rows, run SQL. PostgreSQL, MySQL/MariaDB,
 SQLite, Redis/Valkey and MongoDB. Built with Tauri 2 (Rust + React). This is the
-dbLens released on every platform. The SwiftUI app in the repository root was the
+dbLens released on every platform. The SwiftUI app (retired, in git history) was the
 Mac app until 1.4; on the Mac this app keeps its bundle id
 (`io.github.miguelplaza17.dblens`, `src-tauri/tauri.macos.conf.json`), so it
 installs over it, and on first launch it brings the Swift app's connections,

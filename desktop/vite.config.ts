@@ -13,8 +13,7 @@ export default defineConfig({
     strictPort: true,
     host: host || false,
     hmr: host ? { protocol: "ws", host, port: 1421 } : undefined,
-    // The translations live in the repo's Localization/ folder, shared with the macOS app.
-    fs: { allow: [".", "../Localization"] },
+    fs: { allow: ["."] },
     watch: { ignored: ["**/src-tauri/**"] },
   },
   envPrefix: ["VITE_", "TAURI_ENV_*"],

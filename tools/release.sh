@@ -7,7 +7,7 @@
 #   latest.json                     the Tauri update feed (merged with the
 #                                   Windows and Linux entries CI published)
 #   appcast.xml                     Sparkle feed: moves people still on the old
-#                                   Swift app to this one (same bundle id)
+#                                   Swift app (1.4 and earlier) to this one
 #
 # Once per Mac:
 #   1. Xcode > Settings > Accounts > Manage Certificates > + > Developer ID Application
@@ -52,10 +52,12 @@ build=$(date +%Y%m%d%H%M)
 ditto "$target/universal-apple-darwin/release/bundle/macos/$name.app" "$dist/$name.app"
 app="$dist/$name.app"
 
-# The Liquid Glass icon the Mac app always had (Icon/AppIcon.icon, compiled by
-# tools/make_icon.sh into Resources/), then the signature again over it.
-cp "$here/Resources/Assets.car" "$app/Contents/Resources/Assets.car"
-cp "$here/Resources/AppIcon.icns" "$app/Contents/Resources/icon.icns"
+# The Liquid Glass icon (desktop/src-tauri/icons/mac/AppIcon.icon, compiled to
+# Assets.car and AppIcon.icns next to it; see desktop/README.md), then the
+# signature again over it.
+icons="$here/desktop/src-tauri/icons/mac"
+cp "$icons/Assets.car" "$app/Contents/Resources/Assets.car"
+cp "$icons/AppIcon.icns" "$app/Contents/Resources/icon.icns"
 /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$app/Contents/Info.plist" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string AppIcon" "$app/Contents/Info.plist"
 codesign --force --options runtime --timestamp --sign "$identity" "$app"

@@ -103,8 +103,8 @@ npm install && npm run tauri build
 ```
 
 Requirements, tests, releasing and status are in [desktop/README.md](desktop/README.md).
-The SwiftUI app that was dbLens for the Mac until 1.4 is still in the repository root
-(`./build.sh`, `tools/release-swift.sh`), no longer released.
+The SwiftUI app that was dbLens for the Mac until 1.4 is retired; it is in the git history
+before 1.5.0.
 
 ## MCP server (for agents)
 

@@ -1,5 +1,5 @@
 //! File > Import Connections from dbLens for Mac…: copies the saved
-//! connections of the Swift app (Sources/, discontinued) into this app's store.
+//! connections of the Swift app (dbLens for Mac up to 1.4, retired) into this app's store.
 //!
 //! What the Swift app keeps, in `~/Library/Application Support/dbLens/`:
 //! - `dbLens.store`: SwiftData (a Core Data SQLite store). Table
@@ -1521,7 +1521,7 @@ mod tests {
 
     /// The Secure Enclave path on this Mac, end to end: a throwaway Swift data
     /// folder whose `connections.key` and `connections.enc` are written by the
-    /// Swift app's own SecretBox (Sources/DBLensKit/SecretBox.swift, compiled
+    /// Swift app's own SecretBox (a copy in tests/fixtures/make_enclave/, compiled
     /// with tests/fixtures/make_enclave/main.swift), then read back through
     /// `read_swift_app` and the helper in swift/SecureEnclaveOpen.swift.
     /// Skipped (with a message) on a Mac without a usable Secure Enclave.
@@ -1529,7 +1529,7 @@ mod tests {
     #[test]
     fn a_secure_enclave_folder_made_by_the_swift_code_imports() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let secret_box = root.join("../../Sources/DBLensKit/SecretBox.swift");
+        let secret_box = root.join("tests/fixtures/make_enclave/SecretBox.swift");
         let main = root.join("tests/fixtures/make_enclave/main.swift");
         let work = tempfile::tempdir().unwrap();
         let tool = work.path().join("make-fixture");

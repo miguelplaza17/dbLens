@@ -1,5 +1,5 @@
 // UI text: English is the source; each key is the exact English text, shared
-// with the macOS app's Localization/<lang>.json where the text is the same.
+// with the wording the retired Swift app used where the text is the same.
 // src/i18n/en.json lists every key (key → same text); src/i18n/pt-BR.json has
 // the Portuguese. Interpolations use the Swift format specifiers in keys
 // (%@ text, %lld number; %1$@ positional in values).
